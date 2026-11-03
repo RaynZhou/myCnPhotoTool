@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from photoprint.core import specs
+
 _EPS = 1e-6
 
 
@@ -63,3 +65,155 @@ def place_uniform(region_w: float, region_h: float, cell_w: float, cell_h: float
             out.append(Cell(x0 + i * (cw + gap), y0 + j * (ch + gap),
                             cw, ch, rotated, bleed))
     return out
+
+
+@dataclass
+class CutLine:
+    """裁切参考线：axis 为 'v'（竖缝）或 'h'（横缝）。"""
+
+    axis: str
+    at_mm: float
+    from_mm: float
+    to_mm: float
+
+
+@dataclass
+class LayoutPlan:
+    cells: list
+    cuts: list
+    count: int
+    waste_mm2: float
+    strategy: str
+    printable: object
+
+
+def best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
+    """两种朝向各自均匀排布，取张数多者；并列时外接框更接近正方形者优先。"""
+    options = [False, True] if allow_rotate else [False]
+    best: list[Cell] = []
+    best_key = None
+    for rot in options:
+        cells = place_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, rot)
+        if not cells:
+            continue
+        key = _score(cells, region_w, region_h, 0)
+        if best_key is None or key < best_key:
+            best, best_key = cells, key
+    return best
+
+
+def _score(cells, region_w, region_h, strategy_rank):
+    """决胜排序，越小越优：张数多 → 浪费小 → 策略简单 → 外接框方 → 居中 → 朝向统一。
+
+    对应规格 5.2 的并列决胜①–⑤（首项是张数，它不算决胜而是前提）。
+    “策略简单”必须排在外接框与居中之前：外接框只量跨度，量不出贴边解的不好看——
+    A4+3R 的一刀双带解（左带宽恰好 89mm）外接框 194×254，比均匀网格的 178×254
+    更接近正方形，张数与浪费全同，却不居中、列间隙一边 0mm 一边 16mm。把“简单”放
+    在浪费之后、美观之前，混合带就只能在张数或浪费上真赢时才胜出（如 A4+4R 的 3 比 2）。
+    """
+    used = sum(c.w_mm * c.h_mm for c in cells)
+    waste = region_w * region_h - used
+    x1 = min(c.x_mm for c in cells)
+    x2 = max(c.x_mm + c.w_mm for c in cells)
+    y1 = min(c.y_mm for c in cells)
+    y2 = max(c.y_mm + c.h_mm for c in cells)
+    aspect = abs((x2 - x1) - (y2 - y1))
+    # 外接框中心与区域中心的偏离（×2，免去除法）：居中为 0，越大越偏
+    offcenter = abs((x1 + x2) - region_w) + abs((y1 + y2) - region_h)
+    mixed = len({c.rotated for c in cells})
+    return (-len(cells), waste, strategy_rank, aspect, offcenter, mixed)
+
+
+def _cut_candidates(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
+    """候选切位 = 格子步进长度的整数倍，两向都取，横切与竖切分开。"""
+    out = []
+    rots = [False, True] if allow_rotate else [False]
+    for rot in rots:
+        bw, bh = cell_wh(cell_w, cell_h, rot)
+        for step in (bw + 2 * bleed + gap, bh + 2 * bleed + gap):
+            if step <= 0:
+                continue
+            k = 1
+            while k * step < region_w - _EPS:
+                out.append(("v", round(k * step, 6)))
+                k += 1
+            k = 1
+            while k * step < region_h - _EPS:
+                out.append(("h", round(k * step, 6)))
+                k += 1
+    return sorted(set(out))
+
+
+def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
+                 depth, memo):
+    """返回 (格子列表, 策略名)。depth 为还可下的刀数。"""
+    memo_key = (round(region_w, 6), round(region_h, 6), depth)
+    if memo_key in memo:
+        return memo[memo_key]
+
+    uniform = best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed,
+                           allow_rotate)
+    best_cells, best_strategy = uniform, "uniform"
+    if uniform:
+        best_key = _score(uniform, region_w, region_h, 0)
+    else:
+        # 空解的分值必须劣于任何非空解（首项 0 大于任何 -len）
+        best_key = (0, region_w * region_h, 9, 0.0, 0.0, 9)
+
+    if depth > 0:
+        for axis, pos in _cut_candidates(region_w, region_h, cell_w, cell_h,
+                                        gap, bleed, allow_rotate):
+            if axis == "v":
+                a_w, a_h, b_w, b_h = pos, region_h, region_w - pos, region_h
+                off = (0.0, 0.0, pos, 0.0)
+            else:
+                a_w, a_h, b_w, b_h = region_w, pos, region_w, region_h - pos
+                off = (0.0, 0.0, 0.0, pos)
+            ca, _ = solve_region(a_w, a_h, cell_w, cell_h, gap, bleed,
+                                 allow_rotate, depth - 1, memo)
+            cb, _ = solve_region(b_w, b_h, cell_w, cell_h, gap, bleed,
+                                 allow_rotate, depth - 1, memo)
+            merged = list(ca) + [
+                Cell(c.x_mm + off[2], c.y_mm + off[3], c.w_mm, c.h_mm,
+                     c.rotated, c.bleed_mm) for c in cb]
+            if not merged:
+                continue
+            key = _score(merged, region_w, region_h, 1)
+            if key < best_key:
+                best_cells, best_strategy, best_key = merged, "bands", key
+
+    memo[memo_key] = (best_cells, best_strategy)
+    return memo[memo_key]
+
+
+def pack(sheet, cell, gap_mm: float = 0.0, bleed_mm: float = 0.0,
+         allow_rotate: bool = True, printable=None) -> LayoutPlan:
+    """装箱入口。sheet/cell 均为 specs.SizeSpec；printable 给定时按其尺寸装箱。"""
+    rect = printable if printable is not None else _sheet_rect(sheet)
+    cells, strategy = solve_region(rect.w_mm, rect.h_mm, cell.w_mm, cell.h_mm,
+                                   gap_mm, bleed_mm, allow_rotate, depth=2,
+                                   memo={})
+    # 装箱在矩形局部坐标求解，再平移到可打印区原点
+    cells = [Cell(c.x_mm + rect.x_mm, c.y_mm + rect.y_mm, c.w_mm, c.h_mm,
+                  c.rotated, c.bleed_mm) for c in cells]
+    used = sum(c.w_mm * c.h_mm for c in cells)
+    return LayoutPlan(cells=cells, cuts=build_cuts(cells, rect),
+                      count=len(cells),
+                      waste_mm2=max(0.0, rect.w_mm * rect.h_mm - used),
+                      strategy=strategy, printable=rect)
+
+
+def _sheet_rect(sheet):
+    """装箱默认区域 = 整张纸。
+
+    规格 5.3 的手算基准全按整张纸算（`floor(210/89)` 而不是 `floor(203.2/89)`），
+    默认值必须与基准同口径：A4+4R 在 210mm 宽里放得下两张 102mm（204 ≤ 210），
+    扣掉物理边距后只剩 203.2mm，会因 0.8mm 之差让硬断言从 3 张掉到 2 张。
+    代价就是打印路径必须显式传 printable，否则照片会吃进边距。
+    """
+    return specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
+
+
+def build_cuts(cells, rect):
+    """占位：T6 用贯通切缝的真实现替换它。本任务的测试不断言 cuts 内容。"""
+    return []

@@ -1453,7 +1453,7 @@ git commit -m "feat: 拼版混合带三级搜索与决胜排序"
 ### Task 6: 裁切参考线生成与分页计算
 
 **Files:**
-- Modify: `photoprint/core/pack.py`（用真实现替换 `build_cuts`，追加 `needed_sheets`）
+- Modify: `photoprint/core/pack.py`（用真实现替换 `build_cuts`，追加 `needed_sheets`，收紧 `LayoutPlan` 字段类型）
 - Test: `tests/test_pack_cuts.py`
 
 **Interfaces:**
@@ -1530,6 +1530,33 @@ def test_no_seam_on_paper_border():
 def test_merge_spans_joins_touching_intervals():
     got = pack.merge_spans([(0.0, 10.0), (10.0, 20.0), (30.0, 40.0)])
     assert got == [(0.0, 20.0), (30.0, 40.0)]
+
+
+def test_no_cell_overlaps_and_stays_inside_region():
+    """不变量：任何预设组合下格子不得越出装箱矩形，也不得互相重叠。
+
+    T5 只校了 `used <= w*h`，那个断言既排除不了越界也排除不了重叠（两者
+    的面积可以完全合法）。切缝的正确性建立在“格子不重叠”这个前提上，故与切缝
+    测试同文件。已真跑 756 组（预设对 × (gap, bleed) 三种）确认 0 违规。
+    """
+    for sheet in specs.PAPER_PRESETS:
+        for cell in specs.CELL_PRESETS + specs.PAPER_PRESETS:
+            if cell.key == sheet.key and cell.role == "paper":
+                continue
+            for gap, bleed in ((0.0, 0.0), (2.0, 0.0), (0.0, 3.0)):
+                plan = pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed)
+                rect = plan.printable
+                tag = (sheet.key, cell.key, gap, bleed)
+                for c in plan.cells:
+                    assert c.x_mm >= rect.x_mm - 1e-6, tag
+                    assert c.y_mm >= rect.y_mm - 1e-6, tag
+                    assert c.x_mm + c.w_mm <= rect.x_mm + rect.w_mm + 1e-6, tag
+                    assert c.y_mm + c.h_mm <= rect.y_mm + rect.h_mm + 1e-6, tag
+                for i, a in enumerate(plan.cells):
+                    for b in plan.cells[i + 1:]:
+                        ox = min(a.x_mm + a.w_mm, b.x_mm + b.w_mm) - max(a.x_mm, b.x_mm)
+                        oy = min(a.y_mm + a.h_mm, b.y_mm + b.h_mm) - max(a.y_mm, b.y_mm)
+                        assert not (ox > 1e-6 and oy > 1e-6), (tag, a, b)
 
 
 def test_needed_sheets():
@@ -1620,20 +1647,43 @@ def needed_sheets(plan_count: int, photo_count: int) -> int:
 元组传名字而不是写四份 `if axis == "v"` 的分支，是为了让两轴共用同一段
 推导代码；分支写到一起会漏改其中一轴。
 
-- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 4: 顺带订正 T5 评审留下的三处（不改行为）**
+
+T5 复审 Approved，但留了三条 Minor，都是只碰 `pack.py` / T5 测试文件的极小改动，归入本任务一并清：
+
+1. 收紧 `LayoutPlan` 的字段类型（现在 `cells: list` / `cuts: list` / `printable: object` 丢了类型信号，T6 开始 `cuts` 真产 `CutLine`、T9 要消费 `printable`）：
+
+```python
+@dataclass
+class LayoutPlan:
+    cells: list[Cell]
+    cuts: list[CutLine]
+    count: int
+    waste_mm2: float
+    strategy: str
+    printable: specs.RectMM
+```
+
+`from __future__ import annotations` 已在文件顶部，这些注解不会在运行期求值，`specs` 也已真实 import，不构成循环。
+
+2. `best_uniform` 的 docstring 只写了“外接框更接近正方形者优先”，但 `_score` 的元组里还有居中偏差与朝向两项生效。补成：“两种朝向各自均匀排布，取张数多者；并列时外接框更接近正方形且更居中者优先。”
+
+3. `tests/test_pack_bands.py::test_a4_holds_three_4r_only_via_band_split` 的 docstring 写“切位 y=152 分两带”，而实现报出的是同分的对称解 y=102（两支 `_score` 元组逐位相等，`_cut_candidates` 排序后取前者）。把这句话改成：“单网格最多 2；横切一刀分两带（一支为切位 y=152：上 2 竖 + 下 1 横，另一支 y=102 与之对称）得 3。两支同分，实际报出哪支取决于候选切位的排序，本测试只钉张数与混合朝向。”不得动断言本身。
+
+- [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest tests/test_pack_cuts.py -v`
-Expected: PASS（7 passed）
+Expected: PASS（8 passed）
 
-- [ ] **Step 5: 全量回归**
+- [ ] **Step 6: 全量回归**
 
 Run: `python -m pytest -v`
-Expected: 全绿（57 passed：units 6 + specs 12 + store 15 + pack 三组 24）
+Expected: 全绿（58 passed：units 6 + specs 12 + store 15 + pack 三组 25）
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add photoprint/core/pack.py tests/test_pack_cuts.py
+git add photoprint/core/pack.py tests/test_pack_cuts.py tests/test_pack_bands.py
 git commit -m "feat: 裁切参考线推导与分页计算"
 ```
 

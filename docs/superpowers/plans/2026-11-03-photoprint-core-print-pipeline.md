@@ -252,7 +252,7 @@ git commit -m "feat: 项目骨架与 mm/像素唯一换算入口"
 - Consumes: `units.ppmm`
 - Produces:
   - `specs.Margins(top: float, bottom: float, left: float, right: float)`
-  - `specs.SizeSpec(key, label, w_mm, h_mm, role, origin, borderless, margins, margin_source, driver_paper_code, driver_paper_name)`
+  - `specs.SizeSpec(key, label, w_mm, h_mm, role, origin, borderless, margins, margin_source, driver_paper_name, driver_paper_code)`（字段顺序以此为准，数据类定义与 T3 的位置构造均按此序）
   - `specs.RectMM(x_mm, y_mm, w_mm, h_mm)`
   - `specs.PAPER_PRESETS: list[SizeSpec]`、`specs.CELL_PRESETS: list[SizeSpec]`、`specs.ALL_PRESETS: list[SizeSpec]`
   - `specs.find_spec(key: str) -> SizeSpec`
@@ -342,7 +342,12 @@ def test_custom_illegal_12inch_is_blocked():
 
 
 def test_custom_illegal_below_length_floor():
-    ok, msg = specs.custom_size_is_legal(100.0, 80.0)
+    """80×70：两个方向当宽度都 ∈ 55–215.9，但当长度都 < 89 ⇒ 只违反长度下限。
+
+    不得用 100×80 做这个用例：允许横竖交换后 80 当宽、100 当长完全合法，
+    而卡片 91×55 结构同形（只能靠交换才合法），任何“让 100×80 不合法”的改法都会误判死卡片。
+    """
+    ok, msg = specs.custom_size_is_legal(80.0, 70.0)
     assert ok is False
     assert "89" in msg
 
@@ -406,7 +411,7 @@ class SizeSpec:
     w_mm: float
     h_mm: float
     role: str  # paper=可当纸张 / cell=只能当拼版格子
-    origin: str  # preset / custom / user
+    origin: str  # preset / custom / user / spec（spec = 只能当拼版格子，不对应任何驱动纸张）
     borderless: bool
     margins: Margins
     margin_source: str  # spec=依规格推定 / probed=驱动实测 / calibrated=真机校准

@@ -116,7 +116,7 @@ _lab/                 本地手工验证脚本与输出（_lab/out/）
   "label": "3R 5寸",
   "w_mm": 89.0, "h_mm": 127.0,
   "role": "paper",                 # paper=可作纸张 / cell=只能作格子(证件照)
-  "origin": "custom",              # preset=驱动内置 / custom=只能自定义 / user=用户自建
+  "origin": "custom",              # preset=驱动内置 / custom=只能自定义 / user=用户自建 / spec=只能当拼版格子（证件照类，不对应任何驱动纸张）
   "borderless": False,             # 依据第 2 节基线推定，运行时以驱动探测覆盖
   "margins_mm": {"top": 3.0, "bottom": 5.0, "left": 3.4, "right": 3.4},
   "margin_source": "spec",         # spec=依官方规格推定 / probed=驱动实测 / calibrated=真机校准
@@ -158,6 +158,7 @@ _lab/                 本地手工验证脚本与输出（_lab/out/）
 | USVISA | 美国签证 | 51×51 |
 
 - 上述数值为行业通行规格，允许用户在 UI 内直接修改数值（签证类各国不同，做错不如可改）。
+- 这些格子的 `origin` 取 `spec`：它们从不送进驱动当纸张用，因此既不是 `preset`（驱动内置）也不是 `custom`（驱动自定义尺寸）。
 - **UI 结构约束**："纸张"下拉只列 `role=paper`，"格子"下拉只列 `role=cell` + 全部 `role=paper`。从结构上杜绝"选了 1寸 却不存在 1寸 的纸"这类不可能输出——这正是官方软件容易误导之处。
 
 ### 4.4 运行时驱动能力探测

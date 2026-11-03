@@ -997,6 +997,10 @@ def test_counts_with_gap_uses_plus_gap_formula():
     assert pack.grid_counts(210.0, 297.0, 25.0, 32.0, 2.0) == (7, 8)
     # 2寸 35×49 gap=2：floor(212/37)=5、floor(299/51)=5 ⇒ 25
     assert pack.grid_counts(210.0, 297.0, 35.0, 49.0, 2.0) == (5, 5)
+    # 上面两例的尾量（21、25、25、42mm）都大于 gap，去掉分子的 +gap 也不改变
+    # 结果，杀不掉变异；只有尾量不足 gap 的临界排版能区分两种公式。180 与 256
+    # 恰好等于两张加一个间隔（89×2+2、127×2+2），间隔不计外圈 ⇒ 两维都必须是 2。
+    assert pack.grid_counts(180.0, 256.0, 89.0, 127.0, 2.0) == (2, 2)
 
 
 def test_counts_zero_when_cell_bigger_than_region():
@@ -1121,10 +1125,10 @@ Expected: PASS（7 passed）
 
 - [ ] **Step 5: 变异测试（证明断言有效）**
 
-临时把 `grid_counts` 的 `+ gap` 去掉（改成 `region_w / (cw + gap)`），运行：
+临时把 `grid_counts` 分子的 `+ gap` 去掉（改成 `region_w / (cw + gap)`），运行：
 
 Run: `python -m pytest tests/test_pack_grid.py -v`
-Expected: FAIL —`test_counts_with_gap_uses_plus_gap_formula` 断言失败（7×8 变 6×8）。改回原实现后再跑必须全绿。若仍全绿说明断言没管事，需补强测试。
+Expected: FAIL —`test_counts_with_gap_uses_plus_gap_formula` 的临界断言失败（`(2, 2)` 变 `(1, 1)`）。注意 210×297 那两条删掉 `+ gap` 后仍是 `(7, 8)` 与 `(5, 5)`（`210//27=7`、`297//34=8`），单靠它们杀不掉变异，必须有 180×256 这条。改回原实现后再跑必须全绿。若仍全绿说明断言没管事，需补强测试。
 
 - [ ] **Step 6: 提交**
 

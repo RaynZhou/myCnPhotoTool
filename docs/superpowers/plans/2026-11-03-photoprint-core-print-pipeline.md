@@ -1187,7 +1187,9 @@ from photoprint.core import pack, specs
 
 
 def _a4_3r():
-    return pack.pack(specs.find_spec("A4"), specs.find_spec("3R"))
+    # 整纸装箱，坐标可手算：x0=16、y0=21.5，与断言里的值直接对得上
+    return pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
 
 
 def test_a4_3r_has_four_internal_seams():
@@ -1761,7 +1763,11 @@ def _photos(n, color):
 
 
 def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None):
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"), bleed_mm=bleed)
+    # 固定用整张纸作为装箱矩形，坐标可手算：x0=(210-178)/2=16、y0=(297-254)/2=21.5
+    # （默认的可打印内缩矩形由 T5 的测试覆盖，本文件只验裁切线几何）
+    full = specs.RectMM(0.0, 0.0, 210.0, 297.0)
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"), bleed_mm=bleed,
+                     printable=full)
     imgs = photos or _photos(plan.count, (255, 0, 0))
     return plan, render.render_page(plan, imgs, specs.find_spec("A4"), DPI, mode,
                                    show_cut_lines=True)
@@ -1836,13 +1842,16 @@ def test_bleed_cells_extend_beyond_inner_photo():
     assert img.getpixel((int(round(c.x_mm)) + 1, int(round(c.y_mm)) + 1)) == (9, 9, 9)
 
 
-def test_photo_count_mismatch_pads_with_white_cells():
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"))
+def test_photo_count_mismatch_leaves_remaining_cells_white():
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
     assert plan.count == 4
     img = render.render_page(plan, _photos(2, (255, 0, 0)), specs.find_spec("A4"),
                              DPI, modes.FILL_PRINTABLE)
     assert img.size == (210, 297)
-    assert img.getpixel((50, 50)) != (255, 0, 0) or True  # 不抛异常即通过
+    # 第 4 格没有照片，必须保持纸白，不能被上一张残留内容污染
+    c3 = plan.cells[3]
+    assert img.getpixel((int(round(c3.x_mm)) + 40, int(round(c3.y_mm)) + 60)) == (255, 255, 255)
 
 
 def test_rotated_cell_places_rotated_photo():
@@ -2205,7 +2214,8 @@ class RealWinApi:
 
 def _mode_flag(mode):
     import win32print
-    return {"get": win32print.DM_GETMODE, "set": win32print.DM_SETMODE}[mode]
+    # "size" 仅询问总长（含驱动私有扩展区）；"get" 才取回填充好的结构
+    return {"size": win32print.DM_INQUIRE, "get": win32print.DM_GETMODE}[mode]
 ```
 
 `photoprint/win/probe.py`：
@@ -2396,9 +2406,16 @@ class FakeApi:
         self.mode_log = []
         self.dm = FakeDM()
 
-    def document_properties(self, handle, printer, mode="get"):
+    def open_printer(self, name):
+        return f"hnd:{name}"
+
+    def close_printer(self, handle):
+        pass
+
+    def document_properties(self, handle, printer, mode):
+        """mode="size" 只问结构大小；mode="get" 取回含私有区的已填结构。"""
         self.mode_log.append(mode)
-        return self.size
+        return self.size if mode == "size" else self.dm
 
 
 def test_modify_sets_custom_size_in_tenth_mm():
@@ -2446,11 +2463,11 @@ def test_cbsize_and_private_area_untouched():
     assert (dm.cbSize, dm.duplex, dm.mediaType) == before, "私有区被改动会丢失无边距设置"
 
 
-def test_returns_size_from_driver_not_struct_only():
+def test_build_asks_size_then_gets_filled_struct():
     api = FakeApi(size=520)
     dm, size = devmode.build(api, "Canon G3800 series", 89.0, 127.0)
     assert size == 520
-    assert api.mode_log == ["get"], "必须先取驱动默认 devmode，不能新建空结构"
+    assert api.mode_log == ["size", "get"], "必须先按驱动回报的 size 分配再取回，不得新建空结构"
 
 
 def test_build_rejects_zero_size():
@@ -2511,29 +2528,24 @@ def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):
 
 
 def build(api, printer, w_mm, h_mm, paper_code=None):
-    """取驱动默认 devmode 后改纸张字段。返回 (dm, size)。"""
+    """取驱动默认 devmode 后改纸张字段。返回 (dm, size)。
+
+    两步调用不可合并：先以 mode="size" 问出含私有区的总长，
+    再按该长度分配 buffer 并以 mode="get" 取回已填充的结构。
+    RealWinApi 负责把 buffer 与 PyDEVMODE 的绑定包在内部。
+    """
     handle = api.open_printer(printer)
     try:
-        size = api.document_properties(handle, printer, "get")
-    finally:
-        api.close_printer(handle)
-    if not size:
-        raise RuntimeError("DocumentProperties 返回 0，无法取得 DEVMODE")
-    dm = _alloc(api, printer, size)
-    return modify(dm, size, w_mm, h_mm, paper_code), size
-
-
-def _alloc(api, printer, size):
-    """向驱动要一份填满私有区的 DEVMODE。"""
-    handle = api.open_printer(printer)
-    try:
+        size = api.document_properties(handle, printer, "size")
+        if not size:
+            raise RuntimeError("DocumentProperties 返回 0，无法取得 DEVMODE")
         dm = api.document_properties(handle, printer, "get")
     finally:
         api.close_printer(handle)
-    return dm
+    return modify(dm, size, w_mm, h_mm, paper_code), size
 ```
 
-注：`_alloc` 在真机上需按 `size` 分配 buffer 后再次调用 `DocumentProperties(..., DM_GETMODE)` 取回填充好的结构；`RealWinApi.document_properties` 负责把 buffer 与 `PyDEVMODE` 的绑定关系处理好并返回可改对象。`tests/test_devmode.py` 用 `FakeApi` 只验证语义，真机行为在 M5 由用户回读校验把关。
+注：`mode="size"` 对应真机上的 `DocumentProperties(..., None, None, DM_INQUIRE)` 只拿长度；`mode="get"` 对应先 `create_string_buffer(size)` 再 `DocumentProperties(..., DM_GETMODE)` 拿回填充好的 `PyDEVMODE`。这两步的分配与绑定全部关在 `RealWinApi.document_properties` 内部，`tests/test_devmode.py` 用 `FakeApi` 只验证语义（先问长度再取回、只改纸张字段、保留私有区），真机行为在 M5 由用户回读校验把关。
 
 - [ ] **Step 4: 运行确认通过**
 

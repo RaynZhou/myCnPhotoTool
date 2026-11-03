@@ -1,0 +1,10 @@
+# 子代理执行期的临时产物（简报、报告、评审包、进度台账），不入库
+.superpowers/
+# IDE 会话工作区标记
+.aicoding-chat-workspace
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+# 本地手工验证脚本的输出
+_lab/out/

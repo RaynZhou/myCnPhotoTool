@@ -190,7 +190,8 @@ plan = pack(sheet, cell, gap_mm=0.0, bleed_mm=0.0, allow_rotate=True, printable=
 #            waste_mm2, strategy, cuts=[CutLine(x1,y1,x2,y2)])
 ```
 
-- `printable` 默认由 `sheet.margins_mm` 推出（例：3R 89×127 → 82.2×119.0；A4 → 203.2×289.0）。装箱在可打印矩形内进行；`bleed_trim` 模式下 `printable` 改为整张纸（因该模式只用于支持无边距的大纸）。
+- `printable` 默认由 `sheet.margins_mm` 推出（例：3R 89×127 → 82.2×119.0；A4 → 203.2×289.0）。装箱默认在可打印矩形内进行；`bleed_trim` 模式下 `printable` 改为整张纸（因该模式只用于支持无边距的大纸）。
+- **退化情形例外（必须处理）**：当格子尺寸等于纸张尺寸（如 3R 纸上直打一张 3R）时，在可打印矩形内装箱会因 `89 > 82.2` 算出 0 格。此时必须改为整张纸装一格，画面收回可打印区的工作交由渲染层完成（见 6.2），不得报错也不能让内容被边距无声吃掉。
 - 格子有效尺寸 = `(cell.w + 2*bleed_mm + gap_mm) × (cell.h + 2*bleed_mm + gap_mm)`，间隔只计在格子之间、不计外圈，故列数公式为 `n = floor((W + gap) / (cw + gap))`。
 
 ### 5.2 三级搜索（取张数最多；规模小，可穷举证明最优）
@@ -242,6 +243,7 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm,
 ### 6.2 语义（写进代码注释，防止后来人误读）
 
 - `fit_to_printable` / `fill_printable` 的**目标矩形相同**（都是可打印区），二者只在"是否裁掉超出内容"上不同。
+- 目标矩形统一按 `格子内框 ∩ 可打印矩形` 计算：正常拼版下格子本就落在可打印区内，交集等于原框；而“整张纸只放一格”（5.1 退化情形）时，正是这个交集把画面收进可打印区，避免边缘内容被物理边距无声裁掉。
 - `bleed_trim` 的目标矩形是**整张纸 + 出血外扩**，与前两者的矩形不同。
 - 常见误读警告：`fill_printable` **不是**"铺满整张纸"——物理上铺不到边缘。
 

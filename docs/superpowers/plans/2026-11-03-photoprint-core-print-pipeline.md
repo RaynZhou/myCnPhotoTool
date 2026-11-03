@@ -25,6 +25,7 @@
 - 用户可见文案禁则：`borderless=False` 时不得出现"无边距"；`fill_printable` 时不得出现"铺满整张纸"；未校准时不得给出 0.1mm 级白边承诺。
 - 装箱基准为硬断言，数值取自规格 5.3：`A4+3R=4`、`A4+4R=3`、`A4+5R=2`、`4R+3R=1`、`A4+3R(bleed3)=4`、`A4+ID1(gap2, 禁旋转)=56`、`A4+ID2(gap2, 禁旋转)=25`、`A4 去边距后+3R=4`。
 - 证件照（`role=cell`）拼版必须传 `allow_rotate=False`：旋转会把格子横放，贴出来的证件照是躺倒的；允许旋转只会让张数虚高，不作为基准值。
+- `pack.pack` 的默认装箱区域是**整张纸**（与规格 5.3 手算基准同口径）；任何要真送打的排版必须显式传 `printable=specs.printable_rect(...)`（无边距生效时它返回整张纸）——T9 渲染与 T14 CLI 都属此列，不自愿传就会把照片切进物理边距。
 
 ## 文件结构（本计划范围内）
 
@@ -999,7 +1000,11 @@ def test_counts_with_gap_uses_plus_gap_formula():
 
 
 def test_counts_zero_when_cell_bigger_than_region():
-    assert pack.grid_counts(102.0, 152.0, 127.0, 89.0, 0.0) == (0, 0)
+    # 两个方向都放不下：127×200 的格子对 102×152 的区域两向都超
+    assert pack.grid_counts(102.0, 152.0, 127.0, 200.0, 0.0) == (0, 0)
+    # 列与行各自独立算：宽放不下不代表高也放不下（89 在 152 里能竖下一张）。
+    # 总数为零靠的是 place_uniform“任一维为 0 就不放”，不是靠 grid_counts 返回 (0, 0)。
+    assert pack.grid_counts(102.0, 152.0, 127.0, 89.0, 0.0) == (0, 1)
 
 
 def test_bleed_enlarges_cell_effectively():
@@ -1144,6 +1149,7 @@ git commit -m "feat: 拼版均匀网格装箱与格子放置计算"
   - `pack.best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate) -> list[Cell]`
   - `pack.solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate, depth, memo) -> tuple[list[Cell], str]`
   - `pack.pack(sheet, cell, gap_mm=0.0, bleed_mm=0.0, allow_rotate=True, printable=None) -> LayoutPlan`
+    （`printable=None` 时按整张纸装箱，与规格 5.3 基准同口径）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1232,12 +1238,23 @@ def test_waste_is_reported():
     assert plan.waste_mm2 == pytest.approx(210 * 297 - 4 * 89 * 127)
 
 
-def test_tie_break_prefers_less_waste_then_square_then_uniform():
-    """A4+3R 的 4 张竖放外接框 178×254；若存在 4 张但更浪费的解不得胜出。"""
+def test_tie_break_prefers_uniform_over_edge_flush_bands():
+    """张数与浪费全同时，贴边的双带解不得赢过居中的均匀网格。
+
+    均匀网格解的外接框是 178×254（更方正），左带贴边、格子间距 89+0 的一刀双带解
+    外接框 194×254（更接近正方形）。若决胜序里“策略简单”不排在“外接框方”
+    之前，贴边解会靠更方正的外接框胜出，而它既不居中、列间隙也不均匀。
+    规格 5.2 的决胜②就为了这条而存在。
+    """
     plan = _p("A4", "3R")
-    xs = [c.x_mm for c in plan.cells]
+    assert plan.strategy == "uniform"
     assert all(not c.rotated for c in plan.cells)  # 同向优先
+    xs = [c.x_mm for c in plan.cells]
     assert min(xs) == pytest.approx((210.0 - 178.0) / 2)
+    assert max(xs) == pytest.approx((210.0 - 178.0) / 2 + 89.0)
+    # 列间隙全等（而不是 0mm 与 16mm 交替）：先取去重后的列坐标再比相邻差
+    cols = sorted(set(xs))
+    assert sorted({round(b - a, 6) for a, b in zip(cols, cols[1:])}) == [89.0]
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1247,7 +1264,9 @@ Expected: FAIL —`AttributeError: module 'photoprint.core.pack' has no attribut
 
 - [ ] **Step 3: 追加第 2、3 级与 pack 入口**
 
-在 `photoprint/core/pack.py` 末尾追加：
+在 `photoprint/core/pack.py` 末尾追加（并在文件顶部已有的 import 区补上
+`from photoprint.core import specs`：`_sheet_rect` 要用 `specs.RectMM`，specs 不
+反向依赖 pack，不构成循环导入）：
 
 ```python
 @dataclass
@@ -1279,23 +1298,32 @@ def best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
         cells = place_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, rot)
         if not cells:
             continue
-        key = _score(cells, region_w * region_h)
+        key = _score(cells, region_w, region_h, 0)
         if best_key is None or key < best_key:
             best, best_key = cells, key
     return best
 
 
-def _score(cells, region_area):
-    """越小越优：张数多 → 浪费小 → 外接框方 → 朝向统一。"""
+def _score(cells, region_w, region_h, strategy_rank):
+    """决胜排序，越小越优：张数多 → 浪费小 → 策略简单 → 外接框方 → 居中 → 朝向统一。
+
+    对应规格 5.2 的并列决胜①–⑤（首项是张数，它不算决胜而是前提）。
+    “策略简单”必须排在外接框与居中之前：外接框只量跨度，量不出贴边解的不好看——
+    A4+3R 的一刀双带解（左带宽恰好 89mm）外接框 194×254，比均匀网格的 178×254
+    更接近正方形，张数与浪费全同，却不居中、列间隙一边 0mm 一边 16mm。把“简单”放
+    在浪费之后、美观之前，混合带就只能在张数或浪费上真赢时才胜出（如 A4+4R 的 3 比 2）。
+    """
     used = sum(c.w_mm * c.h_mm for c in cells)
-    waste = region_area - used
+    waste = region_w * region_h - used
     x1 = min(c.x_mm for c in cells)
     x2 = max(c.x_mm + c.w_mm for c in cells)
     y1 = min(c.y_mm for c in cells)
     y2 = max(c.y_mm + c.h_mm for c in cells)
     aspect = abs((x2 - x1) - (y2 - y1))
+    # 外接框中心与区域中心的偏离（×2，免去除法）：居中为 0，越大越偏
+    offcenter = abs((x1 + x2) - region_w) + abs((y1 + y2) - region_h)
     mixed = len({c.rotated for c in cells})
-    return (-len(cells), waste, aspect, mixed)
+    return (-len(cells), waste, strategy_rank, aspect, offcenter, mixed)
 
 
 def _cut_candidates(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
@@ -1329,10 +1357,10 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
                            allow_rotate)
     best_cells, best_strategy = uniform, "uniform"
     if uniform:
-        best_key = _score(uniform, region_w * region_h)
+        best_key = _score(uniform, region_w, region_h, 0)
     else:
         # 空解的分值必须劣于任何非空解（首项 0 大于任何 -len）
-        best_key = (0, region_w * region_h, 0.0, 0)
+        best_key = (0, region_w * region_h, 9, 0.0, 0.0, 9)
 
     if depth > 0:
         for axis, pos in _cut_candidates(region_w, region_h, cell_w, cell_h,
@@ -1352,7 +1380,7 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
                      c.rotated, c.bleed_mm) for c in cb]
             if not merged:
                 continue
-            key = _score(merged, region_w * region_h)
+            key = _score(merged, region_w, region_h, 1)
             if key < best_key:
                 best_cells, best_strategy, best_key = merged, "bands", key
 
@@ -1363,7 +1391,7 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
 def pack(sheet, cell, gap_mm: float = 0.0, bleed_mm: float = 0.0,
          allow_rotate: bool = True, printable=None) -> LayoutPlan:
     """装箱入口。sheet/cell 均为 specs.SizeSpec；printable 给定时按其尺寸装箱。"""
-    rect = printable if printable is not None else specs_printable_default(sheet)
+    rect = printable if printable is not None else _sheet_rect(sheet)
     cells, strategy = solve_region(rect.w_mm, rect.h_mm, cell.w_mm, cell.h_mm,
                                    gap_mm, bleed_mm, allow_rotate, depth=2,
                                    memo={})
@@ -1377,16 +1405,23 @@ def pack(sheet, cell, gap_mm: float = 0.0, bleed_mm: float = 0.0,
                       strategy=strategy, printable=rect)
 ```
 
-`specs_printable_default` 与 `build_cuts` 在下一个 Task 定义；为让本 Task 测试可跑，先加最小实现：
+`_sheet_rect` 与 `build_cuts` 是本任务需要的两个辅助函数（后者在下一个 Task
+被真实现替换）：
 
 ```python
-def specs_printable_default(sheet):
-    """默认按物理边距扣除后的可打印区。"""
-    from photoprint.core import specs
-    return specs.printable_rect(sheet)
+def _sheet_rect(sheet):
+    """装箱默认区域 = 整张纸。
+
+    规格 5.3 的手算基准全按整张纸算（`floor(210/89)` 而不是 `floor(203.2/89)`），
+    默认值必须与基准同口径：A4+4R 在 210mm 宽里放得下两张 102mm（204 ≤ 210），
+    扣掉物理边距后只剩 203.2mm，会因 0.8mm 之差让硬断言从 3 张掉到 2 张。
+    代价就是打印路径必须显式传 printable，否则照片会吃进边距。
+    """
+    return specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
 
 
 def build_cuts(cells, rect):
+    """占位：T6 用贯通切缝的真实现替换它。本任务的测试不断言 cuts 内容。"""
     return []
 ```
 
@@ -1429,7 +1464,7 @@ git commit -m "feat: 拼版混合带三级搜索与决胜排序"
 `tests/test_pack_cuts.py`：
 
 ```python
-"""裁切线只在内部缝上生成，且贯通整条缝；外圈不画（纸边即基准）。"""
+"""裁切线只在区域内部的格子边界上生成，且贯通整条缝；与纸边重合的不画。"""
 import pytest
 
 from photoprint.core import pack, specs
@@ -1441,15 +1476,30 @@ def _a4_3r():
                      printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
 
 
-def test_a4_3r_has_four_internal_seams():
+def test_a4_3r_grid_draws_two_side_borders_and_the_middle_seam():
+    """居中 2×2：每轴 3 条（左边界 + 中间缝 + 右边界）。
+
+    只画中间缝与一侧边界的话，切完左列仍是 105mm 宽带白边，
+    得不到 89×127 的成品；成功判据 1.4 要的是“量得出 89×127”。
+    """
     plan = _a4_3r()
     assert plan.count == 4
     v = sorted(round(c.at_mm, 3) for c in plan.cuts if c.axis == "v")
     h = sorted(round(c.at_mm, 3) for c in plan.cuts if c.axis == "h")
     x0 = (210.0 - 178.0) / 2
     y0 = (297.0 - 254.0) / 2
-    assert v == [round(x0 + 89.0, 3), round(x0 + 178.0, 3)]
-    assert h == [round(y0 + 127.0, 3), round(y0 + 254.0, 3)]
+    assert v == [round(x0 + d, 3) for d in (0.0, 89.0, 178.0)]
+    assert h == [round(y0 + d, 3) for d in (0.0, 127.0, 254.0)]
+    assert len(plan.cuts) == 6
+
+
+def test_cells_filling_region_leave_only_the_shared_seam():
+    """格子恰好铺满区域时，与区域边界重合的边界不画：178×127 里两张 3R 只有一条竖缝。"""
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 178.0, 127.0))
+    assert plan.count == 2
+    assert [(c.axis, c.at_mm, c.from_mm, c.to_mm) for c in plan.cuts] == [
+        ("v", 89.0, 0.0, 127.0)]
 
 
 def test_cut_spans_full_used_extent():
@@ -1507,49 +1557,42 @@ def merge_spans(spans):
 
 
 def build_cuts(cells, rect):
-    """由格子外框推导内部裁切缝。
+    """由格子外框推导裁切缝（规格 5.2 的切缝取舍规则）。
 
-    规则：缝取在每个格子的左/右（或上/下）边界，但必须落在区域内部；
-    线段取该缝两侧相邻格子 y（或 x）范围的并集，贯通整条切缝，
-    以便切纸刀有连续引导（规格 5.2 与 6.4）。
+    画：严格落在区域内的格子边界（左/右或上/下）；居中留白时两侧都要画，
+    只画一侧会切不出成品尺寸。
+    不画：与区域边界重合的边界（纸边就是基准，切了也无从下手）。
+    线段取紧贴该缝的格子在另一轴上的范围之并集，让切纸刀有连续引导（见 6.4）。
     """
     if len(cells) < 2:
         return []
     cuts = []
     tol = 1e-3
 
-    def seams(axis_pos_attr, span_attr):
+    # 轴、属性名、区域都显式传参：不靠外层循环变量绑定闭包，
+    # 那样写抽出一个函数就得连带重写调用点
+    def seams(axis, pos_attrs, span_attrs, base, extent):
+        lo_attr, len_attr = pos_attrs
         positions = set()
         for c in cells:
-            lo = getattr(c, axis_pos_attr[0])
-            hi = lo + getattr(c, axis_pos_attr[1])
+            lo = getattr(c, lo_attr)
             positions.add(round(lo, 6))
-            positions.add(round(hi, 6))
+            positions.add(round(lo + getattr(c, len_attr), 6))
         for p in sorted(positions):
-            if not (rect.x_mm + tol < p < rect.x_mm + rect.w_mm - tol) and axis == "v":
-                continue
-            if not (rect.y_mm + tol < p < rect.y_mm + rect.h_mm - tol) and axis == "h":
+            if not (base + tol < p < base + extent - tol):
                 continue
             spans = []
             for c in cells:
-                lo = getattr(c, axis_pos_attr[0])
-                hi = lo + getattr(c, axis_pos_attr[1])
-                if abs(lo - p) > tol and abs(hi - p) > tol:
-                    continue
-                s0 = getattr(c, span_attr[0])
-                s1 = s0 + getattr(c, span_attr[1])
-                # 只统计紧邻该缝的格子，避免把远处的行并进来
-                spans.append((s0, s1))
-            if not spans:
-                continue
+                lo = getattr(c, lo_attr)
+                if abs(lo - p) > tol and abs(lo + getattr(c, len_attr) - p) > tol:
+                    continue  # 不与该缝紧邻的格子不得拉长线段
+                s0 = getattr(c, span_attrs[0])
+                spans.append((s0, s0 + getattr(c, span_attrs[1])))
             for a, b in merge_spans(spans):
                 cuts.append(CutLine(axis, p, a, b))
 
-    for axis in ("v", "h"):
-        if axis == "v":
-            seams(("x_mm", "w_mm"), ("y_mm", "h_mm"))
-        else:
-            seams(("y_mm", "h_mm"), ("x_mm", "w_mm"))
+    seams("v", ("x_mm", "w_mm"), ("y_mm", "h_mm"), rect.x_mm, rect.w_mm)
+    seams("h", ("y_mm", "h_mm"), ("x_mm", "w_mm"), rect.y_mm, rect.h_mm)
 
     # 同一条缝上相邻线段合并，去掉重合项
     merged = {}
@@ -1569,52 +1612,19 @@ def needed_sheets(plan_count: int, photo_count: int) -> int:
     return -(-photo_count // plan_count)
 ```
 
-注意 `seams()` 内对 `axis` 的闭包引用来自外层循环变量，实现时必须保证 `axis` 在调用前已绑定：把 `for axis in ("v", "h")` 循环体写成显式传参 `seams(axis, ("x_mm", "w_mm"), ("y_mm", "h_mm"))`，避免闭包陷阱。正确写法：
-
-```python
-def seams(axis, pos_attrs, span_attrs):
-    positions = set()
-    for c in cells:
-        lo = getattr(c, pos_attrs[0])
-        hi = lo + getattr(c, pos_attrs[1])
-        positions.add(round(lo, 6))
-        positions.add(round(hi, 6))
-    for p in sorted(positions):
-        if axis == "v":
-            if not (rect.x_mm + 1e-3 < p < rect.x_mm + rect.w_mm - 1e-3):
-                continue
-        else:
-            if not (rect.y_mm + 1e-3 < p < rect.y_mm + rect.h_mm - 1e-3):
-                continue
-        spans = []
-        for c in cells:
-            lo = getattr(c, pos_attrs[0])
-            hi = lo + getattr(c, pos_attrs[1])
-            if abs(lo - p) > 1e-3 and abs(hi - p) > 1e-3:
-                continue
-            s0 = getattr(c, span_attrs[0])
-            s1 = s0 + getattr(c, span_attrs[1])
-            spans.append((s0, s1))
-        for a, b in merge_spans(spans):
-            cuts.append(CutLine(axis, p, a, b))
-
-
-for axis in ("v", "h"):
-    if axis == "v":
-        seams(axis, ("x_mm", "w_mm"), ("y_mm", "h_mm"))
-    else:
-        seams(axis, ("y_mm", "h_mm"), ("x_mm", "w_mm"))
-```
+两个轴的坐标属性名不同（竖缝的位置读 `x_mm`，线段的范围读 `y_mm`），用
+元组传名字而不是写四份 `if axis == "v"` 的分支，是为了让两轴共用同一段
+推导代码；分支写到一起会漏改其中一轴。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_pack_cuts.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 5: 全量回归**
 
 Run: `python -m pytest -v`
-Expected: 全绿（units/specs/store/pack 三组）
+Expected: 全绿（57 passed：units 6 + specs 12 + store 15 + pack 三组 24）
 
 - [ ] **Step 6: 提交**
 
@@ -2058,10 +2068,12 @@ def test_mask_covers_physical_margin_band():
 
 def test_cut_lines_are_drawn_and_light_gray():
     plan, img = _a4_3r(photos=_photos(4, (255, 0, 0)))
-    seam = plan.cuts[0]
-    at = int(round(seam.at_mm))
-    y = int(round((seam.from_mm + seam.to_mm) / 2))
-    px = img.getpixel((at, y))
+    # 取竖缝：它的 x 落在 at_mm 上，线段沿 y 走（取 cuts[0] 会拿成横缝，
+    # 坐标当像素用时会把 x/y 写反，采样点落在照片上而不是线上）
+    seam = next(c for c in plan.cuts if c.axis == "v")
+    x = int(round(seam.at_mm))
+    y = int(round(seam.from_mm)) + 30  # 沿线段方向取一点，避开横缝
+    px = img.getpixel((x, y))
     assert abs(px[0] - render.CUT_LINE_GRAY) <= 3
     assert abs(px[1] - render.CUT_LINE_GRAY) <= 3
 
@@ -2079,9 +2091,12 @@ def test_cut_lines_can_be_hidden():
     hidden = render.render_page(plan, _photos(4, (255, 0, 0)),
                                 specs.find_spec("A4"), DPI, modes.FILL_PRINTABLE,
                                 show_cut_lines=False)
-    at = int(round(plan.cuts[0].at_mm))
-    y = int(round((plan.cuts[0].from_mm + plan.cuts[0].to_mm) / 2))
-    assert hidden.getpixel((at, y)) != shown.getpixel((at, y))
+    # 同一个采样点：画时是灰线，关掉后必须变回照片色（1px=1mm）
+    seam = next(c for c in plan.cuts if c.axis == "v")
+    x = int(round(seam.at_mm))
+    y = int(round(seam.from_mm)) + 30
+    assert shown.getpixel((x, y)) != (255, 0, 0)
+    assert hidden.getpixel((x, y)) == (255, 0, 0)
 
 
 def test_bleed_cells_extend_beyond_inner_photo():
@@ -3425,7 +3440,7 @@ def main():
     plan = pack.pack(a4, r3, bleed_mm=modes.DEFAULT_BLEED_MM,
                      printable=specs.RectMM(0, 0, a4.w_mm, a4.h_mm))
     allok &= check("A4+3R(bleed3) 格数", plan.count, 4)
-    allok &= check("裁切线数", len(plan.cuts), 4)
+    allok &= check("裁切线数", len(plan.cuts), 6)  # 居中 2×2：每轴 3 条（两侧边界 + 中间缝）
     page = render.render_page(plan, [synth(4, i) for i in range(4)], a4, DPI,
                               modes.BLEED_TRIM)
     allok &= check("页面宽 mm=px", page.width, 210)

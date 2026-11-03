@@ -23,7 +23,8 @@
 - DEVMODE 四条不可变语义：按驱动回报的 size 分配 buffer、继承驱动私有扩展区、不改 `cbSize`、只改纸张相关字段。禁止 new 空 DEVMODE。
 - GDI 回读物理尺寸与请求值的容差为 **0.5mm**，超限即判定驱动忽略自定义尺寸并中止直打。
 - 用户可见文案禁则：`borderless=False` 时不得出现"无边距"；`fill_printable` 时不得出现"铺满整张纸"；未校准时不得给出 0.1mm 级白边承诺。
-- 装箱基准为硬断言，数值取自规格 5.3：`A4+3R=4`、`A4+4R=3`、`A4+5R=2`、`4R+3R=1`、`A4+3R(bleed3)=4`、`A4+ID1(gap2)=56`、`A4+ID2(gap2)=25`、`A4 去边距后+3R=4`。
+- 装箱基准为硬断言，数值取自规格 5.3：`A4+3R=4`、`A4+4R=3`、`A4+5R=2`、`4R+3R=1`、`A4+3R(bleed3)=4`、`A4+ID1(gap2, 禁旋转)=56`、`A4+ID2(gap2, 禁旋转)=25`、`A4 去边距后+3R=4`。
+- 证件照（`role=cell`）拼版必须传 `allow_rotate=False`：旋转会把格子横放，贴出来的证件照是躺倒的；允许旋转只会让张数虚高，不作为基准值。
 
 ## 文件结构（本计划范围内）
 
@@ -117,9 +118,12 @@ def test_ppmm_300dpi():
 
 
 def test_mm_to_px_rounds_half_up():
-    # 89mm @300dpi = 1050.0 像素；0.35mm 线宽 @300dpi = 4.13 → 4
-    assert units.mm_to_px(89, 300) == 1050
+    # 89mm @300dpi = 1051.181 像素 → 1051；0.35mm 线宽 @300dpi = 4.134 → 4
+    assert units.mm_to_px(89, 300) == 1051
     assert units.mm_to_px(0.35, 300) == 4
+    # 恰好 .5 时必须向上：round() 是银行家舍入（round(2.5)==2），
+    # 用它会让“dpi=25.4 下 1mm=1px”的像素断言反直觉，Task 9 的几何测试依赖这点
+    assert units.mm_to_px(2.5, 25.4) == 3
 
 
 def test_mm_to_px_at_one_pixel_per_mm():
@@ -143,6 +147,7 @@ def test_win_mm_uses_tenth_of_mm():
 def test_mm_to_scene_is_tenth_mm():
     assert units.mm_to_scene(89.0) == 890
     assert units.mm_to_scene(3.4) == 34
+    assert units.mm_to_scene(0.25) == 3  # 2.5 个 0.1mm 单位，同样 .5 向上
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -180,7 +185,19 @@ Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint'`
 """mm 与像素的唯一换算入口。"""
 from __future__ import annotations
 
+import math
+
 MM_PER_INCH = 25.4
+
+
+def _round_half_up(value: float) -> int:
+    """就近取整，.5 一律向上。
+
+    不用内置 round()：它是银行家舍入，round(2.5) == 2、round(20.5) == 20，
+    而本项目的几何断言（尤其 dpi=25.4 时 1 像素 = 1 毫米那批）需要的是
+    直觉上的四舍五入，否则半像素落点会以一种看不出规律的方式偏移。
+    """
+    return int(math.floor(value + 0.5))
 
 
 def ppmm(dpi: float) -> float:
@@ -189,8 +206,8 @@ def ppmm(dpi: float) -> float:
 
 
 def mm_to_px(mm: float, dpi: float) -> int:
-    """mm 转像素，四舍五入。"""
-    return int(round(mm * ppmm(dpi)))
+    """mm 转像素，就近取整（.5 向上）。"""
+    return _round_half_up(mm * ppmm(dpi))
 
 
 def px_to_mm(px: float, dpi: float) -> float:
@@ -208,7 +225,7 @@ def win_mm(value_mm: float) -> int:
 
 def mm_to_scene(mm: float) -> int:
     """场景坐标：1 单位 = 0.1mm，整数以免累积误差。"""
-    return int(round(mm * 10))
+    return _round_half_up(mm * 10)
 ```
 
 - [ ] **Step 5: 运行确认通过**
@@ -915,10 +932,11 @@ import pytest
 from photoprint.core import pack, specs
 
 
-def _p(sheet_key, cell_key, gap=0.0, bleed=0.0, printable=None):
+def _p(sheet_key, cell_key, gap=0.0, bleed=0.0, printable=None, allow_rotate=True):
     sheet = specs.find_spec(sheet_key)
     cell = specs.find_spec(cell_key)
-    return pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed, printable=printable)
+    return pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed,
+                     allow_rotate=allow_rotate, printable=printable)
 
 
 def test_a4_holds_four_3r():
@@ -955,8 +973,15 @@ def test_a4_with_bleed_still_four_3r():
 
 
 def test_id_photo_counts_on_a4_with_gap():
-    assert _p("A4", "ID1", gap=2.0).count == 56
-    assert _p("A4", "ID2", gap=2.0).count == 25
+    """证件照格子不得旋转：一寸 7×8=56、二寸 5×5=25（规格 5.3）。
+
+    允许旋转时网格会取两种朝向的较大者，寸照张数只会虚高（一寸虚高到 66+），
+    但横放的格子会让贴出来的证件照躺倒，所以界面层对 role=cell 必须传
+    allow_rotate=False。这里同时断言“旋转不减反增”，把两种行为都钉住。
+    """
+    assert _p("A4", "ID1", gap=2.0, allow_rotate=False).count == 56
+    assert _p("A4", "ID2", gap=2.0, allow_rotate=False).count == 25
+    assert _p("A4", "ID1", gap=2.0).count > 56
 
 
 def test_printable_area_shrink_keeps_four_3r():

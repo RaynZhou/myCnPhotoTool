@@ -33,13 +33,26 @@ def test_a4_borderless_active_zeroes_margins():
     assert (on.x_mm, on.y_mm) == (0.0, 0.0)
 
 
+def test_borderless_active_rejected_on_non_borderless_sheet():
+    """规格第 2 节硬事实：自定义尺寸（含 3R）不支持无边距。
+
+    守卫放在这里而不是每个调用点：printable_rect 是唯一能同时看到
+    `spec.borderless` 与 `borderless_active` 的地方，调用侧把关意味着
+    T8/T9/T12/T14 都要各自记住这条。
+    """
+    s = specs.find_spec("3R")
+    assert s.borderless is False
+    with pytest.raises(ValueError, match="无边距"):
+        specs.printable_rect(s, borderless_active=True)
+
+
 def test_source_spec_never_assumes_zero_margins():
     """margin_source=spec 时，即使尺寸有边框能力也必须按规格边距处理。"""
     s = specs.find_spec("4R")
     assert s.borderless is True
     assert s.margin_source == "spec"
     r = specs.printable_rect(s)  # 未声明 borderless_active
-    assert r.w_mm < s.w_mm
+    assert r.w_mm == pytest.approx(95.2)  # 102 - 3.4 - 3.4，钉死而非只判“小于”
 
 
 def test_ltr_uses_exception_margins():
@@ -72,7 +85,7 @@ def test_custom_illegal_12inch_is_blocked():
     """12寸 254×305：宽 254 > 215.9，两向都不合法 —— 必须阻断。"""
     ok, msg = specs.custom_size_is_legal(254.0, 305.0)
     assert ok is False
-    assert "215.9" in msg
+    assert "305.0mm > 215.9mm" in msg  # 必须点出越界的具体数值与边界
 
 
 def test_custom_illegal_below_length_floor():
@@ -83,7 +96,7 @@ def test_custom_illegal_below_length_floor():
     """
     ok, msg = specs.custom_size_is_legal(80.0, 70.0)
     assert ok is False
-    assert "89" in msg
+    assert "70.0mm < 89.0mm" in msg  # 精确到违反的那条边界
 
 
 def test_12inch_is_not_a_preset():

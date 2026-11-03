@@ -299,13 +299,26 @@ def test_a4_borderless_active_zeroes_margins():
     assert (on.x_mm, on.y_mm) == (0.0, 0.0)
 
 
+def test_borderless_active_rejected_on_non_borderless_sheet():
+    """规格第 2 节硬事实：自定义尺寸（含 3R）不支持无边距。
+
+    守卫放在这里而不是每个调用点：printable_rect 是唯一能同时看到
+    `spec.borderless` 与 `borderless_active` 的地方，调用侧把关意味着
+    T8/T9/T12/T14 都要各自记住这条。
+    """
+    s = specs.find_spec("3R")
+    assert s.borderless is False
+    with pytest.raises(ValueError, match="无边距"):
+        specs.printable_rect(s, borderless_active=True)
+
+
 def test_source_spec_never_assumes_zero_margins():
     """margin_source=spec 时，即使尺寸有边框能力也必须按规格边距处理。"""
     s = specs.find_spec("4R")
     assert s.borderless is True
     assert s.margin_source == "spec"
     r = specs.printable_rect(s)  # 未声明 borderless_active
-    assert r.w_mm < s.w_mm
+    assert r.w_mm == pytest.approx(95.2)  # 102 - 3.4 - 3.4，钉死而非只判“小于”
 
 
 def test_ltr_uses_exception_margins():
@@ -338,7 +351,7 @@ def test_custom_illegal_12inch_is_blocked():
     """12寸 254×305：宽 254 > 215.9，两向都不合法 —— 必须阻断。"""
     ok, msg = specs.custom_size_is_legal(254.0, 305.0)
     assert ok is False
-    assert "215.9" in msg
+    assert "305.0mm > 215.9mm" in msg  # 必须点出越界的具体数值与边界
 
 
 def test_custom_illegal_below_length_floor():
@@ -349,7 +362,7 @@ def test_custom_illegal_below_length_floor():
     """
     ok, msg = specs.custom_size_is_legal(80.0, 70.0)
     assert ok is False
-    assert "89" in msg
+    assert "70.0mm < 89.0mm" in msg  # 精确到违反的那条边界
 
 
 def test_12inch_is_not_a_preset():
@@ -431,6 +444,11 @@ def _paper(key, label, w, h, origin, borderless, driver_name=None, code=None):
                     "spec", driver_name, code)
 
 
+# 注：LTR/LGL 的例外边距（左 6.4 / 右 6.3）绑在预设 key 上。用户自建尺寸即使用
+# 同样的数值也不会自动拿到例外值，store 必须让调用方显式传 Margins（规格 4.5）。
+# w_mm / h_mm 就是驱动里的宽/长，不约定大小关系（卡片 91×55 是宽大于高）。
+
+
 PAPER_PRESETS = [
     # 驱动内置且官方无边距列表内有 ⇒ borderless=True
     _paper("A4", "A4", 210.0, 297.0, "preset", True, "A4", 9),
@@ -446,6 +464,7 @@ PAPER_PRESETS = [
     _paper("B5", "B5", 176.0, 250.0, "preset", False, "B5", 13),
     _paper("LGL", "Legal", 215.9, 355.6, "preset", False, "Legal", 5),
     _paper("ENV_DL", "信封 DL", 110.0, 220.0, "preset", False, "DL", 27),
+    _paper("ENV_10", "信封 COM10", 105.0, 241.0, "preset", False, "COM10", 20),
     # 只能走自定义尺寸 ⇒ 强制无边距不可用
     _paper("3R", "3R 5寸", 89.0, 127.0, "custom", False),
     _paper("6R", "6R 8寸", 152.0, 203.0, "custom", False),
@@ -476,7 +495,12 @@ def printable_rect(spec: SizeSpec, borderless_active: bool = False) -> RectMM:
 
     borderless_active 只有在驱动探测或真机校准实测到无边距已生效时才可为 True；
     margin_source == "spec" 时调用方不得凭空传 True（规格 7.4）。
+
+    守卫：官方无边距清单之外的纸张（含一切自定义尺寸）传 True 直接报错。
+    宁可当场报错也不能静默按整纸排版——后者就是规格 7.3 禁止的谎报。
     """
+    if borderless_active and not spec.borderless:
+        raise ValueError(f"{spec.key} 不支持无边距，borderless_active 不得为 True")
     if borderless_active:
         return RectMM(0.0, 0.0, spec.w_mm, spec.h_mm)
     m = spec.margins
@@ -488,20 +512,33 @@ def custom_size_is_legal(w_mm: float, h_mm: float) -> tuple[bool, str]:
     """自定义尺寸范围校验，允许横竖交换判定。
 
     89×127 横放时长度恰为下限 89，因此必须两向都试。
+
+    不合法时必须点出越界的那个具体数值与边界：只笼统报两个区间的话，
+    调用方与测试都无法区分“宽超限”和“长不够”，断言会退化成永真。
     """
     for feed_w, feed_l in ((w_mm, h_mm), (h_mm, w_mm)):
         if (MIN_FEED_W_MM <= feed_w <= MAX_FEED_W_MM
                 and MIN_FEED_L_MM <= feed_l <= MAX_FEED_L_MM):
             return True, ""
-    return False, (f"G3800 自定义尺寸要求宽 {MIN_FEED_W_MM}–{MAX_FEED_W_MM}mm、"
-                   f"长 {MIN_FEED_L_MM}–{MAX_FEED_L_MM}mm；"
-                   f"{w_mm}×{h_mm}mm 两向都不满足")
+    limits = (f"宽 {MIN_FEED_W_MM}–{MAX_FEED_W_MM}mm、"
+              f"长 {MIN_FEED_L_MM}–{MAX_FEED_L_MM}mm")
+    long_side, short_side = max(w_mm, h_mm), min(w_mm, h_mm)
+    if long_side > MAX_FEED_W_MM:
+        why = f"{long_side}mm > {MAX_FEED_W_MM}mm（进纸宽度上限）"
+    elif short_side < MIN_FEED_L_MM:
+        why = f"{short_side}mm < {MIN_FEED_L_MM}mm（走纸长度下限）"
+    elif short_side < MIN_FEED_W_MM:
+        why = f"{short_side}mm < {MIN_FEED_W_MM}mm（进纸宽度下限）"
+    else:
+        why = f"{long_side}mm > {MAX_FEED_L_MM}mm（走纸长度上限）"
+    return False, (f"G3800 自定义尺寸要求{limits}；"
+                   f"{w_mm}×{h_mm}mm 两向都不满足：{why}")
 ```
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_specs.py -v`
-Expected: PASS（11 passed）
+Expected: PASS（12 passed）
 
 - [ ] **Step 5: 提交**
 

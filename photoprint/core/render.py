@@ -41,7 +41,8 @@ def offset_mm_for_cell(offset_pct, w_mm, h_mm):
     """百分比偏移 → 该格的 mm 偏移：±50% 即最多挪半格。
 
     换算本体留在 core：界面层禁做几何，而「按哪个尺寸换算」本身就是几何决策。
-    按格子内框而非纸张尺寸换算，否则同一页两种朝向的格子会偏移失真。
+    必须逐格调用（拿本格尺寸），同一页两种朝向的格子若不逐格算，±50% 就只对
+    算出的那一格成立（T3 评审 I-1）。
     """
     return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
 
@@ -60,7 +61,7 @@ def _mask_bands(sheet, rect):
 
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
-                dx_mm=0.0, dy_mm=0.0):
+                offset_pct=(0.0, 0.0)):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。"""
     px_w = units.mm_to_px(sheet.w_mm, dpi)
     px_h = units.mm_to_px(sheet.h_mm, dpi)
@@ -87,9 +88,10 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
             ox, oy, ow, oh = got
         # 旋转格：先把原图按未旋转的目标比例裁，再转 90°，尺寸正好对上外框
         target_w, target_h = (oh, ow) if cell.rotated else (ow, oh)
-        # 界面偏移是纸面语义，旋转格须先换算到旋转前坐标再交给 crop
-        in_dx, in_dy = crop.rotate_offset(dx_mm, dy_mm) if cell.rotated \
-            else (dx_mm, dy_mm)
+        # 偏移是纸面语义且按本格尺寸逐格换算；旋转格还要再换算到旋转前坐标
+        cell_dx, cell_dy = offset_mm_for_cell(offset_pct, ow, oh)
+        in_dx, in_dy = crop.rotate_offset(cell_dx, cell_dy) if cell.rotated \
+            else (cell_dx, cell_dy)
         if cm == crop.FILL:
             # FILL 的 dx/dy 挪的是取景窗，画面在纸面上会反向；fit 挪的是
             # 落位矩形，本身已是纸面语义，故只在 fill 档补一次反号
@@ -98,13 +100,14 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                                cm, dx_mm=in_dx, dy_mm=in_dy,
                                ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
-        # dest_mm 是旋转前的目标矩形（宽高按未旋转的格子算）：照片转 90° 后
-        # 宽高互换，落位偏移也须互换，否则尺寸检查拿错轴、缩放补偿到错误的
-        # (w, h)，画面会撑出格子并压到邻格（终审 C1 实测）
-        dx, dy, dw, dh = pl.dest_mm
+        # 旋转格还要把落位换轴：照片转 90° 后宽高互换，若沿用旋转前的
+        # (dx, dy)，尺寸检查会拿错轴、缩放补偿到错误的 (w, h)，画面会撑出
+        # 格子并压到邻格（终审 C1 实测），映射见 place_rotated_dest
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
             dx, dy, dw, dh = place_rotated_dest(pl.dest_mm, target_h)
+        else:
+            dx, dy, dw, dh = pl.dest_mm
         if dw and (abs(dw - piece.width / units.ppmm(dpi)) > 0.6
                    or abs(dh - piece.height / units.ppmm(dpi)) > 0.6):
             piece = piece.resize((max(1, units.round_px(dw * units.ppmm(dpi))),

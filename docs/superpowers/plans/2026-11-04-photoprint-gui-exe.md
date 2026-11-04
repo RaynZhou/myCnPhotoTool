@@ -31,7 +31,7 @@
 | 文件 | 动作 | 职责 |
 |---|---|---|
 | `photoprint/core/crop.py` | Modify | 新增 `rotate_offset`：纸面偏移 → 旋转前偏移 |
-| `photoprint/core/render.py` | Modify | 新增 `place_rotated_dest` 纯函数；`render_page` 透传 `dx_mm/dy_mm` |
+| `photoprint/core/render.py` | Modify | 新增 `place_rotated_dest` 纯函数；`render_page` 透传 `offset_pct`（逐格换算） |
 | `photoprint/jobs.py` | Create | 共用编排：`build_layout` / `Job` / `build_job` / `render_all` / `load_photo` |
 | `photoprint/cli.py` | Modify | 变薄为调用 `jobs`；新增 `--mask`；导出默认关遮罩 |
 | `photoprint/core/store.py` | Modify | 新增 `get_last_job` / `set_last_job` |
@@ -135,13 +135,16 @@ git commit -m "feat(core): 纸面裁切偏移换算 rotate_offset"
 **Interfaces:**
 - Consumes: `crop.rotate_offset`（T1）、`crop.cell_crop_box` 的既有 `dx_mm/dy_mm` 形参
 - Produces: `render.place_rotated_dest(dest_mm, target_h_mm) -> tuple[float, float, float, float]`；
-  `render.render_page(..., dx_mm: float = 0.0, dy_mm: float = 0.0)`；
+  `render.render_page(..., offset_pct: tuple[float, float] = (0.0, 0.0))`；
   `render.offset_mm_for_cell(offset_pct, w_mm, h_mm) -> tuple[float, float]`
 
 偏移的纸面语义要在两种模式下都成立，而 `crop.cell_crop_box` 对 `dx_mm/dy_mm` 的用法
 并不相同（实测：FILL 挪的是取景窗 `crop_px`，dest 不变；FIT 挪的是 `dest_mm`）。同一
-个 `dx_mm=+1` 在 FILL 下画面会往**左**走。因此渲染层必须按生效的裁切模式补一次反号：
+个纸面 +1mm 在 FILL 下画面会往**左**走。因此渲染层必须按生效的裁切模式补一次反号：
 FILL（含 `bleed_trim`，它的 `crop_mode` 也是 fill）取负，fit 不取负。
+
+`render_page` 交的是百分比而不是页级 mm 偏移（T3 评审 I-1，用户裁决）：同一页可能
+两种朝向混排（bands 装箱），“按哪个尺寸换算”是逐格决策，只有渲染层手里有每格的内框。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -190,7 +193,7 @@ def test_dy_offset_moves_picture_down_on_paper():
                               modes.FIT_TO_PRINTABLE, show_mask=False)
     moved = render.render_page(plan, [photo] * plan.count, a4, DPI,
                                modes.FIT_TO_PRINTABLE, show_mask=False,
-                               dy_mm=1.0)
+                               offset_pct=(0.0, 100.0 * 1.0 / ih))  # 纸面下移 1mm
     probe = (int(ix + iw / 2), int(iy + 4.0))
     assert base.getpixel(probe) == (255, 0, 0)      # 原画面覆盖
     assert moved.getpixel(probe) == (255, 255, 255)  # 下移 1mm 后露白
@@ -202,22 +205,30 @@ def test_dy_offset_moves_picture_down_on_paper():
 def test_dx_offset_moves_rotated_cell_picture_right_on_paper():
     """旋转格的纸面水平偏移必须真往右：旧转置写法会整体反号（终审 C1）。
 
-    A4+4R 两格都是旋转格，纸面格子 152×102，旋转前目标 102×152；
-    正方形照片 FIT 后为 102×102，纸面起点 x = 29+25 = 54（占 54..155）。
-    dx_mm=+3 → 旋转前 dy=-3 → 纸面起点 x=57（占 57..158）。
+    A4+4R 两格都是旋转格；正方形照片 FIT 进旋转前目标后是 102×102，
+    在纸面格内左右各留白，起点 x = 格左沿 + (格宽 - 格高)/2。
+    探针取起点内 1mm 与右沿外 1mm，偏移 3mm 后两者必须恰好互换。
     """
     a4, r4 = specs.find_spec("A4"), specs.find_spec("4R")
     plan = pack.pack(a4, r4, gap_mm=0.0, allow_rotate=True,
                      printable=specs.printable_rect(a4))
     assert [c.rotated for c in plan.cells] == [True, True]
+    cx, cy, cw, ch = plan.cells[0].inner_mm()
+    start = int(round(cx + (cw - ch) / 2.0))
+    y_mid = int(round(cy + ch / 2.0))
+    inside = (start + 1, y_mid)          # 原画面内、右移 3mm 后露白
+    outside = (start + ch + 1, y_mid)    # 原留白、右移 3mm 后被覆盖
     photo = Image.new("RGB", (100, 100), (255, 0, 0))
     args = (plan, [photo] * plan.count, a4, DPI, modes.FIT_TO_PRINTABLE)
+    pct = (100.0 * 3.0 / cw, 0.0)        # 纸面向右 3mm
     base = render.render_page(*args, show_mask=False)
-    moved = render.render_page(*args, show_mask=False, dx_mm=3.0)
-    assert base.getpixel((55, 95)) == (255, 0, 0)       # 起点左侧 1mm 仍在画内
-    assert moved.getpixel((55, 95)) == (255, 255, 255)  # 右移 3mm 后露白
-    assert base.getpixel((157, 95)) == (255, 255, 255)  # 原本右侧留白 25mm
-    assert moved.getpixel((157, 95)) == (255, 0, 0)     # 移进来才见红
+    moved = render.render_page(*args, show_mask=False, offset_pct=pct)
+    assert base.getpixel(inside) == (255, 0, 0), f"起点前提已破：{inside} 应为红"
+    assert moved.getpixel(inside) == (255, 255, 255), (
+        f"纸面向右 3mm 后 {inside} 应露白（仍为红 = 没动或反向）")
+    assert base.getpixel(outside) == (255, 255, 255), f"起点前提已破：{outside} 应为白"
+    assert moved.getpixel(outside) == (255, 0, 0), (
+        f"纸面向右 3mm 后 {outside} 应转红（仍为白 = 方向反了）")
 
 
 def test_fill_mode_offset_moves_picture_toward_paper_direction():
@@ -229,14 +240,42 @@ def test_fill_mode_offset_moves_picture_toward_paper_direction():
     ix, iy, iw, ih = plan.cells[0].inner_mm()
     y = int(iy + ih / 2)
     args = (plan, [photo] * plan.count, a4, DPI, modes.FILL_PRINTABLE)
-    low = render.render_page(*args, show_mask=False, dx_mm=-3.0)
-    high = render.render_page(*args, show_mask=False, dx_mm=3.0)
+    low = render.render_page(*args, show_mask=False,
+                             offset_pct=(-100.0 * 3.0 / iw, 0.0))
+    high = render.render_page(*args, show_mask=False,
+                              offset_pct=(100.0 * 3.0 / iw, 0.0))
 
     def first_red(page):
-        return min(x for x in range(int(ix), int(ix + iw))
-                   if page.getpixel((x, y)) == (255, 0, 0))
+        cols = [x for x in range(int(ix), int(ix + iw))
+                if page.getpixel((x, y)) == (255, 0, 0)]
+        assert cols, "红带不在首格内，测试前提已破"
+        return min(cols)
 
-    assert first_red(high) > first_red(low)  # dx 为正 → 画面往纸面右边走
+    moved_by = first_red(high) - first_red(low)
+    assert moved_by >= 1, f"dx 为正应使画面往纸面右边走，实际差 {moved_by}px"
+
+
+def test_offset_pct_is_applied_per_cell_on_mixed_orientation_page():
+    """混合朝向页（7R+3R 的 bands 装箱）：偏移必须逐格按本格尺寸换算。
+
+    首格是转置格（纸面 127×89），第二格是竖格（89×127）。offset_pct=(0, 15)
+    按第二格自己的高 127 算是 19.05mm（被留白夹到 19），画面顶沿落在 145；
+    若按首格高 89 算只有 13.35mm，顶沿落在 139——探针 142 一个是白、一个是红。
+    """
+    sheet, cell = specs.find_spec("7R"), specs.find_spec("3R")
+    plan = pack.pack(sheet, cell, gap_mm=0.0, allow_rotate=True,
+                     printable=specs.printable_rect(sheet))
+    assert [c.rotated for c in plan.cells] == [True, False, False]
+    bx, by, bw, bh = plan.cells[1].inner_mm()
+    photo = Image.new("RGB", (100, 100), (255, 0, 0))
+    args = (plan, [photo] * plan.count, sheet, DPI, modes.FIT_TO_PRINTABLE)
+    base = render.render_page(*args, show_mask=False)
+    moved = render.render_page(*args, show_mask=False, offset_pct=(0.0, 15.0))
+    probe = (int(bx + bw / 2), int(by + 35.0))     # 本格画面顶沿下方 16mm
+    assert base.getpixel(probe) == (255, 0, 0), f"零偏移下第二格顶沿应经过探针 {probe}"
+    assert moved.getpixel(probe) == (255, 255, 255), (
+        f"偏移未按本格高 {bh:.0f}mm 换算（按首格算的话顶沿只到 139mm，"
+        f"探针 {probe} 仍在画内）")
 
 
 def test_offset_mm_for_cell_half_page_is_50_pct():
@@ -252,8 +291,8 @@ def test_offset_mm_for_cell_zero_is_zero():
 
 Run: `python -m pytest tests/test_render_offset.py -v`
 Expected: FAIL — 前两条 `AttributeError: ... has no attribute 'place_rotated_dest'`；
-中间三条（透传偏移的像素测试）`TypeError: render_page() got an unexpected
-keyword argument 'dy_mm' / 'dx_mm'`；后两条 `AttributeError: ... 'offset_mm_for_cell'`
+中间四条（透传偏移的像素测试）`TypeError: render_page() got an unexpected
+keyword argument 'offset_pct'`；后两条 `AttributeError: ... 'offset_mm_for_cell'`
 
 - [ ] **Step 3: 加纯函数并改签名**
 
@@ -277,26 +316,28 @@ def offset_mm_for_cell(offset_pct, w_mm, h_mm):
     """百分比偏移 → 该格的 mm 偏移：±50% 即最多挪半格。
 
     换算本体留在 core：界面层禁做几何，而“按哪个尺寸换算”本身就是几何决策。
-    按格子内框而非纸张尺寸换算，否则同一页两种朝向的格子会偏移失真。
+    必须逐格调用（拿本格尺寸），同一页两种朝向的格子若不逐格算，±50% 就只对
+    算出的那一格成立（T3 评审 I-1）。
     """
     return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
 ```
 
-把 `render_page` 的签名改为（只加两个参数，其余不动）：
+把 `render_page` 的签名改为（只加一个参数，其余不动）：
 
 ```python
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
-                dx_mm=0.0, dy_mm=0.0):
+                offset_pct=(0.0, 0.0)):
 ```
 
 把循环里从 `target_w, target_h` 到转置那一段替换为：
 
 ```python
         target_w, target_h = (oh, ow) if cell.rotated else (ow, oh)
-        # 界面偏移是纸面语义，旋转格须先换算到旋转前坐标再交给 crop
-        in_dx, in_dy = crop.rotate_offset(dx_mm, dy_mm) if cell.rotated \
-            else (dx_mm, dy_mm)
+        # 偏移是纸面语义且按本格尺寸逐格换算；旋转格还要再换算到旋转前坐标
+        cell_dx, cell_dy = offset_mm_for_cell(offset_pct, ow, oh)
+        in_dx, in_dy = crop.rotate_offset(cell_dx, cell_dy) if cell.rotated \
+            else (cell_dx, cell_dy)
         if cm == crop.FILL:
             # FILL 的 dx/dy 挪的是取景窗，画面在纸面上会反向；fit 挪的是
             # 落位矩形，本身已是纸面语义，故只在 fill 档补一次反号
@@ -305,7 +346,9 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                                cm, dx_mm=in_dx, dy_mm=in_dy,
                                ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
-        # dest_mm 是旋转前的目标矩形：转 90° 后宽高互换，落位也要换轴
+        # 旋转格还要把落位换轴：照片转 90° 后宽高互换，若沿用旋转前的
+        # (dx, dy)，尺寸检查会拿错轴、缩放补偿到错误的 (w, h)，画面会撑出
+        # 格子并压到邻格（终审 C1 实测），映射见 place_rotated_dest
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
             dx, dy, dw, dh = place_rotated_dest(pl.dest_mm, target_h)
@@ -313,13 +356,13 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
             dx, dy, dw, dh = pl.dest_mm
 ```
 
-同时删掉原来那段"这是「转置」而非通用 90° 旋转映射"的行内注释（已被
-`place_rotated_dest` 的文档取代）。
+同时删掉原来那段"这是「转置」而非通用 90° 旋转映射"的行内注释，并把旧写法
+留下的 `dx, dy, dw, dh = ...` 重复赋值改成上面的 if/else 形态（T2 评审 Minor1）。
 
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_render_offset.py -v`
-Expected: 7 passed
+Expected: 8 passed
 
 - [ ] **Step 5: 全量回归 + 本机证据**
 
@@ -348,8 +391,9 @@ git commit -m "feat(core): 渲染层透传裁切偏移，旋转落位改真旋�
 - Consumes: `core/{specs,pack,modes,render}`、`store.Store.resolve`
 - Produces:
   - `jobs.build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode, borderless_active=False) -> tuple[LayoutPlan, str]`
-  - `jobs.Job`（dataclass：`plan / mode / sheet / photos / offset_pct / offset_mm / borderless_active`，
+  - `jobs.Job`（dataclass：`plan / mode / sheet / photos / offset_pct / borderless_active`，
     属性 `count / page_count / note`，方法 `render(page_index, dpi, show_mask=False)`）
+    —— 偏移只存 `offset_pct`，不存页级 mm（逐格换算在 core，T3 评审 I-1）
   - `jobs.build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0, bleed_mm=3.0, mode=None, offset_pct=(0.0, 0.0), borderless_active=False) -> Job`
   - `jobs.render_all(job, dpi, show_mask=False) -> list[Image]`
   - `jobs.load_photo(path) -> Image`（从 `cli.py` 搬来）
@@ -361,6 +405,7 @@ git commit -m "feat(core): 渲染层透传裁切偏移，旋转落位改真旋�
 ```python
 """编排层必须与重构前的 cli 逐字段等价，且不含 print/GUI 依赖。"""
 import inspect
+import sys
 
 import pytest
 
@@ -369,7 +414,7 @@ pytest.importorskip("PIL", reason="需要 Pillow")
 from PIL import Image  # noqa: E402
 
 from photoprint import cli, jobs  # noqa: E402
-from photoprint.core import modes, store  # noqa: E402
+from photoprint.core import modes, render, specs, store  # noqa: E402
 
 
 @pytest.fixture
@@ -383,18 +428,38 @@ def _photos(n, color=(200, 30, 30)):
     return [Image.new("RGB", (100, 100), color) for _ in range(n)]
 
 
-@pytest.mark.parametrize("sheet,cell,gap,bleed,mode", [
-    ("A4", "3R", 0.0, modes.DEFAULT_BLEED_MM, None),
-    ("A4", "ID1", 2.0, modes.DEFAULT_BLEED_MM, None),
-    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None),
-    ("3R", "3R", 0.0, 0.0, modes.FILL_PRINTABLE),
+@pytest.mark.parametrize("sheet,cell,gap,bleed,mode,borderless", [
+    ("A4", "3R", 0.0, modes.DEFAULT_BLEED_MM, None, False),
+    ("A4", "ID1", 2.0, modes.DEFAULT_BLEED_MM, None, False),
+    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None, False),
+    ("3R", "3R", 0.0, 0.0, modes.FILL_PRINTABLE, False),
+    # 无边距实测生效是另一条排版分支（可打印区换成整张纸），也得对拍
+    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None, True),
 ])
-def test_build_layout_matches_legacy_cli(st, sheet, cell, gap, bleed, mode):
-    plan_a, mode_a = cli.build_plan_jobs(st, sheet, cell, gap, bleed, mode, False)
+def test_build_layout_matches_legacy_cli(st, sheet, cell, gap, bleed, mode,
+                                         borderless):
+    plan_a, mode_a = cli.build_plan_jobs(st, sheet, cell, gap, bleed, mode,
+                                         borderless)
     plan_b, mode_b = jobs.build_layout(st, sheet, cell, gap, bleed, mode,
-                                       borderless_active=False)
+                                       borderless_active=borderless)
     assert mode_a == mode_b
     assert plan_a == plan_b  # dataclass 逐字段相等
+
+
+def test_build_layout_rejects_cell_larger_than_sheet_with_same_message(st):
+    """报错分支也要对拍：文案是用户唯一能看见的出口，漂了就没人知道为何失败。
+
+    卡片纸（91×55）在出血档装不下带 3mm 出血的美国签证（57×57 > 55），
+    且出血档不走“整纸一格”退化分支，是预设组合里真能走到的报错。
+    """
+    with pytest.raises(ValueError) as ea:
+        cli.build_plan_jobs(st, "CARD", "USVISA", 0.0,
+                            modes.DEFAULT_BLEED_MM, modes.BLEED_TRIM, False)
+    with pytest.raises(ValueError) as eb:
+        jobs.build_layout(st, "CARD", "USVISA", 0.0, modes.DEFAULT_BLEED_MM,
+                          modes.BLEED_TRIM, borderless_active=False)
+    assert str(ea.value) == str(eb.value)
+    assert "放不下" in str(eb.value)
 
 
 def test_build_job_counts_pages(st):
@@ -414,9 +479,37 @@ def test_note_uses_legacy_wording_bleed(st):
     assert job.note.startswith("需人工裁切：沿灰线切开后即为 89×127mm 成品")
 
 
-def test_note_uses_legacy_wording_margins(st):
+def test_note_spec_source_says_unproven(st):
+    """全局约束点名的一句：margin_source=spec 时必须逐字出现该文案。"""
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
-    assert "未经真机校准" in job.note
+    assert job.sheet.margin_source == "spec"  # 前提：开发期常态
+    assert "依规格推定，未经真机校准" in job.note
+    assert "上3.0/下5.0/左3.4/右3.4mm" in job.note  # 数字不得丢
+
+
+def test_note_probed_source_says_driver_measured(st):
+    st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "probed")
+    job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
+    assert "驱动实测边距" in job.note
+    assert "未经真机校准" not in job.note  # 已实测就不许再说不确定
+
+
+def test_note_calibrated_source_says_machine_calibrated(st):
+    st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "calibrated")
+    job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
+    # 钉整句而不是"真机校准"四个字：光说“未经真机校准”也含这四个字
+    assert "真机校准边距" in job.note
+    assert "未经" not in job.note and "依规格推定" not in job.note
+
+
+def test_note_unknown_margin_source_falls_back_to_most_conservative(st):
+    """手改的 papers.json 可能交来历不明的来源；凭空说"实测"就是谎报。"""
+    st.raw["overrides"]["A4"] = {
+        "margins_mm": {"top": 3.0, "bottom": 5.0, "left": 3.4, "right": 3.4},
+        "margin_source": "guessed",
+    }
+    job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
+    assert "依规格推定，未经真机校准" in job.note
 
 
 def test_render_out_of_range_raises(st):
@@ -432,12 +525,25 @@ def test_offset_changes_rendered_pixels(st):
     assert a.render(0, 25.4).tobytes() != b.render(0, 25.4).tobytes()
 
 
-def test_offset_pct_is_converted_by_cell_inner_size(st):
-    """百分比按格子内框换算：ID1 内框 25×32，±50% → (12.5, 16.0)mm。"""
+def test_build_job_passes_percentage_through_without_converting(st, monkeypatch):
+    """编排层不得自己换算成 mm：±50% 必须原样送到 core，逐格按本格尺寸换算。
+
+    本层只按首格换算的话，混合朝向页上其余格的偏移会失真（T3 评审 I-1），
+    而界面交来的百分比本身是与格子无关的量。 spy 只拦一层，真渲染照跑。
+    """
+    seen = {}
+    real = render.render_page
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(render, "render_page", spy)
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
                          offset_pct=(50.0, -50.0))
-    assert job.offset_mm == pytest.approx((12.5, -16.0))
+    job.render(0, 25.4)
     assert job.offset_pct == (50.0, -50.0)
+    assert seen["offset_pct"] == (50.0, -50.0)
 
 
 def test_render_all_covers_every_page(st):
@@ -450,18 +556,32 @@ def test_jobs_module_has_no_print_and_no_gui():
     """窗口化打包后 sys.stdout 是 None；jobs 一旦被输出污染就会崩。
 
     注：这是“源码不含某字样”的守门断言，所以 jobs 的注释也不得写出
-    被禁模块的名字，否则测试自己打自己。
+    被禁模块的名字，否则测试自己打自己。字样拦不住别名与 logging，
+    真正兜住它的是下面那条把 sys.stdout 设为 None 的行为断言。
     """
     src = inspect.getsource(jobs)
     assert "print(" not in src
     for banned in ("PySide6", "win32print", "win32ui", "win32con"):
         assert banned not in src
+
+
+def test_jobs_stay_silent_when_stdout_is_unavailable(st, monkeypatch):
+    """--windowed 下 sys.stdout 真的是 None：编排层写一句就 AttributeError。
+
+    行为断言而不是文本扫描：logging/traceback.print_exc/别名转发都绕得过扫描。
+    """
+    monkeypatch.setattr(sys, "stdout", None)
+    job = jobs.build_job(st, _photos(5), "A4", "3R", bleed_mm=3.0)
+    assert job.note
+    assert len(jobs.render_all(job, 25.4)) == 2
 ```
 
 - [ ] **Step 2: 跑到失败**
 
 Run: `python -m pytest tests/test_jobs.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'photoprint.jobs'`
+Expected: FAIL — 收集阶段就错。测试写的是 `from photoprint import cli, jobs`，
+子模块缺失时 Python 抛的是 `ImportError: cannot import name 'jobs' from 'photoprint'`
+（不是 `ModuleNotFoundError`，同一回事：模块还不存在）
 
 - [ ] **Step 3: 写 `photoprint/jobs.py`**
 
@@ -483,6 +603,16 @@ from photoprint.core import modes, pack, render, specs
 PREVIEW_DPI = 96.0
 DEFAULT_OUTPUT_DPI = 300.0
 
+# 状态栏的边距来源分档（规格 7.3：文案必须跟着证据走）。
+# 未知来源一律按最保守口径写，绝不落进"实测"分支——凭空给用户一个
+# 没有证据的承诺，比多写一句"未校准"严重得多。
+_MARGIN_SOURCE_NOTE = {
+    "spec": "依规格推定，未经真机校准",
+    "probed": "驱动实测边距",
+    "calibrated": "真机校准边距",
+}
+_UNKNOWN_MARGIN_SOURCE = _MARGIN_SOURCE_NOTE["spec"]
+
 
 def load_photo(path):
     """读图并让 EXIF 方向生效，避免界面与打印各转一次。
@@ -496,7 +626,8 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                  borderless_active=False):
     """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
 
-    逻辑逐字来自 cli.build_plan_jobs，那条函数已改为本函数的薄转发。
+    逻辑逐字来自 cli.build_plan_jobs；cli 改为本函数的薄转发是 Task 4 的事，
+    因此本 commit 里两边仍是两份实现，等价测试是真对拍。
     """
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)
@@ -536,7 +667,6 @@ class Job:
     sheet: specs.SizeSpec
     photos: list = field(default_factory=list)
     offset_pct: tuple[float, float] = (0.0, 0.0)
-    offset_mm: tuple[float, float] = (0.0, 0.0)
     borderless_active: bool = False
 
     @property
@@ -550,13 +680,19 @@ class Job:
 
     @property
     def note(self) -> str:
-        """状态栏文案，口径与 cli 逐字一致。"""
+        """界面状态栏文案：边距那句按 margin_source 分档（规格 7.3）。
+
+        cli 的 stdout 另有一套逐字冻结的文案（全局约束），两边共用同一份
+        数字、不共用同一句话——界面要说清证据从哪来，cli 要保持历史输出不变。
+        """
         if self.mode == modes.BLEED_TRIM:
             inner = self.plan.cells[0].inner_mm()
             return (f"需人工裁切：沿灰线切开后即为 {inner[2]:.0f}×{inner[3]:.0f}mm 成品")
         m = self.sheet.margins
-        return (f"将保留白边：依规格约 上{m.top}/下{m.bottom}/"
-                f"左{m.left}/右{m.right}mm（未经真机校准）")
+        provenance = _MARGIN_SOURCE_NOTE.get(self.sheet.margin_source,
+                                             _UNKNOWN_MARGIN_SOURCE)
+        return (f"将保留白边：上{m.top}/下{m.bottom}/左{m.left}/右{m.right}mm"
+                f"（{provenance}）")
 
     def render(self, page_index: int, dpi: float, show_mask: bool = False) -> Image.Image:
         """渲染单页。show_mask 只在预览开，导出必须关（否则灰边进相纸）。"""
@@ -567,7 +703,7 @@ class Job:
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
-                                  dx_mm=self.offset_mm[0], dy_mm=self.offset_mm[1])
+                                  offset_pct=self.offset_pct)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
@@ -575,11 +711,10 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               offset_pct=(0.0, 0.0), borderless_active=False) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active)
-    # 界面交来的是百分比（±50% = 最多挪半格）；换算本体在 core，本层只调用
-    inner = plan.cells[0].inner_mm()
-    offset_mm = render.offset_mm_for_cell(offset_pct, inner[2], inner[3])
+    # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
+    # 决策（T3 评审 I-1），本层若先按首格换算成 mm，其余格的 ±50% 就失真
     return Job(plan=plan, mode=mode_eff, sheet=st.resolve(sheet_key),
-               photos=list(photos), offset_mm=offset_mm,
+               photos=list(photos),
                offset_pct=tuple(float(v) for v in offset_pct),
                borderless_active=borderless_active)
 
@@ -592,7 +727,7 @@ def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Imag
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_jobs.py -v`
-Expected: 13 passed（parametrize 4 条 + 其余 9 条）
+Expected: 19 passed（parametrize 5 条 + 其余 14 条）
 
 - [ ] **Step 5: 全量回归 + 提交**
 
@@ -608,7 +743,7 @@ git commit -m "feat: 抽出 jobs 共用编排层（build_layout/Job/build_job/re
 
 **Files:**
 - Modify: `photoprint/cli.py`
-- Test: `tests/test_cli.py`（追加 3 条）
+- Test: `tests/test_cli.py`（追加 4 条）
 
 **Interfaces:**
 - Consumes: `jobs.build_layout` / `jobs.build_job` / `jobs.render_all` / `jobs.load_photo`
@@ -663,6 +798,18 @@ def test_build_plan_jobs_is_still_positional(st):
                                      modes.DEFAULT_BLEED_MM, None, False)
     assert plan.count == 4
     assert mode == modes.BLEED_TRIM
+
+
+def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
+    """全局约束：“cli 输出文案逐字不变”。重构前就应该通过——
+    它是逐字冻结的回归锁，不是 RED 步骤：界面用的 `Job.note` 按 margin_source
+    分档，措辞与本句不同，cli 这一侧必须自己钉住。"""
+    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
+                     "--cell", "ID1", "--dpi", "25.4"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert ("将保留白边：依规格约 上3.0/下5.0/左3.4/右3.4mm（未经真机校准）"
+            in out)
 ```
 
 - [ ] **Step 2: 跑到失败**
@@ -706,7 +853,17 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     job = jobs.build_job(st, photos, args.sheet, args.cell, gap_mm=args.gap,
                          bleed_mm=args.bleed, mode=args.mode)
     pages = jobs.render_all(job, args.dpi, show_mask=args.mask)
-    print(f"纸张 {sheet.label}，每页 {job.count} 格，共 {len(pages)} 页。{job.note}")
+    # 文案逐字冻结（全局约束）：cli 沿用本层原有的两分支 note 表达式，
+    # 不取 job.note——那条属性按 margin_source 分档，spec 档写的是
+    # “依规格推定，未经真机校准”，与历史输出不同一句
+    borderless = job.mode == modes.BLEED_TRIM
+    note = ("需人工裁切：沿灰线切开后即为 "
+            f"{job.plan.cells[0].inner_mm()[2]:.0f}×"
+            f"{job.plan.cells[0].inner_mm()[3]:.0f}mm 成品"
+            if borderless else
+            f"将保留白边：依规格约 上{sheet.margins.top}/下{sheet.margins.bottom}/"
+            f"左{sheet.margins.left}/右{sheet.margins.right}mm（未经真机校准）")
+    print(f"纸张 {sheet.label}，每页 {job.count} 格，共 {len(pages)} 页。{note}")
 ```
 
 其余段落（`--out` 建父目录与"仅第一页"提示、`--pdf`、`--print`）保持原样不动。
@@ -714,7 +871,7 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_cli.py -v`
-Expected: 全部通过（含原 11 条 + 新 3 条）
+Expected: 全部通过（含原 10 条 + 新 4 条）
 
 - [ ] **Step 5: 全量回归 + 手工证据**
 
@@ -2007,9 +2164,11 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
 - **Spec 覆盖**：第 1–12 节逐节对应到任务——范围§1→T3/T7、架构§2→T3/T6/T7、界面§3→T7、
   接口§4→T3、偏移几何§5→T1/T2、遮罩§6→T2/T4/T7、错误处理§7→T6/T7、持久化§8→T5/T7、
   打包§9→T8/T9、测试§10→各任务 Step 1、验收§11→T10、遗留§12→无任务（有意不做）。
-- **与 spec 的两处有意偏差**（均已写进代码注释）：① `Job` 吃 `offset_pct` 而非 `offset_mm`，
-  因为百分比→mm 的换算是几何决策，必须留在 `core`；② `last_job` 存 `mode_index` 而非
-  `mode`，避开“自动”档是 `None` 的反序列化歧义。
+- **与 spec 的三处有意偏差**（均已写进代码注释）：① `Job` 吃 `offset_pct` 而非
+  `offset_mm`，因为百分比→mm 的换算是逐格几何决策，必须留在 `core`（T3 评审 I-1）；
+  ② `Job.note` 按 `margin_source` 分档，与 cli 的逐字冻结文案不同一句（T3 评审 I-2，
+  用户裁决：界面要说清证据从哪来，cli 历史输出不得变）；③ `last_job` 存 `mode_index`
+  而非 `mode`，避开“自动”档是 `None` 的反序列化歧义。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

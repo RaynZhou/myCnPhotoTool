@@ -15,6 +15,16 @@ from photoprint.core import modes, pack, render, specs
 PREVIEW_DPI = 96.0
 DEFAULT_OUTPUT_DPI = 300.0
 
+# 状态栏的边距来源分档（规格 7.3：文案必须跟着证据走）。
+# 未知来源一律按最保守口径写，绝不落进"实测"分支——凭空给用户一个
+# 没有证据的承诺，比多写一句"未校准"严重得多。
+_MARGIN_SOURCE_NOTE = {
+    "spec": "依规格推定，未经真机校准",
+    "probed": "驱动实测边距",
+    "calibrated": "真机校准边距",
+}
+_UNKNOWN_MARGIN_SOURCE = _MARGIN_SOURCE_NOTE["spec"]
+
 
 def load_photo(path):
     """读图并让 EXIF 方向生效，避免界面与打印各转一次。
@@ -28,7 +38,8 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                  borderless_active=False):
     """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
 
-    逻辑逐字来自 cli.build_plan_jobs，那条函数已改为本函数的薄转发。
+    逻辑逐字来自 cli.build_plan_jobs；cli 改为本函数的薄转发是 Task 4 的事，
+    因此本 commit 里两边仍是两份实现，等价测试是真对拍。
     """
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)
@@ -68,7 +79,6 @@ class Job:
     sheet: specs.SizeSpec
     photos: list = field(default_factory=list)
     offset_pct: tuple[float, float] = (0.0, 0.0)
-    offset_mm: tuple[float, float] = (0.0, 0.0)
     borderless_active: bool = False
 
     @property
@@ -82,13 +92,19 @@ class Job:
 
     @property
     def note(self) -> str:
-        """状态栏文案，口径与 cli 逐字一致。"""
+        """界面状态栏文案：边距那句按 margin_source 分档（规格 7.3）。
+
+        cli 的 stdout 另有一套逐字冻结的文案（全局约束），两边共用同一份
+        数字、不共用同一句话——界面要说清证据从哪来，cli 要保持历史输出不变。
+        """
         if self.mode == modes.BLEED_TRIM:
             inner = self.plan.cells[0].inner_mm()
             return (f"需人工裁切：沿灰线切开后即为 {inner[2]:.0f}×{inner[3]:.0f}mm 成品")
         m = self.sheet.margins
-        return (f"将保留白边：依规格约 上{m.top}/下{m.bottom}/"
-                f"左{m.left}/右{m.right}mm（未经真机校准）")
+        provenance = _MARGIN_SOURCE_NOTE.get(self.sheet.margin_source,
+                                             _UNKNOWN_MARGIN_SOURCE)
+        return (f"将保留白边：上{m.top}/下{m.bottom}/左{m.left}/右{m.right}mm"
+                f"（{provenance}）")
 
     def render(self, page_index: int, dpi: float, show_mask: bool = False) -> Image.Image:
         """渲染单页。show_mask 只在预览开，导出必须关（否则灰边进相纸）。"""
@@ -99,7 +115,7 @@ class Job:
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
-                                  dx_mm=self.offset_mm[0], dy_mm=self.offset_mm[1])
+                                  offset_pct=self.offset_pct)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
@@ -107,11 +123,10 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               offset_pct=(0.0, 0.0), borderless_active=False) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active)
-    # 界面交来的是百分比（±50% = 最多挪半格）；换算本体在 core，本层只调用
-    inner = plan.cells[0].inner_mm()
-    offset_mm = render.offset_mm_for_cell(offset_pct, inner[2], inner[3])
+    # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
+    # 决策（T3 评审 I-1），本层若先按首格换算成 mm，其余格的 ±50% 就失真
     return Job(plan=plan, mode=mode_eff, sheet=st.resolve(sheet_key),
-               photos=list(photos), offset_mm=offset_mm,
+               photos=list(photos),
                offset_pct=tuple(float(v) for v in offset_pct),
                borderless_active=borderless_active)
 

@@ -429,7 +429,7 @@ def test_offset_changes_rendered_pixels(st):
     a = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
     b = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
                        offset_pct=(0.0, 50.0))
-    assert list(a.render(0, 25.4).getdata()) != list(b.render(0, 25.4).getdata())
+    assert a.render(0, 25.4).tobytes() != b.render(0, 25.4).tobytes()
 
 
 def test_offset_pct_is_converted_by_cell_inner_size(st):
@@ -545,12 +545,8 @@ class Job:
 
     @property
     def page_count(self) -> int:
-        """零照片也至少一页：界面要能预览空格。
-
-        与 cli._pages 的切页等价（照片非空时就是页数）；count 恒 >= 1，
-        因为 build_layout 在 0 格时已经抛错。
-        """
-        return max(1, -(-len(self.photos) // self.count))
+        """零照片也至少一页：界面要能预览空格。"""
+        return max(1, pack.needed_sheets(self.plan.count, len(self.photos)))
 
     @property
     def note(self) -> str:

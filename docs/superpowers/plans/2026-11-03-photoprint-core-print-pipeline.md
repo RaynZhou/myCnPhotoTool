@@ -2120,7 +2120,7 @@ def _photos(n, color):
     return [PILImage.new("RGB", (200, 100), color) for _ in range(n)]
 
 
-def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None):
+def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None, cut_lines=True):
     # 固定用整张纸作为装箱矩形，坐标可手算：x0=(210-178)/2=16、y0=(297-254)/2=21.5
     # （默认的可打印内缩矩形由 T5 的测试覆盖，本文件只验裁切线几何）
     full = specs.RectMM(0.0, 0.0, 210.0, 297.0)
@@ -2128,7 +2128,7 @@ def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None):
                      printable=full)
     imgs = photos or _photos(plan.count, (255, 0, 0))
     return plan, render.render_page(plan, imgs, specs.find_spec("A4"), DPI, mode,
-                                   show_cut_lines=True)
+                                   show_cut_lines=cut_lines)
 
 
 def test_page_size_matches_sheet_in_pixels():
@@ -2147,13 +2147,36 @@ def test_photo_pixels_present_and_bounded():
 
 
 def test_fill_mode_crops_to_cell_exactly():
-    """横向 200×100 的照片铺满 89×127 的格：宽被裁，高铺满。"""
-    plan, img = _a4_3r(photos=_photos(4, (0, 255, 0)))
+    """横向 200×100 的照片铺满 89×127 的格：宽被裁，高铺满。
+    只放一张照片（其余格留白），否则同行邻格的同色绿会连进扫描区间；
+    关切缝叠加：居中装箱的缝在 x=16/105 的格子边界上（T6 裁决两侧都画），
+    会盖掉照片首列——那是画线预期行为，与本条的几何断言无关，
+    缝自身的像素位置由后面的裁切线测试钉住。"""
+    green = PILImage.new("RGB", (200, 100), (0, 255, 0))
+    plan, img = _a4_3r(photos=[green], cut_lines=False)
     c = plan.cells[0]
     x0, y0 = int(round(c.x_mm)), int(round(c.y_mm))
     col = [x for x in range(210) if img.getpixel((x, y0 + 60)) == (0, 255, 0)]
     assert min(col) == x0
     assert max(col) - min(col) + 1 == 89
+
+
+def test_bleed_mode_overlays_inner_trim_guides():
+    """BLEED_TRIM 的两道切线：外框缝（粗切）由 build_cuts 给出并被切缝测试钉住，
+    本条钉第二道：按 inner_mm() 画的精裁线（T6 裁决，规格 5.2）。
+    内框比块边内缩 3px（dpi=25.4），线压在照片出血区上，精裁后正好消失。"""
+    green = PILImage.new("RGB", (200, 100), (0, 255, 0))
+    plan, img = _a4_3r(mode=modes.BLEED_TRIM, bleed=3.0, photos=[green])
+    c = plan.cells[0]
+    ix, iy = c.x_mm + c.bleed_mm, c.y_mm + c.bleed_mm   # 内框左上 (13.0, 18.5)
+    # 竖精裁线：x=13 像素列非绿，右移一列回绿
+    assert img.getpixel((int(ix), int(iy) + 40)) != (0, 255, 0)
+    assert img.getpixel((int(ix) + 1, int(iy) + 40)) == (0, 255, 0)
+    # 横精裁线：y=18.5 经 round_px 落像素 19，上方出血带仍是绿
+    x_mid = int(c.x_mm + c.w_mm / 2.0)                  # 57
+    assert img.getpixel((x_mid, int(iy + 0.5))) != (0, 255, 0)
+    assert img.getpixel((x_mid, int(iy + 0.5) + 1)) == (0, 255, 0)
+    assert img.getpixel((x_mid, int(iy) - 1)) == (0, 255, 0)
 
 
 def test_mask_covers_physical_margin_band():
@@ -2363,13 +2386,29 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 draw.line([(units.mm_to_px(cut.from_mm, dpi), y),
                            (units.mm_to_px(cut.to_mm, dpi), y)],
                           fill=(CUT_LINE_GRAY, CUT_LINE_GRAY, CUT_LINE_GRAY), width=lw)
+
+    # 出血模式的切缝是两道（T6 裁决，规格 5.2）：build_cuts 给的是外框缝
+    # = 粗切落刀位；精裁的第二道线由内框 inner_mm() 推出，在这里压在照片
+    # 出血区上，精裁后正好随成品边缘消失。单格也要画精裁线（外框缝没有，
+    # 出血仍需精裁）
+    if show_cut_lines and mode == modes.BLEED_TRIM:
+        lw = max(1, units.mm_to_px(CUT_LINE_MM, dpi))
+        for cell in plan.cells:
+            ix, iy, iw, ih = cell.inner_mm()
+            x2, y2 = ix + iw, iy + ih
+            for x0, y0, x1, y1 in ((ix, iy, ix, y2), (x2, iy, x2, y2),
+                                   (ix, iy, x2, iy), (ix, y2, x2, y2)):
+                draw.line([(units.mm_to_px(x0, dpi), units.mm_to_px(y0, dpi)),
+                           (units.mm_to_px(x1, dpi), units.mm_to_px(y1, dpi))],
+                          fill=(CUT_LINE_GRAY, CUT_LINE_GRAY, CUT_LINE_GRAY),
+                          width=lw)
     return page
 ```
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_render_geometry.py -v`
-Expected: PASS（12 passed）
+Expected: PASS（13 passed）
 
 - [ ] **Step 5: 变异测试**
 

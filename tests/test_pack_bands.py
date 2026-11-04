@@ -18,7 +18,7 @@ def test_a4_holds_four_3r():
 
 
 def test_a4_holds_three_4r_only_via_band_split():
-    """单网格最多 2；切位 y=152 分两带（上带 2 竖 + 下带 1 横）= 3。"""
+    """单网格最多 2；横切一刀分两带（一支为切位 y=152：上 2 竖 + 下 1 横，另一支 y=102 与之对称）得 3。两支同分，实际报出哪支取决于候选切位的排序，本测试只钉张数与混合朝向。"""
     plan = _p("A4", "4R")
     assert plan.count == 3
     assert plan.strategy == "bands"

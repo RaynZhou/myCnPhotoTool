@@ -79,16 +79,16 @@ class CutLine:
 
 @dataclass
 class LayoutPlan:
-    cells: list
-    cuts: list
+    cells: list[Cell]
+    cuts: list[CutLine]
     count: int
     waste_mm2: float
     strategy: str
-    printable: object
+    printable: specs.RectMM
 
 
 def best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
-    """两种朝向各自均匀排布，取张数多者；并列时外接框更接近正方形者优先。"""
+    """两种朝向各自均匀排布，取张数多者；并列时外接框更接近正方形且更居中者优先。"""
     options = [False, True] if allow_rotate else [False]
     best: list[Cell] = []
     best_key = None
@@ -214,6 +214,68 @@ def _sheet_rect(sheet):
     return specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
 
 
+def merge_spans(spans):
+    """合并相接或重叠的一维区间。"""
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1] + _EPS:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
 def build_cuts(cells, rect):
-    """占位：T6 用贯通切缝的真实现替换它。本任务的测试不断言 cuts 内容。"""
-    return []
+    """由格子外框推导裁切缝（规格 5.2 的切缝取舍规则）。
+
+    画：严格落在区域内的格子边界（左/右或上/下）；居中留白时两侧都要画，
+    只画一侧会切不出成品尺寸。
+    不画：与区域边界重合的边界（纸边就是基准，切了也无从下手）。
+    线段取紧贴该缝的格子在另一轴上的范围之并集，让切纸刀有连续引导（见 6.4）。
+    """
+    if len(cells) < 2:
+        return []
+    cuts = []
+    tol = 1e-3
+
+    # 轴、属性名、区域都显式传参：不靠外层循环变量绑定闭包，
+    # 那样写抽出一个函数就得连带重写调用点
+    def seams(axis, pos_attrs, span_attrs, base, extent):
+        lo_attr, len_attr = pos_attrs
+        positions = set()
+        for c in cells:
+            lo = getattr(c, lo_attr)
+            positions.add(round(lo, 6))
+            positions.add(round(lo + getattr(c, len_attr), 6))
+        for p in sorted(positions):
+            if not (base + tol < p < base + extent - tol):
+                continue
+            spans = []
+            for c in cells:
+                lo = getattr(c, lo_attr)
+                if abs(lo - p) > tol and abs(lo + getattr(c, len_attr) - p) > tol:
+                    continue  # 不与该缝紧邻的格子不得拉长线段
+                s0 = getattr(c, span_attrs[0])
+                spans.append((s0, s0 + getattr(c, span_attrs[1])))
+            for a, b in merge_spans(spans):
+                cuts.append(CutLine(axis, p, a, b))
+
+    seams("v", ("x_mm", "w_mm"), ("y_mm", "h_mm"), rect.x_mm, rect.w_mm)
+    seams("h", ("y_mm", "h_mm"), ("x_mm", "w_mm"), rect.y_mm, rect.h_mm)
+
+    # 同一条缝上相邻线段合并，去掉重合项
+    merged = {}
+    for c in cuts:
+        merged.setdefault((c.axis, c.at_mm), []).append((c.from_mm, c.to_mm))
+    out = []
+    for (axis, at), spans in merged.items():
+        for a, b in merge_spans(spans):
+            out.append(CutLine(axis, at, a, b))
+    return sorted(out, key=lambda c: (c.axis, c.at_mm, c.from_mm))
+
+
+def needed_sheets(plan_count: int, photo_count: int) -> int:
+    """按每页格子数算需要几张纸。"""
+    if plan_count <= 0:
+        return 0
+    return -(-photo_count // plan_count)

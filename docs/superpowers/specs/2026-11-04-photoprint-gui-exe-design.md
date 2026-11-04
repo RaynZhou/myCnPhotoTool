@@ -20,7 +20,7 @@
 
 - `photoprint/app/`：单窗口 PySide6 界面（表单 + 整页预览 + 导出 PDF）。
 - `photoprint/jobs.py`：从 `cli.py` 抽出的共用编排层，CLI 与 GUI 同一真相源。
-- `core/render.py` 增加 `dx_mm/dy_mm` 透传；`core/crop.py` 增加旋转偏移换算纯函数；旋转格落位
+- `core/render.py` 增加 `offset_pct` 透传（逐格按本格尺寸换算）；`core/crop.py` 增加旋转偏移换算纯函数；旋转格落位
   映射由转置改为真旋转映射。
 - 导出路径关闭不可印区遮罩（含 CLI 同步修正）。
 - `core/store.py` 增加 `last_job` 读写。
@@ -97,7 +97,7 @@ class Job:
     mode: str
     count: int
     page_count: int
-    offset_mm: tuple[float, float]   # 纸面方向偏移，render 时按页复用
+    offset_pct: tuple[float, float]      # 纸面方向偏移（百分比），逐格由渲染层换算
     note: str                        # 供状态栏显示的诚实性说明
     def render(self, page_index: int, dpi: float,
                show_mask: bool) -> Image.Image: ...
@@ -107,7 +107,7 @@ def render_all(job, dpi, show_mask) -> list[Image.Image]:
     return [job.render(i, dpi, show_mask) for i in range(job.page_count)]
 
 def build_jobs(st, photos, sheet_key, cell_key, *, gap_mm=0.0, bleed_mm=3.0,
-               mode=None, offset_mm=(0.0, 0.0), borderless_active=False) -> Job
+               mode=None, offset_pct=(0.0, 0.0), borderless_active=False) -> Job
 ```
 
 - `build_jobs` 承接现 `cli.build_plan_jobs` 的全部逻辑，含两条既有分支：证件照格
@@ -121,7 +121,7 @@ def build_jobs(st, photos, sheet_key, cell_key, *, gap_mm=0.0, bleed_mm=3.0,
   `win/pdf_export.export_pdf`。
 - `core/render.py` 签名扩展为
   `render_page(plan, photos, sheet, dpi, mode, show_mask=True, show_cut_lines=True,`
-  `borderless_active=False, dx_mm=0.0, dy_mm=0.0)`；两个新参数原样传给
+  `borderless_active=False, offset_pct=(0.0, 0.0))`；渲染层逐格把百分比换成 mm 后传给
   `crop.cell_crop_box`（该函数早已支持 `dx_mm/dy_mm`，本次只是渲染层此前没有传）。
 
 ## 5. 裁切偏移几何（本次唯一的几何改动）
@@ -217,10 +217,11 @@ if cell.rotated:
 新增脱机测试（全部进 `tests/`，不需要打印机、不需要窗口）：
 
 - `test_jobs.py`：`build_jobs` 与重构前 `cli.build_plan_jobs` 同参数结果等价；0 格退化分支；
-  `offset_mm` 透传到 `Job.render`。
+  `offset_pct` 原样透传到 `Job.render`（编排层不得自己换算成 mm）。
 - `test_crop_rotate_offset.py`：`rotate_offset` 的轴与符号；**回归保护**——`offset=(0,0)` 时
   新落位映射与旧转置逐像素相同。
-- `test_render_offset.py`：`dx_mm/dy_mm` 传入后贴图位移方向正确；旋转格与非旋转格各一组。
+- `test_render_offset.py`：偏移传入后贴图位移方向正确；旋转格与非旋转格各一组；
+  同一页两种朝向混排时必须逐格换算（拿首格或整纸尺寸算的写法都要被挡住）。
 - `test_mask_export.py`：`show_mask=False` 时页面四边像素为纯白 `(255,255,255)`。
 - `test_store_last_job.py`：读写往返、坏形状降级为 `{}`、`save()` 返回 `False` 的传播。
 - `test_app_smoke.py`：`QT_QPA_PLATFORM=offscreen` 下构造主窗口、设参数、断言预览 QPixmap 非

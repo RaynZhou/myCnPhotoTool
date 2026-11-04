@@ -18,10 +18,12 @@ DEFAULT_OUTPUT_DPI = 300.0
 # 状态栏的边距来源分档（规格 7.3：文案必须跟着证据走）。
 # 未知来源一律按最保守口径写，绝不落进"实测"分支——凭空给用户一个
 # 没有证据的承诺，比多写一句"未校准"严重得多。
+# 取值前面统一接「边距」二字，两档文案共用同一个前缀；spec 档那句是全局
+# 约束点名要逐字出现的，故只有它可以不带动词。
 _MARGIN_SOURCE_NOTE = {
     "spec": "依规格推定，未经真机校准",
-    "probed": "驱动实测边距",
-    "calibrated": "真机校准边距",
+    "probed": "已由驱动实测",
+    "calibrated": "已经真机校准",
 }
 _UNKNOWN_MARGIN_SOURCE = _MARGIN_SOURCE_NOTE["spec"]
 
@@ -92,19 +94,24 @@ class Job:
 
     @property
     def note(self) -> str:
-        """界面状态栏文案：边距那句按 margin_source 分档（规格 7.3）。
+        """界面状态栏文案：边距来源那句按 margin_source 分档（规格 7.3）。
+
+        两档都带来源：全局约束是无条件的——只要 `margin_source == "spec"` 就得
+        说明“未经真机校准”。而出血档的预览偏偏仍在按规格边距画不可印遮罩带
+        （render 层的 `_mask_bands`），界面正在用一组没证据的数字。
 
         cli 的 stdout 另有一套逐字冻结的文案（全局约束），两边共用同一份
         数字、不共用同一句话——界面要说清证据从哪来，cli 要保持历史输出不变。
         """
-        if self.mode == modes.BLEED_TRIM:
-            inner = self.plan.cells[0].inner_mm()
-            return (f"需人工裁切：沿灰线切开后即为 {inner[2]:.0f}×{inner[3]:.0f}mm 成品")
-        m = self.sheet.margins
         provenance = _MARGIN_SOURCE_NOTE.get(self.sheet.margin_source,
                                              _UNKNOWN_MARGIN_SOURCE)
+        if self.mode == modes.BLEED_TRIM:
+            inner = self.plan.cells[0].inner_mm()
+            return (f"需人工裁切：沿灰线切开后即为 {inner[2]:.0f}×{inner[3]:.0f}mm 成品"
+                    f"（边距{provenance}）")
+        m = self.sheet.margins
         return (f"将保留白边：上{m.top}/下{m.bottom}/左{m.left}/右{m.right}mm"
-                f"（{provenance}）")
+                f"（边距{provenance}）")
 
     def render(self, page_index: int, dpi: float, show_mask: bool = False) -> Image.Image:
         """渲染单页。show_mask 只在预览开，导出必须关（否则灰边进相纸）。"""

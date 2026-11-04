@@ -105,9 +105,15 @@ def test_fill_mode_offset_moves_picture_toward_paper_direction():
 def test_offset_pct_is_applied_per_cell_on_mixed_orientation_page():
     """混合朝向页（7R+3R 的 bands 装箱）：偏移必须逐格按本格尺寸换算。
 
-    首格是转置格（纸面 127×89），第二格是竖格（89×127）。offset_pct=(0, 15)
-    按第二格自己的高 127 算是 19.05mm（被留白夹到 19），画面顶沿落在 145；
-    若按首格高 89 算只有 13.35mm，顶沿落在 139——探针 142 一个是白、一个是红。
+    首格是转置格（纸面 127×89），第二格是竖格（89×127），整纸高 254。
+    offset_pct=(0, 8) 下三种假设会算出不同的顶沿（实测留白夹持上限 19mm）：
+
+    - 按本格高 127 算：10.16mm → 顶沿 136（正确答案）
+    - 按首格高 89 算：7.12mm → 顶沿 133
+    - 按整纸高 254 算：20.32mm → 夹到 19 → 顶沿 145
+
+    两个探针各挡一支：y=135 区分“本格 vs 首格”，y=140 区分“本格 vs 整纸”——
+    只用一个点的话，拿纸张尺寸当格子尺寸的写法会和逐格换算长得一模一样。
     """
     sheet, cell = specs.find_spec("7R"), specs.find_spec("3R")
     plan = pack.pack(sheet, cell, gap_mm=0.0, allow_rotate=True,
@@ -117,12 +123,18 @@ def test_offset_pct_is_applied_per_cell_on_mixed_orientation_page():
     photo = Image.new("RGB", (100, 100), (255, 0, 0))
     args = (plan, [photo] * plan.count, sheet, DPI, modes.FIT_TO_PRINTABLE)
     base = render.render_page(*args, show_mask=False)
-    moved = render.render_page(*args, show_mask=False, offset_pct=(0.0, 15.0))
-    probe = (int(bx + bw / 2), int(by + 35.0))     # 本格画面顶沿下方 16mm
-    assert base.getpixel(probe) == (255, 0, 0), f"零偏移下第二格顶沿应经过探针 {probe}"
-    assert moved.getpixel(probe) == (255, 255, 255), (
-        f"偏移未按本格高 {bh:.0f}mm 换算（按首格算的话顶沿只到 139mm，"
-        f"探针 {probe} 仍在画内）")
+    moved = render.render_page(*args, show_mask=False, offset_pct=(0.0, 8.0))
+    col = int(bx + bw / 2)
+    above = (col, int(by + 28.0))     # y=135：本格算已露白，首格算仍红
+    below = (col, int(by + 33.0))     # y=140：本格算仍红，整纸算露白
+    assert base.getpixel(above) == (255, 0, 0), f"零偏移前提已破：{above} 应为红"
+    assert base.getpixel(below) == (255, 0, 0), f"零偏移前提已破：{below} 应为红"
+    assert moved.getpixel(above) == (255, 255, 255), (
+        f"偏移按首格高 89mm 算了（只挠到顶沿 133，{above} 仍为红），"
+        f"应按本格高 {bh:.0f}mm 算到 136")
+    assert moved.getpixel(below) == (255, 0, 0), (
+        f"偏移按整纸高 {sheet.h_mm:.0f}mm 算了（夹到 19mm→顶沿 145，"
+        f"{below} 成白），应按本格高 {bh:.0f}mm 算到 136")
 
 
 def test_offset_mm_for_cell_half_page_is_50_pct():

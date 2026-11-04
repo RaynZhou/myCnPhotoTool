@@ -33,6 +33,11 @@ def _photos(n, color=(200, 30, 30)):
 ])
 def test_build_layout_matches_legacy_cli(st, sheet, cell, gap, bleed, mode,
                                          borderless):
+    """与重构前的 cli 逐字段对拍：这一层是搬过来的，必须证明没搬坏。
+
+    Task 4 把 cli 改成薄转发之后，这里会退化成自己比自己，届时换成绝对格数
+    断言（见计划 Task 4 Step 4）；本 commit 里两边仍是两份实现，对拍是真对拍。
+    """
     plan_a, mode_a = cli.build_plan_jobs(st, sheet, cell, gap, bleed, mode,
                                          borderless)
     plan_b, mode_b = jobs.build_layout(st, sheet, cell, gap, bleed, mode,
@@ -46,6 +51,8 @@ def test_build_layout_rejects_cell_larger_than_sheet_with_same_message(st):
 
     卡片纸（91×55）在出血档装不下带 3mm 出血的美国签证（57×57 > 55），
     且出血档不走“整纸一格”退化分支，是预设组合里真能走到的报错。
+
+    与 `test_build_layout_matches_legacy_cli` 同一命运：Task 4 后换成整句断言。
     """
     with pytest.raises(ValueError) as ea:
         cli.build_plan_jobs(st, "CARD", "USVISA", 0.0,
@@ -69,31 +76,44 @@ def test_build_job_page_count_is_one_when_empty(st):
     assert job.page_count == 1
 
 
-def test_note_uses_legacy_wording_bleed(st):
+def test_note_bleed_states_cut_action_and_provenance(st):
+    """出血档也得说清边距从哪来：全局约束对 margin_source 的点名是无条件的，
+    而出血档的预览仍在按规格边距画不可印遮罩——界面正在用一组没证据的数字。"""
     job = jobs.build_job(st, _photos(4), "A4", "3R", bleed_mm=3.0)
+    assert job.mode == modes.BLEED_TRIM  # 前提：默认映射确实落到裁切档
     assert job.note.startswith("需人工裁切：沿灰线切开后即为 89×127mm 成品")
+    assert job.note.endswith("（边距依规格推定，未经真机校准）")
+
+
+def test_note_bleed_provenance_follows_margin_source(st):
+    """来源换了出血档文案也得跟着换，否则分档表成了只对白边档生效的摆设。"""
+    st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "calibrated")
+    job = jobs.build_job(st, _photos(4), "A4", "3R", bleed_mm=3.0)
+    # 钉整括号而不是“真机校准”四个字：spec 档那句也含这四个字
+    assert job.note.endswith("（边距已经真机校准）")
+    assert "依规格推定" not in job.note
 
 
 def test_note_spec_source_says_unproven(st):
     """全局约束点名的一句：margin_source=spec 时必须逐字出现该文案。"""
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
     assert job.sheet.margin_source == "spec"  # 前提：开发期常态
-    assert "依规格推定，未经真机校准" in job.note
+    assert "（边距依规格推定，未经真机校准）" in job.note
     assert "上3.0/下5.0/左3.4/右3.4mm" in job.note  # 数字不得丢
 
 
 def test_note_probed_source_says_driver_measured(st):
     st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "probed")
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
-    assert "驱动实测边距" in job.note
+    assert "边距已由驱动实测" in job.note
     assert "未经真机校准" not in job.note  # 已实测就不许再说不确定
 
 
 def test_note_calibrated_source_says_machine_calibrated(st):
     st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "calibrated")
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
-    # 钉整句而不是"真机校准"四个字：光说“未经真机校准”也含这四个字
-    assert "真机校准边距" in job.note
+    # 钉整括号而不是"真机校准"四个字：光说“未经真机校准”也含这四个字
+    assert "（边距已经真机校准）" in job.note
     assert "未经" not in job.note and "依规格推定" not in job.note
 
 

@@ -1,7 +1,7 @@
 """裁放置：用 dpi=25.4 让 1 像素 = 1 毫米，便于逐位核对。"""
 import pytest
 
-from photoprint.core import crop
+from photoprint.core import crop, units
 
 PPMM = 1.0  # dpi 25.4
 
@@ -65,7 +65,10 @@ def test_zoom_bounds_are_enforced():
         crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=1.5, ppmm=PPMM)
 
 
-def test_default_ppmm_is_300dpi():
+def test_default_ppmm_accepted():
+    """解析结果对 ppmm 不变（分子分母同现被约掉），本条钉不住「默认=300dpi」；
+    它钉的是默认值不为 None 也能算完、不触守卫（评审 I-3，原名
+    test_default_ppmm_is_300dpi 名不副实）。"""
     p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL)
     assert p.crop_px == (50, 0, 150, 100)
 
@@ -73,3 +76,30 @@ def test_default_ppmm_is_300dpi():
 def test_unknown_mode_rejected():
     with pytest.raises(ValueError, match="mode"):
         crop.cell_crop_box(200, 100, 100, 100, "stretch", ppmm=PPMM)
+
+
+def test_fill_zoom_upper_bound_enforced():
+    # 评审 I-2：原 test_zoom_bounds_are_enforced 只钉了 FILL 下界与 FIT 上界
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=4.5, ppmm=PPMM)
+
+
+def test_fit_zoom_lower_bound_enforced():
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=0.1, ppmm=PPMM)
+
+
+def test_fit_aspect_ratio_preserved_on_non_square_target():
+    """评审 I-2：正方形目标下 min() 两支数值相等，钉不住退化为只按宽缩放。"""
+    p = crop.cell_crop_box(200, 100, 400, 50, crop.FIT, ppmm=PPMM)
+    x, y, w, h = p.dest_mm
+    assert (w, h) == pytest.approx((100.0, 50.0))  # 按宽缩放会得 400×200 越格
+    assert (x, y) == pytest.approx((150.0, 0.0))
+
+
+def test_fill_crop_box_uses_half_up_rounding():
+    """评审 I-1：未取整的 l 恰为 36.5，必须按全项目 round_px 口径得 37，
+    而非银行家舍入的 36。"""
+    p = crop.cell_crop_box(100, 80, 100, 152, crop.FILL, zoom=2,
+                           dx_mm=-1.3, ppmm=units.ppmm(300))
+    assert p.crop_px == (37, 20, 63, 60)

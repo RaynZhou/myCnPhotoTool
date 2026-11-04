@@ -21,8 +21,8 @@ _VALID_MODES = (FILL, FIT)
 class Placement:
     """crop_px 为原图像素裁框，dest_mm 为相对目标区左上角的落位。"""
 
-    crop_px: tuple
-    dest_mm: tuple
+    crop_px: tuple[int, int, int, int]
+    dest_mm: tuple[float, float, float, float]
 
 
 def _clamp(value, lo, hi):
@@ -53,8 +53,10 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
         l = _clamp(cx - crop_w / 2.0, 0.0, photo_w_px - crop_w)
         t = _clamp(cy - crop_h / 2.0, 0.0, photo_h_px - crop_h)
         r, b = l + crop_w, t + crop_h
-        return Placement((int(round(l)), int(round(t)),
-                          int(round(r)), int(round(b))),
+        # 取整走 units.round_px（全项目口径，.5 向上）：内置 round 是银行家
+        # 舍入，300dpi 下约 4.8% 的裁框边会恰落 .5，偏移方向不可预测（T7 评审 I-1）
+        return Placement((units.round_px(l), units.round_px(t),
+                          units.round_px(r), units.round_px(b)),
                          (0.0, 0.0, float(target_w_mm), float(target_h_mm)))
 
     if not 0.2 <= zoom <= 1.0:

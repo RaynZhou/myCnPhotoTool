@@ -6,8 +6,8 @@ import math
 MM_PER_INCH = 25.4
 
 
-def _round_half_up(value: float) -> int:
-    """就近取整，.5 一律向上。
+def round_px(value: float) -> int:
+    """就近取整，.5 一律向上。全项目取整口径，渲染/裁切层都用它。
 
     不用内置 round()：它是银行家舍入，round(2.5) == 2、round(20.5) == 20，
     而本项目的几何断言（尤其 dpi=25.4 时 1 像素 = 1 毫米那批）需要的是
@@ -23,7 +23,7 @@ def ppmm(dpi: float) -> float:
 
 def mm_to_px(mm: float, dpi: float) -> int:
     """mm 转像素，就近取整（.5 向上）。"""
-    return _round_half_up(mm * ppmm(dpi))
+    return round_px(mm * ppmm(dpi))
 
 
 def px_to_mm(px: float, dpi: float) -> float:
@@ -41,4 +41,4 @@ def win_mm(value_mm: float) -> int:
 
 def mm_to_scene(mm: float) -> int:
     """场景坐标：1 单位 = 0.1mm，整数以免累积误差。"""
-    return _round_half_up(mm * 10)
+    return round_px(mm * 10)

@@ -37,3 +37,10 @@ def test_mm_to_scene_is_tenth_mm():
     assert units.mm_to_scene(89.0) == 890
     assert units.mm_to_scene(3.4) == 34
     assert units.mm_to_scene(0.25) == 3  # 2.5 个 0.1mm 单位，同样 .5 向上
+
+
+def test_round_px_is_half_up():
+    # 全项目取整口径的公共入口（T7 评审 I-1：crop 层也必须走它）
+    assert units.round_px(2.5) == 3
+    assert units.round_px(20.5) == 21
+    assert units.round_px(-0.5) == 0  # floor(v+0.5)，负半同样向大数一侧

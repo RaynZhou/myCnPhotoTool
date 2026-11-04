@@ -182,3 +182,100 @@ def test_override_with_bad_margin_value_is_dropped(tmp_store):
     s = tmp_store.resolve("3R")
     assert s.margin_source == "spec"
     assert s.margins.top == 3.0
+
+
+def test_last_job_roundtrip(tmp_store):
+    tmp_store.load()
+    tmp_store.set_last_job({"sheet_key": "A4", "cell_key": "3R", "dpi": 300.0})
+    assert tmp_store.save() is True
+    again = store.Store(tmp_store.path)
+    again.load()
+    assert again.get_last_job()["cell_key"] == "3R"
+
+
+def test_last_job_bad_shape_degrades_to_empty(tmp_path):
+    """手改坏的配置不得卡住启动：与 load() 既有口径一致。"""
+    p = tmp_path / "papers.json"
+    p.write_text(json.dumps({"last_job": [1, 2]}), encoding="utf-8")
+    s = store.Store(p)
+    s.load()
+    assert s.get_last_job() == {}
+
+
+def test_get_last_job_returns_copy_not_live_dict(tmp_store):
+    tmp_store.load()
+    tmp_store.set_last_job({"gap_mm": 2.0})
+    got = tmp_store.get_last_job()
+    got["gap_mm"] = 99.0
+    assert tmp_store.get_last_job()["gap_mm"] == 2.0
+
+
+def test_set_last_job_rejects_non_dict(tmp_store):
+    tmp_store.load()
+    with pytest.raises(ValueError, match="必须是 dict"):
+        tmp_store.set_last_job(["A4"])
+
+
+def test_set_last_job_does_not_alias_caller_dict(tmp_store):
+    """存的是副本：调用方手里的字典之后怎么改，都不能隔空改已存的任务。
+
+    get 侧不返回活字典已由上一条钉住，写入侧不接活引用是同一枚币的另一面。
+    """
+    tmp_store.load()
+    live = {"dpi": 300.0}
+    tmp_store.set_last_job(live)
+    live["dpi"] = 96.0
+    assert tmp_store.get_last_job()["dpi"] == 300.0
+
+
+def test_load_degrades_non_dict_last_job(tmp_store):
+    """降级发生在读盘时，不只是读的时候好看。
+
+    不围住的话坏形状会原样留在 raw 里，下次 save() 又把它写回去，“任何损坏
+    都降级成没有”那句就不成立了。
+    """
+    Path(tmp_store.path).write_text(json.dumps({"last_job": [1, 2]}),
+                                    encoding="utf-8")
+    tmp_store.load()  # 不得抛
+    assert tmp_store.raw["last_job"] == {}
+    assert tmp_store.save() is True
+    disk = json.loads(Path(tmp_store.path).read_text(encoding="utf-8"))
+    assert disk["last_job"] == {}
+
+
+def test_get_last_job_guard_survives_dirty_raw(tmp_store):
+    """get 的形状守卫得自己顶得住：raw 可以被不经 load() 的路径弄脏。
+
+    本层以外直接改 raw（后续任务的导入配置、测试里的搭伏）都可能把
+    last_job 撑成 list；只靠 load() 一道闸的话，“读一下上次任务”就能 TypeError。
+    """
+    tmp_store.load()
+    tmp_store.raw["last_job"] = [1, 2]
+    assert tmp_store.get_last_job() == {}
+
+
+def test_set_last_job_only_touches_its_own_slot(tmp_store):
+    """docstring 的承诺：写 last_job 不得捎动 overrides 与 user_sizes。
+
+    三个真相源共住一个 raw，串了位就是拿任务参数去盖掉用户标定。只比旁
+    不变就行，不靠“读回来对”——那读的是同一个字典，盖错了也看不出来。
+    """
+    tmp_store.load()
+    tmp_store.override_margins("3R", specs.Margins(2.0, 4.0, 3.0, 3.0),
+                               "calibrated")
+    before = json.dumps({k: v for k, v in tmp_store.raw.items()
+                         if k != "last_job"}, sort_keys=True)
+    tmp_store.set_last_job({"dpi": 300.0})
+    after = json.dumps({k: v for k, v in tmp_store.raw.items()
+                        if k != "last_job"}, sort_keys=True)
+    assert after == before
+    assert set(tmp_store.raw) == {"overrides", "user_sizes", "last_job"}
+
+
+def test_save_failure_propagates_but_memory_still_effective(tmp_path):
+    """路径指向一个目录时写盘必失败：save 回 False，内存改动仍生效。"""
+    s = store.Store(tmp_path)          # 目录当文件用
+    s.load()
+    s.set_last_job({"dpi": 150.0})
+    assert s.save() is False
+    assert s.get_last_job()["dpi"] == 150.0

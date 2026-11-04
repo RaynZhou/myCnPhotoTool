@@ -1080,7 +1080,9 @@ git commit -m "feat(cli): 改用 jobs 编排，导出默认关不可印区遮罩
 
 - [ ] **Step 1: 写失败测试**
 
-在 `tests/test_store.py` 末尾追加（文件已有 `json`、`pytest`、`store` 导入与 `tmp_store` fixture）：
+在 `tests/test_store.py` 末尾追加 9 条（简报原给 5 条，开工后补 4 条，理由
+见表后说明；文件已有 `json`、`pytest`、`specs`、`store` 导入、`Path` 与
+`tmp_store` fixture）：
 
 ```python
 def test_last_job_roundtrip(tmp_store):
@@ -1122,12 +1124,77 @@ def test_save_failure_propagates_but_memory_still_effective(tmp_path):
     s.set_last_job({"dpi": 150.0})
     assert s.save() is False
     assert s.get_last_job()["dpi"] == 150.0
+
+
+def test_set_last_job_does_not_alias_caller_dict(tmp_store):
+    """存的是副本：调用方手里的字典之后怎么改，都不能隔空改已存的任务。
+
+    get 侧不返回活字典已由上一条钉住，写入侧不接活引用是同一枚币的另一面。
+    """
+    tmp_store.load()
+    live = {"dpi": 300.0}
+    tmp_store.set_last_job(live)
+    live["dpi"] = 96.0
+    assert tmp_store.get_last_job()["dpi"] == 300.0
+
+
+def test_load_degrades_non_dict_last_job(tmp_store):
+    """降级发生在读盘时，不只是读的时候好看。
+
+    不围住的话坏形状会原样留在 raw 里，下次 save() 又把它写回去，“任何损坏
+    都降级成没有”那句就不成立了。
+    """
+    Path(tmp_store.path).write_text(json.dumps({"last_job": [1, 2]}),
+                                    encoding="utf-8")
+    tmp_store.load()  # 不得抛
+    assert tmp_store.raw["last_job"] == {}
+    assert tmp_store.save() is True
+    disk = json.loads(Path(tmp_store.path).read_text(encoding="utf-8"))
+    assert disk["last_job"] == {}
+
+
+def test_get_last_job_guard_survives_dirty_raw(tmp_store):
+    """get 的形状守卫得自己顶得住：raw 可以被不经 load() 的路径弄脏。
+
+    本层以外直接改 raw（后续任务的导入配置、测试里的搭伏）都可能把
+    last_job 撑成 list；只靠 load() 一道闸的话，“读一下上次任务”就能 TypeError。
+    """
+    tmp_store.load()
+    tmp_store.raw["last_job"] = [1, 2]
+    assert tmp_store.get_last_job() == {}
+
+
+def test_set_last_job_only_touches_its_own_slot(tmp_store):
+    """docstring 的承诺：写 last_job 不得捎动 overrides 与 user_sizes。
+
+    三个真相源共住一个 raw，串了位就是拿任务参数去盖掉用户标定。只比旁
+    不变就行，不靠“读回来对”——那读的是同一个字典，盖错了也看不出来。
+    """
+    tmp_store.load()
+    tmp_store.override_margins("3R", specs.Margins(2.0, 4.0, 3.0, 3.0),
+                               "calibrated")
+    before = json.dumps({k: v for k, v in tmp_store.raw.items()
+                         if k != "last_job"}, sort_keys=True)
+    tmp_store.set_last_job({"dpi": 300.0})
+    after = json.dumps({k: v for k, v in tmp_store.raw.items()
+                        if k != "last_job"}, sort_keys=True)
+    assert after == before
+    assert set(tmp_store.raw) == {"overrides", "user_sizes", "last_job"}
 ```
+
+上块末尾四条（alias / 读盘降级 / 脏 raw / 串位）是开工后补的，不是简报原有内容：
+变异检查第一轮探到两条存活——`get_last_job` 的形状守卫删了照样全绿（load()
+已先把磁盘坏值降级成 `{}`，灌磁盘那条根本走不到 get 的闸上），而
+`set_last_job` 里的 `dict(job)` 副本与“只写自己槽位”的 docstring 承诺无任何测试
+依赖。四条各杀一个变异，记在自审记录 ⑭。
+
 
 - [ ] **Step 2: 跑到失败**
 
 Run: `python -m pytest tests/test_store.py -v -k last_job`
-Expected: FAIL — `AttributeError: 'Store' object has no attribute 'set_last_job'`
+Expected: FAIL — 五条 `AttributeError: 'Store' object has no attribute 'set_last_job'`
+（灌脏 raw 与写盘失败那两条也一样先死在 setter 上），`get_last_job` 那几条报
+`no attribute 'get_last_job'`
 
 - [ ] **Step 3: 实现**
 
@@ -1149,12 +1216,23 @@ Expected: FAIL — `AttributeError: 'Store' object has no attribute 'set_last_jo
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_store.py -v`
-Expected: 全部通过（原有条目 + 新 5 条）
+Expected: 全部通过（原有 16 项 + 新 9 项 = 25 passed；其中简报给 5 条、
+开工后补 4 条）
 
-- [ ] **Step 5: 全量回归 + 提交**
+- [ ] **Step 5: 变异检查 + 全量回归 + 提交**
 
 ```bash
+python .superpowers/sdd/mutate_gui_t5.py
+python .superpowers/sdd/check_t5_plan_verbatim.py
 python -m pytest tests/ -q
+python _lab/m1m2_check.py
+```
+
+Expected: 变异脚本 7 个变异全部有效、还原后 25 条仍绿、退出码 0（它逐条改写
+`store.py` 再跑 `tests/test_store.py`，结束时在 `finally` 里按字节还原）；
+逐行校对“代码块 2 个，缺失行 0 条”；全量 189 点退出码 0。
+
+```bash
 git add photoprint/core/store.py tests/test_store.py
 git commit -m "feat(store): last_job 读写与形状降级"
 ```
@@ -2372,6 +2450,17 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   两条合起来在该邻域内对 (gap, bleed) 是一一映射）；⑬ 同测试首句里的“既有脚本”
   已无存在（`_lab/` 无调用点，对拍调用随 Step 4 退役），改为本文件 6 处调用。
   ⑫⑬ 已经 round-3 复审 Approved（M-R2-1 已修，变异注入实测仅该一条变红）。
+- **T5 开工时的变异检查补的四条测试（⑭）**：`get_last_job`
+  的形状守卫在简报给的 5 条下是**删了也不红**的死代码——`load()` 已先把磁盘
+  上的坏值降级成 `{}`，灌磁盘的测试根本走不到 get 的闸上（第一轮实测存活）。
+  另有三处无断言的口头承诺：`set_last_job` 的 `dict(job)` 副本、docstring 里
+  “不碰 overrides 与 user_sizes”、以及“降级发生在读盘时”本身。
+  补 `test_get_last_job_guard_survives_dirty_raw`（直接把 raw 弄脏）、
+  `test_set_last_job_does_not_alias_caller_dict`、
+  `test_set_last_job_only_touches_its_own_slot`、
+  `test_load_degrades_non_dict_last_job` 四条，各杀一个变异；本任务净新增
+  9 条测试（test_store.py 16→25，全量 180→189），
+  `mutate_gui_t5.py` 7 个变异全有效，`check_t5_plan_verbatim.py` 缺失 0 行。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

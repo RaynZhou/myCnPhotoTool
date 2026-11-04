@@ -162,6 +162,17 @@ class Store:
     def _sync_user_sizes(self) -> None:
         self.raw["user_sizes"] = [_to_dict(s) for s in self._users.values()]
 
+    def get_last_job(self) -> dict:
+        """上次任务参数。形状不对就回空表：坏配置不得卡住启动。"""
+        job = self.raw.get("last_job")
+        return dict(job) if isinstance(job, dict) else {}
+
+    def set_last_job(self, job: dict) -> None:
+        """只写 raw["last_job"]，不碰 overrides 与 user_sizes：真相源各归各位。"""
+        if not isinstance(job, dict):
+            raise ValueError(f"last_job 必须是 dict，收到 {type(job).__name__}")
+        self.raw["last_job"] = dict(job)
+
     def save(self) -> bool:
         """先写同目录 .tmp 再 os.replace：不让写入中途被杀留下一半 papers.json。
 

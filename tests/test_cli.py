@@ -119,3 +119,69 @@ def test_paper_role_cells_still_rotate(st):
     plan, _mode = cli.build_plan_jobs(st, "A4", "4R", 0.0,
                                       modes.DEFAULT_BLEED_MM, None, False)
     assert any(c.rotated for c in plan.cells)
+
+
+def _four_red_photos(tmp_path):
+    from PIL import Image
+
+    photos = []
+    for i in range(4):
+        p = tmp_path / f"{i}.jpg"
+        Image.new("RGB", (400, 200), (255, 0, 0)).save(p)
+        photos.append(str(p))
+    return photos
+
+
+def test_main_out_png_has_no_unprintable_mask(tmp_path):
+    """遮罩是界面诚实性用的，导出进相纸就是缺陷。
+
+    探针取 (1, ·) / (·, 1)：A4 的左/上边距是 3.4/3.0mm，dpi 25.4 下遮罩带
+    只覆盖 0..2 像素（矩形右下角减 1），取 x=3 会探到带外——带外本来就是白的，
+    这条测试就会无论如何都绿，遮罩没关也报不了。
+    """
+    from PIL import Image
+
+    out = tmp_path / "page.png"
+    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
+                     "--cell", "3R", "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    img = Image.open(out)
+    w, h = img.size
+    assert img.getpixel((1, h // 2)) == (255, 255, 255), "左缘不得有灰遮罩带"
+    assert img.getpixel((w // 2, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
+
+
+def test_main_mask_flag_keeps_mask(tmp_path):
+    """默认关不等于删功：调试时 `--mask` 必须还能把遮罩拿回来。"""
+    from PIL import Image
+
+    out = tmp_path / "page.png"
+    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
+                     "--cell", "3R", "--dpi", "25.4", "--mask",
+                     "--out", str(out)])
+    assert code == 0
+    img = Image.open(out)
+    w, h = img.size
+    # (210, 210, 210) = MASK_RGB(150) 以 alpha 110 压在白纸上的合成值
+    assert img.getpixel((1, h // 2)) == (210, 210, 210)
+    assert img.getpixel((w // 2, 1)) == (210, 210, 210)
+
+
+def test_build_plan_jobs_is_still_positional(st):
+    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。"""
+    plan, mode = cli.build_plan_jobs(st, "A4", "3R", 0.0,
+                                     modes.DEFAULT_BLEED_MM, None, False)
+    assert plan.count == 4
+    assert mode == modes.BLEED_TRIM
+
+
+def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
+    """全局约束：“cli 输出文案逐字不变”。重构前就应该通过——
+    它是逐字冻结的回归锁，不是 RED 步骤：界面用的 `Job.note` 按 margin_source
+    分档，措辞与本句不同，cli 这一侧必须自己钉住。"""
+    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
+                     "--cell", "ID1", "--dpi", "25.4"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert ("将保留白边：依规格约 上3.0/下5.0/左3.4/右3.4mm（未经真机校准）"
+            in out)

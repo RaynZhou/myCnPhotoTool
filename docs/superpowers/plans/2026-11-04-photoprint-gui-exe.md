@@ -806,7 +806,12 @@ def _four_red_photos(tmp_path):
 
 
 def test_main_out_png_has_no_unprintable_mask(tmp_path):
-    """遮罩是界面诚实性用的，导出进相纸就是缺陷：四边不得是 210 灰。"""
+    """遮罩是界面诚实性用的，导出进相纸就是缺陷。
+
+    探针取 (1, ·) / (·, 1)：A4 的左/上边距是 3.4/3.0mm，dpi 25.4 下遮罩带
+    只覆盖 0..2 像素（矩形右下角减 1），取 x=3 会探到带外——带外本来就是白的，
+    这条测试就会无论如何都绿，遮罩没关也报不了。
+    """
     from PIL import Image
 
     out = tmp_path / "page.png"
@@ -815,11 +820,12 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
     assert code == 0
     img = Image.open(out)
     w, h = img.size
-    assert img.getpixel((3, h // 2)) != (210, 210, 210)
-    assert img.getpixel((w // 2, 3)) != (210, 210, 210)
+    assert img.getpixel((1, h // 2)) == (255, 255, 255), "左缘不得有灰遮罩带"
+    assert img.getpixel((w // 2, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
 
 
 def test_main_mask_flag_keeps_mask(tmp_path):
+    """默认关不等于删功：调试时 `--mask` 必须还能把遮罩拿回来。"""
     from PIL import Image
 
     out = tmp_path / "page.png"
@@ -829,7 +835,9 @@ def test_main_mask_flag_keeps_mask(tmp_path):
     assert code == 0
     img = Image.open(out)
     w, h = img.size
-    assert img.getpixel((3, h // 2)) == (210, 210, 210)
+    # (210, 210, 210) = MASK_RGB(150) 以 alpha 110 压在白纸上的合成值
+    assert img.getpixel((1, h // 2)) == (210, 210, 210)
+    assert img.getpixel((w // 2, 1)) == (210, 210, 210)
 
 
 def test_build_plan_jobs_is_still_positional(st):
@@ -855,7 +863,9 @@ def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
 - [ ] **Step 2: 跑到失败**
 
 Run: `python -m pytest tests/test_cli.py -v -k "mask or positional"`
-Expected: 前两条 FAIL — `unrecognized arguments: --mask` 或四边仍为 `(210,210,210)`
+Expected: 两条遮罩测试 FAIL —— `unrecognized arguments: --mask`，以及左/上缘
+仍探到 `(210,210,210)`；`test_build_plan_jobs_is_still_positional` 是调用形状
+回归锁，本步即绿
 
 - [ ] **Step 3: 改 `cli.py`**
 
@@ -863,7 +873,7 @@ Expected: 前两条 FAIL — `unrecognized arguments: --mask` 或四边仍为 `(
 
 ```python
 from photoprint import jobs
-from photoprint.core import modes, specs, store  # pack/render 不再由此层直接调用
+from photoprint.core import modes, store  # pack/render/specs 不再由此层直接调用
 
 
 def load_photo(path):
@@ -878,7 +888,9 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                              borderless_active=borderless_active)
 ```
 
-删除原 `build_plan_jobs` 函数体与 `_pages`，`build_parser` 里在 `--list-printers` 之前加一行：
+删除原 `build_plan_jobs` 函数体与 `_pages`（连同顶部 `from PIL import Image`：
+它的唯一使用点就是被搬走的 `load_photo`），`build_parser` 里在 `--list-printers`
+之前加一行：
 
 ```python
     ap.add_argument("--mask", action="store_true",
@@ -936,14 +948,23 @@ _CELL_COUNTS = [
                          "want_mode", _CELL_COUNTS)
 def test_build_layout_cell_counts_are_frozen(st, sheet, cell, gap, bleed, mode,
                                              borderless, want_count, want_mode):
-    """格数与生效模式全部钉死：数字漂了照样红，不需要另一个实现来参照。"""
+    """格数与生效模式全部钉死：数字漂了照样红，不需要另一个实现来参照。
+
+    原方案是与重构前的 cli.build_plan_jobs 逐字段对拍；Task 4 把 cli 改成
+    `jobs.build_layout` 的薄转发后，那两条就退化成自己比自己——永远绿，
+    却不声明任何事。这里的绝对值是重构前实测抄下的。
+    """
     plan, mode_eff = jobs.build_layout(st, sheet, cell, gap, bleed, mode,
                                        borderless_active=borderless)
     assert (plan.count, mode_eff) == (want_count, want_mode)
 
 
 def test_cell_larger_than_sheet_raises_actionable_message(st):
-    """报错文案是用户唯一能看见的出口，改成整句断言而不是与 cli 对拍。"""
+    """报错文案是用户唯一能看见的出口，改成整句断言而不是与 cli 对拍。
+
+    卡片纸（91×55）在出血档装不下带 3mm 出血的美国签证（57×57 > 55），
+    且出血档不走“整纸一格”退化分支，是预设组合里真能走到的报错。
+    """
     with pytest.raises(ValueError) as exc:
         jobs.build_layout(st, "CARD", "USVISA", 0.0, modes.DEFAULT_BLEED_MM,
                           modes.BLEED_TRIM, borderless_active=False)
@@ -953,7 +974,9 @@ def test_cell_larger_than_sheet_raises_actionable_message(st):
 格数（4/56/2/1/3）是本步开工前用重构前的 `cli.build_plan_jobs` 实测得到的，
 逐字照抄不得重算。两条对拍测试是 `test_jobs.py` 里唯一用到 `cli` 的地方，
 删完后顶部 import 得改成 `from photoprint import jobs`，否则留下一个没人用的
-`cli`；`render` / `specs` 仍被其余测试用着，不要跟着删。
+`cli`；`render` / `specs` 仍被其余测试用着，不要跟着删。模块 docstring 也得从
+「必须与重构前的 cli 逐字段等价」改成钉死绝对值的那句话——对拍退役后旧标题
+声明的事已不存在。
 
 - [ ] **Step 5: 跑到通过**
 
@@ -966,9 +989,10 @@ Expected: `test_cli.py` 全部通过（含原 10 条 + 新 4 条）；`test_jobs
 ```bash
 python -m pytest tests/ -q
 python -m photoprint.cli --photos _lab/out/p.jpg --sheet A4 --cell 3R --dpi 25.4 --out _lab/out/t4.png
-python -c "from PIL import Image; im=Image.open('_lab/out/t4.png'); print(im.getpixel((3, im.size[1]//2)))"
+python -c "from PIL import Image; im=Image.open('_lab/out/t4.png'); print(im.getpixel((1, im.size[1]//2)))"
 ```
-Expected: 最后一行不是 `(210, 210, 210)`。
+Expected: 最后一行是 `(255, 255, 255)`，不是 `(210, 210, 210)`。探针取 x=1 而不是
+x=3：dpi 25.4 下 A4 的遮罩带只覆盖 0..2 像素，取 3 探的是带外，本来就很白。
 
 - [ ] **Step 7: 提交**
 
@@ -2261,6 +2285,12 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
 - **T3 round-2 评审后的两处计划内修正**：④ 混合朝向页的逐格测试加第二个探针，
   同时挡住“按首格换算”与“按整纸换算”两支（单探针时两种错写法长得一样）；
   ⑤ T4 新增 Step 4 退役与 cli 的两条对拍测试——cli 变薄转发后对拍就是自己比自己。
+- **T4 开工时的两处计划内修正**：⑥ 两条遮罩测试的像素探针从 `(3, ·)`/`(·, 3)`
+  改成 `(1, ·)`/`(·, 1)`，断言同时从 `!= (210,210,210)` 换成 `== (255,255,255)`：
+  dpi 25.4 下 A4 的遮罩带只覆盖 0..2 像素（矩形右下角减 1），原坐标探的是带外，
+  于是一条恒真一条恒假——导出没关遮罩也报不了；⑦ Step 3 的 import 行去掉 `specs`
+  （使用点全在被删的函数体内，照抄会留一个未用 import），`Image` 随 `load_photo`
+  搬走一起删。两处均经 `.superpowers/sdd/check_t4_plan_verbatim.py` 逐行校对。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

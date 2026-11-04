@@ -1,4 +1,4 @@
-"""编排层必须与重构前的 cli 逐字段等价，且不含 print/GUI 依赖。"""
+"""编排层的格数、报错与文案全部钉死，且不含 print/GUI 依赖。"""
 import inspect
 import sys
 
@@ -8,7 +8,7 @@ pytest.importorskip("PIL", reason="需要 Pillow")
 
 from PIL import Image  # noqa: E402
 
-from photoprint import cli, jobs  # noqa: E402
+from photoprint import jobs  # noqa: E402
 from photoprint.core import modes, render, specs, store  # noqa: E402
 
 
@@ -23,45 +23,45 @@ def _photos(n, color=(200, 30, 30)):
     return [Image.new("RGB", (100, 100), color) for _ in range(n)]
 
 
-@pytest.mark.parametrize("sheet,cell,gap,bleed,mode,borderless", [
-    ("A4", "3R", 0.0, modes.DEFAULT_BLEED_MM, None, False),
-    ("A4", "ID1", 2.0, modes.DEFAULT_BLEED_MM, None, False),
-    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None, False),
-    ("3R", "3R", 0.0, 0.0, modes.FILL_PRINTABLE, False),
-    # 无边距实测生效是另一条排版分支（可打印区换成整张纸），也得对拍
-    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None, True),
-])
-def test_build_layout_matches_legacy_cli(st, sheet, cell, gap, bleed, mode,
-                                         borderless):
-    """与重构前的 cli 逐字段对拍：这一层是搬过来的，必须证明没搬坏。
+# (纸张, 格子, gap, 出血, 指定模式, 无边距生效, 每页格数, 生效模式)
+_CELL_COUNTS = [
+    ("A4", "3R", 0.0, modes.DEFAULT_BLEED_MM, None, False, 4, modes.BLEED_TRIM),
+    ("A4", "ID1", 2.0, modes.DEFAULT_BLEED_MM, None, False, 56,
+     modes.FIT_TO_PRINTABLE),
+    ("A4", "4R", 0.0, modes.DEFAULT_BLEED_MM, None, False, 2, modes.BLEED_TRIM),
+    # 格与纸同尺寸：走“整纸一格”退化分支
+    ("3R", "3R", 0.0, 0.0, modes.FILL_PRINTABLE, False, 1, modes.FILL_PRINTABLE),
+    # 无边距生效时换的是可打印区，同一组合 2 格→ 3 格；不单独钉的话
+    # 这一分支只能靠 Task 3 历史提交的对拍证明它当时确实与 cli 一致
+    ("A4", "4R", 0.0, 0.0, modes.FIT_TO_PRINTABLE, True, 3, modes.FIT_TO_PRINTABLE),
+]
 
-    Task 4 把 cli 改成薄转发之后，这里会退化成自己比自己，届时换成绝对格数
-    断言（见计划 Task 4 Step 4）；本 commit 里两边仍是两份实现，对拍是真对拍。
+
+@pytest.mark.parametrize("sheet,cell,gap,bleed,mode,borderless,want_count,"
+                         "want_mode", _CELL_COUNTS)
+def test_build_layout_cell_counts_are_frozen(st, sheet, cell, gap, bleed, mode,
+                                             borderless, want_count, want_mode):
+    """格数与生效模式全部钉死：数字漂了照样红，不需要另一个实现来参照。
+
+    原方案是与重构前的 cli.build_plan_jobs 逐字段对拍；Task 4 把 cli 改成
+    `jobs.build_layout` 的薄转发后，那两条就退化成自己比自己——永远绿，
+    却不声明任何事。这里的绝对值是重构前实测抄下的。
     """
-    plan_a, mode_a = cli.build_plan_jobs(st, sheet, cell, gap, bleed, mode,
-                                         borderless)
-    plan_b, mode_b = jobs.build_layout(st, sheet, cell, gap, bleed, mode,
+    plan, mode_eff = jobs.build_layout(st, sheet, cell, gap, bleed, mode,
                                        borderless_active=borderless)
-    assert mode_a == mode_b
-    assert plan_a == plan_b  # dataclass 逐字段相等
+    assert (plan.count, mode_eff) == (want_count, want_mode)
 
 
-def test_build_layout_rejects_cell_larger_than_sheet_with_same_message(st):
-    """报错分支也要对拍：文案是用户唯一能看见的出口，漂了就没人知道为何失败。
+def test_cell_larger_than_sheet_raises_actionable_message(st):
+    """报错文案是用户唯一能看见的出口，改成整句断言而不是与 cli 对拍。
 
     卡片纸（91×55）在出血档装不下带 3mm 出血的美国签证（57×57 > 55），
     且出血档不走“整纸一格”退化分支，是预设组合里真能走到的报错。
-
-    与 `test_build_layout_matches_legacy_cli` 同一命运：Task 4 后换成整句断言。
     """
-    with pytest.raises(ValueError) as ea:
-        cli.build_plan_jobs(st, "CARD", "USVISA", 0.0,
-                            modes.DEFAULT_BLEED_MM, modes.BLEED_TRIM, False)
-    with pytest.raises(ValueError) as eb:
+    with pytest.raises(ValueError) as exc:
         jobs.build_layout(st, "CARD", "USVISA", 0.0, modes.DEFAULT_BLEED_MM,
                           modes.BLEED_TRIM, borderless_active=False)
-    assert str(ea.value) == str(eb.value)
-    assert "放不下" in str(eb.value)
+    assert str(exc.value) == "卡片 放不下 美国签证，请换大纸或改小格子"
 
 
 def test_build_job_counts_pages(st):

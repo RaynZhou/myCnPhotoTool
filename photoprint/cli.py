@@ -8,57 +8,20 @@ import argparse
 import sys
 from pathlib import Path
 
-from PIL import Image
-
-from photoprint.core import modes, pack, render, specs, store
+from photoprint import jobs
+from photoprint.core import modes, store  # pack/render/specs 不再由此层直接调用
 
 
 def load_photo(path):
-    """读图并让 EXIF 方向生效，避免界面与打印各转一次。"""
-    from PIL import ImageOps
-
-    return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+    """薄转发：读图实现已搬到 jobs，历史调用点不变。"""
+    return jobs.load_photo(path)
 
 
 def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                     borderless_active):
-    """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。"""
-    sheet = st.resolve(sheet_key)
-    cell = st.resolve(cell_key)
-    printable = specs.printable_rect(sheet, borderless_active=borderless_active)
-    # 全局约束：证件照这类"格"（role="cell"）拼版不得旋转——横放会把
-    # 一寸/二寸照排成横的；纸类（3R/4R）是照片本身，旋转是合法装箱策略
-    allow_rotate = cell.role != "cell"
-    probe_plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
-                           allow_rotate=allow_rotate, printable=printable)
-    if mode is None:
-        mode = modes.default_mode(sheet, cell, probe_plan.count, borderless_active)
-    modes.assert_mode_legal(sheet, mode)
-    bleed = bleed_mm if mode == modes.BLEED_TRIM else 0.0
-    # 裁切模式在整张纸上装箱（无边距才容得下出血），其余在可打印区内装箱
-    rect = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm) \
-        if mode == modes.BLEED_TRIM else printable
-    plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=bleed,
-                     allow_rotate=allow_rotate, printable=rect)
-    if plan.count == 0 and mode != modes.BLEED_TRIM:
-        # 退化情形：格子与纸张同尺寸（如 3R 纸打 3R 照片）。
-        # 按可打印矩形装箱必然得 0 格，改为整纸装一格，
-        # 画面收回可打印区由 render 层的交集负责。
-        full = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
-        plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
-                         allow_rotate=allow_rotate, printable=full)
-    if plan.count == 0:
-        raise ValueError(f"{sheet.label} 放不下 {cell.label}，请换大纸或改小格子")
-    return plan, mode
-
-
-def _pages(plan, photos, sheet, dpi, mode, **kw):
-    """按每页格子数切页。"""
-    out = []
-    for i in range(0, len(photos), plan.count):
-        chunk = photos[i:i + plan.count]
-        out.append(render.render_page(plan, chunk, sheet, dpi, mode, **kw))
-    return out
+    """薄转发：保持 7 个位置参数与 (plan, mode) 返回的历史形状。"""
+    return jobs.build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
+                             borderless_active=borderless_active)
 
 
 def build_parser():
@@ -74,6 +37,8 @@ def build_parser():
     ap.add_argument("--out", default=None, help="输出 PNG 路径（调试与验收用）")
     ap.add_argument("--pdf", default=None, help="兜底：输出等尺寸 PDF")
     ap.add_argument("--print", dest="do_print", action="store_true")
+    ap.add_argument("--mask", action="store_true",
+                    help="导出时保留不可印区灰遮罩（调试用，默认不导出）")
     ap.add_argument("--list-printers", action="store_true")
     return ap
 
@@ -96,17 +61,21 @@ def main(argv=None):
 
     photos = [load_photo(p) for p in args.photos]
     sheet = st.resolve(args.sheet)
-    plan, mode = build_plan_jobs(st, args.sheet, args.cell, args.gap,
-                                args.bleed, args.mode, False)
-    pages = _pages(plan, photos, sheet, args.dpi, mode)
+    job = jobs.build_job(st, photos, args.sheet, args.cell, gap_mm=args.gap,
+                         bleed_mm=args.bleed, mode=args.mode)
+    pages = jobs.render_all(job, args.dpi, show_mask=args.mask)
 
-    borderless = mode == modes.BLEED_TRIM
+    # 文案逐字冻结（全局约束）：cli 沿用本层原有的两分支 note 表达式，
+    # 不取 job.note——那条属性按 margin_source 分档，spec 档写的是
+    # “依规格推定，未经真机校准”，与历史输出不同一句
+    borderless = job.mode == modes.BLEED_TRIM
     note = ("需人工裁切：沿灰线切开后即为 "
-            f"{plan.cells[0].inner_mm()[2]:.0f}×{plan.cells[0].inner_mm()[3]:.0f}mm 成品"
+            f"{job.plan.cells[0].inner_mm()[2]:.0f}×"
+            f"{job.plan.cells[0].inner_mm()[3]:.0f}mm 成品"
             if borderless else
             f"将保留白边：依规格约 上{sheet.margins.top}/下{sheet.margins.bottom}/"
             f"左{sheet.margins.left}/右{sheet.margins.right}mm（未经真机校准）")
-    print(f"纸张 {sheet.label}，每页 {plan.count} 格，共 {len(pages)} 页。{note}")
+    print(f"纸张 {sheet.label}，每页 {job.count} 格，共 {len(pages)} 页。{note}")
 
     if args.out:
         # README 示例写 _lab/out/，而 git 不存空目录：父目录必须自建；

@@ -216,6 +216,15 @@ def test_set_last_job_rejects_non_dict(tmp_store):
         tmp_store.set_last_job(["A4"])
 
 
+def test_save_failure_propagates_but_memory_still_effective(tmp_path):
+    """路径指向一个目录时写盘必失败：save 回 False，内存改动仍生效。"""
+    s = store.Store(tmp_path)          # 目录当文件用
+    s.load()
+    s.set_last_job({"dpi": 150.0})
+    assert s.save() is False
+    assert s.get_last_job()["dpi"] == 150.0
+
+
 def test_set_last_job_does_not_alias_caller_dict(tmp_store):
     """存的是副本：调用方手里的字典之后怎么改，都不能隔空改已存的任务。
 
@@ -263,6 +272,11 @@ def test_set_last_job_only_touches_its_own_slot(tmp_store):
     tmp_store.load()
     tmp_store.override_margins("3R", specs.Margins(2.0, 4.0, 3.0, 3.0),
                                "calibrated")
+    # user_sizes 必须先非空：否则 before/after 都是 []，"顺手清空 user_sizes"
+    # 这种串位变异照样过——快照比对只有旁槽真装了值才承重。
+    tmp_store.add_user_size(specs.SizeSpec("user-4d", "4D 自建", 100.0, 148.0,
+                                            "paper", "user", False,
+                                            specs.Margins(), "spec"))
     before = json.dumps({k: v for k, v in tmp_store.raw.items()
                          if k != "last_job"}, sort_keys=True)
     tmp_store.set_last_job({"dpi": 300.0})
@@ -270,12 +284,3 @@ def test_set_last_job_only_touches_its_own_slot(tmp_store):
                         if k != "last_job"}, sort_keys=True)
     assert after == before
     assert set(tmp_store.raw) == {"overrides", "user_sizes", "last_job"}
-
-
-def test_save_failure_propagates_but_memory_still_effective(tmp_path):
-    """路径指向一个目录时写盘必失败：save 回 False，内存改动仍生效。"""
-    s = store.Store(tmp_path)          # 目录当文件用
-    s.load()
-    s.set_last_job({"dpi": 150.0})
-    assert s.save() is False
-    assert s.get_last_job()["dpi"] == 150.0

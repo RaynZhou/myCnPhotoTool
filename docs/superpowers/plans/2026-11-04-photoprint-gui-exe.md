@@ -1173,6 +1173,11 @@ def test_set_last_job_only_touches_its_own_slot(tmp_store):
     tmp_store.load()
     tmp_store.override_margins("3R", specs.Margins(2.0, 4.0, 3.0, 3.0),
                                "calibrated")
+    # user_sizes 必须先非空：否则 before/after 都是 []，"顺手清空 user_sizes"
+    # 这种串位变异照样过——快照比对只有旁槽真装了值才承重。
+    tmp_store.add_user_size(specs.SizeSpec("user-4d", "4D 自建", 100.0, 148.0,
+                                            "paper", "user", False,
+                                            specs.Margins(), "spec"))
     before = json.dumps({k: v for k, v in tmp_store.raw.items()
                          if k != "last_job"}, sort_keys=True)
     tmp_store.set_last_job({"dpi": 300.0})
@@ -2461,6 +2466,14 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   `test_load_degrades_non_dict_last_job` 四条，各杀一个变异；本任务净新增
   9 条测试（test_store.py 16→25，全量 180→189），
   `mutate_gui_t5.py` 7 个变异全有效，`check_t5_plan_verbatim.py` 缺失 0 行。
+- **T5 round-1 评审的 I-1 修正（⑮）**：`test_set_last_job_only_touches_its_own_slot`
+  只调 `override_margins`，`raw["user_sizes"]` 在 before/after 都是 `[]`（恒等
+  快照），“`set_last_job` 顺手清空 user_sizes”这类串位变异当场存活。修法：
+  在 `override_margins(...)` 之后、`before = json.dumps(...)` 之前补一条
+  `add_user_size(...)` 把 user_sizes 弄非空，使快照比对真承重（V8 实测变红、
+  还原后 25 条仍绿）；生产代码不动。顺带把成品里误置末尾的
+  `test_save_failure_propagates_but_memory_still_effective` 上移到第 5 位，
+  使文件顺序与计划逐字块一致，“上块末尾四条是补的”重新成立。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

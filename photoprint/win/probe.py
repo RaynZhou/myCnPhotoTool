@@ -57,20 +57,19 @@ def probe(api, printer, paper_code=None, dc=None):
     target = dc if dc is not None else api.open_printer(printer)
     own_handle = dc is None
     try:
-        dpi_x = api.get_device_caps(target, LOGPIXELSX) if own_handle else 0
-        dpi_y = api.get_device_caps(target, LOGPIXELSY) if own_handle else 0
+        dpi_x = api.get_device_caps(target, LOGPIXELSX)
+        dpi_y = api.get_device_caps(target, LOGPIXELSY)
         names = api.device_caps(printer, DC_PAPERNAMES) or []
         codes = api.device_caps(printer, DC_PAPERS) or []
         sizes = api.device_caps(printer, DC_PAPERSIZE) or []
         # 真机上 hdc 才是当前纸张的物理参数来源；脱机时用设备默认
-        phys_w = api.get_device_caps(target, PHYSICALWIDTH) if own_handle else 0
-        phys_h = api.get_device_caps(target, PHYSICALHEIGHT) if own_handle else 0
-        off_x = api.get_device_caps(target, PHYSICALOFFSETX) if own_handle else 0
-        off_y = api.get_device_caps(target, PHYSICALOFFSETY) if own_handle else 0
-        hr = api.get_device_caps(target, HORZRES) if own_handle else 0
-        vr = api.get_device_caps(target, VERTRES) if own_handle else 0
-        if own_handle:
-            dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
+        phys_w = api.get_device_caps(target, PHYSICALWIDTH)
+        phys_h = api.get_device_caps(target, PHYSICALHEIGHT)
+        off_x = api.get_device_caps(target, PHYSICALOFFSETX)
+        off_y = api.get_device_caps(target, PHYSICALOFFSETY)
+        hr = api.get_device_caps(target, HORZRES)
+        vr = api.get_device_caps(target, VERTRES)
+        dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
     finally:
         if own_handle:
             api.close_printer(target)

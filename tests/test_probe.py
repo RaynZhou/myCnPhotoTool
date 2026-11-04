@@ -115,3 +115,16 @@ def test_probe_closes_printer_handle():
     api = FakeApi(dc_caps={probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
     probe.probe(api, "P")
     assert ("close", "hdc:P") in api.calls
+
+
+def test_probe_with_dc_reads_device_values():
+    """dc 复用路径与自开句柄路径回读一致（T12 的 0.5mm 校验依赖这条）。"""
+    api = FakeApi(dc_caps={probe.PHYSICALWIDTH: 2480, probe.PHYSICALHEIGHT: 3508,
+                           probe.PHYSICALOFFSETX: 34, probe.PHYSICALOFFSETY: 30,
+                           probe.HORZRES: 2412, probe.VERTRES: 3448,
+                           probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
+    r = probe.probe(api, "P", dc="hdc:X")
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
+    assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)
+    # dc 模式不得开关打印机句柄
+    assert not any(k in ("open", "close") for k, _ in api.calls)

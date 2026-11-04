@@ -2111,7 +2111,7 @@ import pytest
 Image = pytest.importorskip("PIL.Image", reason="需要 Pillow")
 from PIL import Image as PILImage  # noqa: E402
 
-from photoprint.core import modes, pack, render, specs  # noqa: E402
+from photoprint.core import modes, pack, render, specs, units  # noqa: E402
 
 DPI = 25.4  # 1px == 1mm
 
@@ -2139,8 +2139,8 @@ def test_page_size_matches_sheet_in_pixels():
 def test_photo_pixels_present_and_bounded():
     plan, img = _a4_3r(photos=_photos(4, (255, 0, 0)))
     c = plan.cells[0]
-    x0 = int(round(c.x_mm))
-    y0 = int(round(c.y_mm))
+    x0 = units.round_px(c.x_mm)
+    y0 = units.round_px(c.y_mm)
     assert img.getpixel((x0 + 40, y0 + 60)) == (255, 0, 0)
     # 纸外角落必须是白（A4 无边距未启用时角落在遮罩内，仍非照片色）
     assert img.getpixel((0, 0)) != (255, 0, 0)
@@ -2155,7 +2155,7 @@ def test_fill_mode_crops_to_cell_exactly():
     green = PILImage.new("RGB", (200, 100), (0, 255, 0))
     plan, img = _a4_3r(photos=[green], cut_lines=False)
     c = plan.cells[0]
-    x0, y0 = int(round(c.x_mm)), int(round(c.y_mm))
+    x0, y0 = units.round_px(c.x_mm), units.round_px(c.y_mm)
     col = [x for x in range(210) if img.getpixel((x, y0 + 60)) == (0, 255, 0)]
     assert min(col) == x0
     assert max(col) - min(col) + 1 == 89
@@ -2193,8 +2193,8 @@ def test_cut_lines_are_drawn_and_light_gray():
     # 取竖缝：它的 x 落在 at_mm 上，线段沿 y 走（取 cuts[0] 会拿成横缝，
     # 坐标当像素用时会把 x/y 写反，采样点落在照片上而不是线上）
     seam = next(c for c in plan.cuts if c.axis == "v")
-    x = int(round(seam.at_mm))
-    y = int(round(seam.from_mm)) + 30  # 沿线段方向取一点，避开横缝
+    x = units.round_px(seam.at_mm)
+    y = units.round_px(seam.from_mm) + 30  # 沿线段方向取一点，避开横缝
     px = img.getpixel((x, y))
     assert abs(px[0] - render.CUT_LINE_GRAY) <= 3
     assert abs(px[1] - render.CUT_LINE_GRAY) <= 3
@@ -2215,8 +2215,8 @@ def test_cut_lines_can_be_hidden():
                                 show_cut_lines=False)
     # 同一个采样点：画时是灰线，关掉后必须变回照片色（1px=1mm）
     seam = next(c for c in plan.cuts if c.axis == "v")
-    x = int(round(seam.at_mm))
-    y = int(round(seam.from_mm)) + 30
+    x = units.round_px(seam.at_mm)
+    y = units.round_px(seam.from_mm) + 30
     assert shown.getpixel((x, y)) != (255, 0, 0)
     assert hidden.getpixel((x, y)) == (255, 0, 0)
 
@@ -2225,7 +2225,7 @@ def test_bleed_cells_extend_beyond_inner_photo():
     plan, img = _a4_3r(mode=modes.BLEED_TRIM, bleed=3.0, photos=_photos(4, (9, 9, 9)))
     c = plan.cells[0]
     # 出血格的外框 95×133，内缩 3mm 后才是 89×127 成品；画面应铺到外框
-    assert img.getpixel((int(round(c.x_mm)) + 1, int(round(c.y_mm)) + 1)) == (9, 9, 9)
+    assert img.getpixel((units.round_px(c.x_mm) + 1, units.round_px(c.y_mm) + 1)) == (9, 9, 9)
 
 
 def test_photo_count_mismatch_leaves_remaining_cells_white():
@@ -2237,7 +2237,7 @@ def test_photo_count_mismatch_leaves_remaining_cells_white():
     assert img.size == (210, 297)
     # 第 4 格没有照片，必须保持纸白，不能被上一张残留内容污染
     c3 = plan.cells[3]
-    assert img.getpixel((int(round(c3.x_mm)) + 40, int(round(c3.y_mm)) + 60)) == (255, 255, 255)
+    assert img.getpixel((units.round_px(c3.x_mm) + 40, units.round_px(c3.y_mm) + 60)) == (255, 255, 255)
 
 
 def test_rotated_cell_places_rotated_photo():
@@ -2357,8 +2357,8 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
             piece = piece.transpose(Image.ROTATE_270)
         if pl.dest_mm[2] != 0 and (abs(pl.dest_mm[2] - piece.width / units.ppmm(dpi)) > 0.6
                                    or abs(pl.dest_mm[3] - piece.height / units.ppmm(dpi)) > 0.6):
-            piece = piece.resize((max(1, int(round(pl.dest_mm[2] * units.ppmm(dpi)))),
-                                  max(1, int(round(pl.dest_mm[3] * units.ppmm(dpi))))),
+            piece = piece.resize((max(1, units.round_px(pl.dest_mm[2] * units.ppmm(dpi))),
+                                  max(1, units.round_px(pl.dest_mm[3] * units.ppmm(dpi)))),
                                  Image.LANCZOS)
         paste_x = units.mm_to_px(ox + pl.dest_mm[0], dpi)
         paste_y = units.mm_to_px(oy + pl.dest_mm[1], dpi)

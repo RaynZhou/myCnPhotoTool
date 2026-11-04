@@ -545,8 +545,12 @@ class Job:
 
     @property
     def page_count(self) -> int:
-        """零照片也至少一页：界面要能预览空格。"""
-        return max(1, pack.needed_sheets(self.plan.count, len(self.photos)))
+        """零照片也至少一页：界面要能预览空格。
+
+        与 cli._pages 的切页等价（照片非空时就是页数）；count 恒 >= 1，
+        因为 build_layout 在 0 格时已经抛错。
+        """
+        return max(1, -(-len(self.photos) // self.count))
 
     @property
     def note(self) -> str:

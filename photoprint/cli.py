@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from PIL import Image
 
@@ -103,8 +104,13 @@ def main(argv=None):
     print(f"纸张 {sheet.label}，每页 {plan.count} 格，共 {len(pages)} 页。{note}")
 
     if args.out:
-        pages[0].save(args.out)
-        print(f"已输出 {args.out}")
+        # README 示例写 _lab/out/，而 git 不存空目录：父目录必须自建；
+        # 多页时 --out 只落第一页（全部页面请用 --pdf），消息不得谎报全套（T14 评审 I-1）
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pages[0].save(out_path)
+        extra = "（多页时仅第一页，全部页面请用 --pdf）" if len(pages) > 1 else ""
+        print(f"已输出 {out_path}{extra}")
     if args.pdf:
         from photoprint.win import pdf_export
 

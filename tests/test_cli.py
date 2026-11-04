@@ -71,3 +71,32 @@ def test_main_writes_pdf_with_3r_box(tmp_path):
     vals = [float(x) for x in m.group(1).split()]
     assert vals[2] == pytest.approx(252.283, abs=1.0)
     assert vals[3] == pytest.approx(360.0, abs=1.0)
+
+
+def test_main_creates_out_parent_dirs(tmp_path):
+    """README 首个示例直写 _lab/out/（git 不存空目录）：--out 必须自建父目录。"""
+    from PIL import Image
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (1, 2, 3)).save(p)
+    out = tmp_path / "deep" / "dir" / "page.png"
+    code = cli.main(["--photos", str(p), "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert out.exists()
+
+
+def test_main_marks_first_page_only_for_multipage_out(tmp_path, capsys):
+    """5 张在 A4+3R 下出 2 页：--out 只落第一页，必须明说，不得谎报全套已输出。"""
+    from PIL import Image
+
+    photos = []
+    for i in range(5):
+        p = tmp_path / f"{i}.jpg"
+        Image.new("RGB", (400, 200), (i, 9, 9)).save(p)
+        photos.append(str(p))
+    out = tmp_path / "page.png"
+    code = cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert "仅第一页" in capsys.readouterr().out

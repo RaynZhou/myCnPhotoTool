@@ -2875,6 +2875,9 @@ def test_build_asks_size_then_gets_filled_struct():
     api = FakeApi(size=520)
     dm, size = devmode.build(api, "Canon G3800 series", 89.0, 127.0)
     assert size == 520
+    # T11 评审 Important：必须钉住第一元素是已填好的 dm 本体——
+    # 曾写 `return modify(...), size` 而 modify 返回 size，元组实为 (520, 520)
+    assert dm.dmPaperWidth == 890 and dm.dmPaperSize == devmode.DMPAPER_USER
     assert api.mode_log == ["size", "get"], "必须先按驱动回报的 size 分配再取回，不得新建空结构"
 
 
@@ -2950,7 +2953,10 @@ def build(api, printer, w_mm, h_mm, paper_code=None):
         dm = api.document_properties(handle, printer, "get")
     finally:
         api.close_printer(handle)
-    return modify(dm, size, w_mm, h_mm, paper_code), size
+    # 先就地改再返回 dm 本体：写成 `return modify(...), size` 会把
+    # modify 的返回值（size）当成 dm，下游 T12 拿到的第一元素是 int（T11 评审 I-1）
+    modify(dm, size, w_mm, h_mm, paper_code)
+    return dm, size
 ```
 
 注：`mode="size"` 对应真机上的 `DocumentProperties(..., None, None, DM_INQUIRE)` 只拿长度；`mode="get"` 对应先 `create_string_buffer(size)` 再 `DocumentProperties(..., DM_GETMODE)` 拿回填充好的 `PyDEVMODE`。这两步的分配与绑定全部关在 `RealWinApi.document_properties` 内部，`tests/test_devmode.py` 用 `FakeApi` 只验证语义（先问长度再取回、只改纸张字段、保留私有区），真机行为在 M5 由用户回读校验把关。

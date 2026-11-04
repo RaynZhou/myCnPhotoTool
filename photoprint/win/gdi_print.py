@@ -37,7 +37,11 @@ def pick_dpi(driver_dpi, cap=600):
 
 
 def print_job(api, printer, port, images, sheet, dpi, dm=None):
-    """打印多页。返回 {'ok': bool, 'pages': int, 'message': str}。"""
+    """打印多页。返回 {'ok': bool, 'pages': int, 'message': str}。
+
+    port 仅为兼容旧调用保留：它不参与建 DC（_create_dc 只收 printer 与
+    devmode），现代驱动走默认端口。
+    """
     from PIL import ImageWin
 
     import win32con

@@ -116,3 +116,23 @@ def test_zero_area_crop_box_keeps_at_least_one_pixel():
     x0, y0, x1, y1 = p.crop_px
     assert x1 > x0 and y1 > y0
     assert (x0, x1) == (2000, 2001)
+
+
+def test_zero_area_crop_box_stays_inside_photo():
+    """终审复审 Minor：零面积守卫的「起点 +1」会把裁框推出图外。
+
+    若取整后 cl 已贴住图右边界（== photo_w_px），旧写法只做 cr = cl + 1，
+    得到 (photo_w_px, ..., photo_w_px+1, ...) 的越界框；PIL crop 对越界区域
+    填 (0, 0, 0) 纯黑，比留白更糟。守卫必须先把起点夹进图内再加 1。
+    """
+    for p in (
+        # 4000x1 的照片：宽被压成零宽，dx 又把裁框顶到右边界
+        crop.cell_crop_box(4000, 1, 1.0, 32.0, crop.FILL, dx_mm=1e6,
+                           ppmm=PPMM),
+        # 1x4000 的照片：同上，但顶到下边界
+        crop.cell_crop_box(1, 4000, 32.0, 1.0, crop.FILL, dy_mm=1e6,
+                           ppmm=PPMM),
+    ):
+        cl, ct, cr, cb = p.crop_px
+        assert 0 <= cl < cr <= 4000
+        assert 0 <= ct < cb <= 4000

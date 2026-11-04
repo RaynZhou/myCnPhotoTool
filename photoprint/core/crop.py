@@ -60,8 +60,12 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
         # 极端长宽比下裁框会被取整压成零宽/零高（r == l）：那会 crop 出
         # 一张空图、整格留白，故至少保留 1 像素
         if cr == cl:
+            # 先夹进图内再加 1：cl 可能已被钳到 photo_w_px，直接 +1 会越界，
+            # PIL crop 越界部分填 (0,0,0) 纯黑，比留白更糟（终审复审 Minor）
+            cl = min(cl, photo_w_px - 1)
             cr = cl + 1
         if cb == ct:
+            ct = min(ct, photo_h_px - 1)
             cb = ct + 1
         return Placement((cl, ct, cr, cb),
                          (0.0, 0.0, float(target_w_mm), float(target_h_mm)))

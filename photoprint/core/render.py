@@ -76,6 +76,8 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         dx, dy, dw, dh = pl.dest_mm
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
+            # 这是「转置」而非通用 90° 旋转映射：仅在落位居中时与 90° 旋转
+            # 等价，若将来支持非居中偏移须改为 x' = H-(y+h), y' = x
             dx, dy, dw, dh = dy, dx, dh, dw
         if dw and (abs(dw - piece.width / units.ppmm(dpi)) > 0.6
                    or abs(dh - piece.height / units.ppmm(dpi)) > 0.6):

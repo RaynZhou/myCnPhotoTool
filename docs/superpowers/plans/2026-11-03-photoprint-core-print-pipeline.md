@@ -3426,6 +3426,35 @@ def test_main_writes_pdf_with_3r_box(tmp_path):
     vals = [float(x) for x in m.group(1).split()]
     assert vals[2] == pytest.approx(252.283, abs=1.0)
     assert vals[3] == pytest.approx(360.0, abs=1.0)
+
+
+def test_main_creates_out_parent_dirs(tmp_path):
+    """README 首个示例直写 _lab/out/（git 不存空目录）：--out 必须自建父目录。"""
+    from PIL import Image
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (1, 2, 3)).save(p)
+    out = tmp_path / "deep" / "dir" / "page.png"
+    code = cli.main(["--photos", str(p), "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert out.exists()
+
+
+def test_main_marks_first_page_only_for_multipage_out(tmp_path, capsys):
+    """5 张在 A4+3R 下出 2 页：--out 只落第一页，必须明说，不得谎报全套已输出。"""
+    from PIL import Image
+
+    photos = []
+    for i in range(5):
+        p = tmp_path / f"{i}.jpg"
+        Image.new("RGB", (400, 200), (i, 9, 9)).save(p)
+        photos.append(str(p))
+    out = tmp_path / "page.png"
+    code = cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert "仅第一页" in capsys.readouterr().out
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -3446,6 +3475,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from PIL import Image
 
@@ -3543,8 +3573,13 @@ def main(argv=None):
     print(f"纸张 {sheet.label}，每页 {plan.count} 格，共 {len(pages)} 页。{note}")
 
     if args.out:
-        pages[0].save(args.out)
-        print(f"已输出 {args.out}")
+        # README 示例写 _lab/out/，而 git 不存空目录：父目录必须自建；
+        # 多页时 --out 只落第一页（全部页面请用 --pdf），消息不得谎报全套（T14 评审 I-1）
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pages[0].save(out_path)
+        extra = "（多页时仅第一页，全部页面请用 --pdf）" if len(pages) > 1 else ""
+        print(f"已输出 {out_path}{extra}")
     if args.pdf:
         from photoprint.win import pdf_export
 
@@ -3571,7 +3606,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_cli.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（8 passed）
 
 - [ ] **Step 5: 全量回归 + 未使用导入清理**
 
@@ -3734,7 +3769,7 @@ git commit -m "feat: CLI 编排与 M1/M2 验收证据脚本"
 | 14 测试策略与变异测试 | T4 Step5、T5 Step5、T9 Step5 |
 | 8 交互设计、11 校准页 | **不在本计划**，属第二份（M3+M4）——本计划是其依赖 |
 
-**2. 占位符与自纠错误扫描**：无 TBD/TODO/“类似上一个任务”；每个代码步骤均给出可运行代码。各任务的 Expected 通过数已逐个重数并纠正（T1 6、T2 11、T3 7、T4 7、T5 10、T6 6、T7 10、T8 9、T9 12、T10 7、T11 8、T12 5、T13 5、T14 6）。
+**2. 占位符与自纠错误扫描**：无 TBD/TODO/“类似上一个任务”；每个代码步骤均给出可运行代码。各任务的 Expected 通过数已逐个重数并纠正（T1 6、T2 11、T3 7、T4 7、T5 10、T6 6、T7 10、T8 9、T9 12、T10 7、T11 8、T12 5、T13 5、T14 8）。
 
 **2b. 自审发现并修掉的设计缺陷**（不是文字问题，会直接导致实现失败）：
 

@@ -14,6 +14,18 @@ def st(tmp_path):
     return s
 
 
+@pytest.fixture(autouse=True)
+def _isolated_store(tmp_path, monkeypatch):
+    """cli.main 自己 new `store.Store()`，吃的是默认配置路径（%APPDATA%）。
+
+    不隔离的话测试钉的边距数字与遮罩带宽度就取决于开发机上那份 papers.json：
+    界面一旦跑过驱动实测并 override_margins + save()（写的就是同一个文件），
+    pytest 会因与本改动无关的原因变红。`Store.__init__` 在调用时才读模块全局，
+    所以 patch 该变量就能顶住。
+    """
+    monkeypatch.setattr(store, "DEFAULT_PATH", tmp_path / "papers.json")
+
+
 def test_default_mode_for_a4_3r_is_bleed_trim(st):
     plan, mode = cli.build_plan_jobs(st, "A4", "3R", 0.0, modes.DEFAULT_BLEED_MM,
                                      None, False)
@@ -137,7 +149,9 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
 
     探针取 (1, ·) / (·, 1)：A4 的左/上边距是 3.4/3.0mm，dpi 25.4 下遮罩带
     只覆盖 0..2 像素（矩形右下角减 1），取 x=3 会探到带外——带外本来就是白的，
-    这条测试就会无论如何都绿，遮罩没关也报不了。
+    这条测试就会无论如何都绿，遮罩没关也报不了。顶缘探针取 w//4 而不是 w//2：
+    A4+3R 的列缝正好在 105mm（= w//2），虽当前从格上沿起画填不到 y=1，但也不必
+    把像素断言寄在切缝长度规则上。
     """
     from PIL import Image
 
@@ -147,8 +161,8 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
     assert code == 0
     img = Image.open(out)
     w, h = img.size
-    assert img.getpixel((1, h // 2)) == (255, 255, 255), "左缘不得有灰遮罩带"
-    assert img.getpixel((w // 2, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
+    assert img.getpixel((1, h // 4)) == (255, 255, 255), "左缘不得有灰遮罩带"
+    assert img.getpixel((w // 4, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
 
 
 def test_main_mask_flag_keeps_mask(tmp_path):
@@ -163,8 +177,8 @@ def test_main_mask_flag_keeps_mask(tmp_path):
     img = Image.open(out)
     w, h = img.size
     # (210, 210, 210) = MASK_RGB(150) 以 alpha 110 压在白纸上的合成值
-    assert img.getpixel((1, h // 2)) == (210, 210, 210)
-    assert img.getpixel((w // 2, 1)) == (210, 210, 210)
+    assert img.getpixel((1, h // 4)) == (210, 210, 210)
+    assert img.getpixel((w // 4, 1)) == (210, 210, 210)
 
 
 def test_build_plan_jobs_is_still_positional(st):
@@ -178,10 +192,22 @@ def test_build_plan_jobs_is_still_positional(st):
 def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
     """全局约束：“cli 输出文案逐字不变”。重构前就应该通过——
     它是逐字冻结的回归锁，不是 RED 步骤：界面用的 `Job.note` 按 margin_source
-    分档，措辞与本句不同，cli 这一侧必须自己钉住。"""
-    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
-                     "--cell", "ID1", "--dpi", "25.4"])
-    assert code == 0
-    out = capsys.readouterr().out
-    assert ("将保留白边：依规格约 上3.0/下5.0/左3.4/右3.4mm（未经真机校准）"
-            in out)
+    分档，措辞与本句不同，cli 这一侧必须自己钉住。
+
+    钉整行而不只钉 note 子句：“每页 N 格 / 共 M 页”本轮从 `plan.count` /
+    `len(_pages(...))` 换成了 `job.count` / `len(render_all(...))`，只钉后半句
+    的话这两处漂了测试也不红。两档分支（白边 / 出血）都得钉。
+    """
+    photos = _four_red_photos(tmp_path)
+    # 不传 --gap：格数跟的是 cli 自己的默认值 0.0（72），不是对拍用的 2.0（56）
+    assert cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "ID1",
+                     "--dpi", "25.4"]) == 0
+    assert capsys.readouterr().out == (
+        "纸张 A4，每页 72 格，共 1 页。将保留白边：依规格约 "
+        "上3.0/下5.0/左3.4/右3.4mm（未经真机校准）\n")
+
+    assert cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4"]) == 0
+    assert capsys.readouterr().out == (
+        "纸张 A4，每页 4 格，共 1 页。"
+        "需人工裁切：沿灰线切开后即为 89×127mm 成品\n")

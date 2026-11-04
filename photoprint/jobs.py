@@ -40,8 +40,9 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                  borderless_active=False):
     """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
 
-    逻辑逐字来自 cli.build_plan_jobs；cli 改为本函数的薄转发是 Task 4 的事，
-    因此本 commit 里两边仍是两份实现，等价测试是真对拍。
+    本函数是唯一真相源，cli.build_plan_jobs 只是它的薄转发（Task 4）。
+    与旧 cli 实现的等价性已在历史提交上逐字段对拍过一次，此后不再靠
+    两份实现互比——那只会退化成自己比自己，改由绝对格数与报错整句钉住。
     """
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)

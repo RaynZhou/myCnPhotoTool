@@ -791,7 +791,26 @@ git commit -m "feat: 抽出 jobs 共用编排层（build_layout/Job/build_job/re
 
 - [ ] **Step 1: 写失败测试**
 
-在 `tests/test_cli.py` 末尾追加：
+先把一个隔离 fixture 插到 `tests/test_cli.py` 的 `st` fixture 之后（autouse）：
+`cli.main` 自己 `store.Store()`，吃的是 `%APPDATA%\PhotoPrint\papers.json`，
+不隔离的话测试钉的边距数字就取决于开发机上那份配置——界面一旦跑过驱动实测
+并 `override_margins + save()`（写的就是同一个文件），pytest 会因为与本改动
+无关的原因变红：
+
+```python
+@pytest.fixture(autouse=True)
+def _isolated_store(tmp_path, monkeypatch):
+    """cli.main 自己 new `store.Store()`，吃的是默认配置路径（%APPDATA%）。
+
+    不隔离的话测试钉的边距数字与遮罩带宽度就取决于开发机上那份 papers.json：
+    界面一旦跑过驱动实测并 override_margins + save()（写的就是同一个文件），
+    pytest 会因与本改动无关的原因变红。`Store.__init__` 在调用时才读模块全局，
+    所以 patch 该变量就能顶住。
+    """
+    monkeypatch.setattr(store, "DEFAULT_PATH", tmp_path / "papers.json")
+```
+
+再在文件末尾追加：
 
 ```python
 def _four_red_photos(tmp_path):
@@ -810,7 +829,9 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
 
     探针取 (1, ·) / (·, 1)：A4 的左/上边距是 3.4/3.0mm，dpi 25.4 下遮罩带
     只覆盖 0..2 像素（矩形右下角减 1），取 x=3 会探到带外——带外本来就是白的，
-    这条测试就会无论如何都绿，遮罩没关也报不了。
+    这条测试就会无论如何都绿，遮罩没关也报不了。顶缘探针取 w//4 而不是 w//2：
+    A4+3R 的列缝正好在 105mm（= w//2），虽当前从格上沿起画填不到 y=1，但也不必
+    把像素断言寄在切缝长度规则上。
     """
     from PIL import Image
 
@@ -820,8 +841,8 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
     assert code == 0
     img = Image.open(out)
     w, h = img.size
-    assert img.getpixel((1, h // 2)) == (255, 255, 255), "左缘不得有灰遮罩带"
-    assert img.getpixel((w // 2, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
+    assert img.getpixel((1, h // 4)) == (255, 255, 255), "左缘不得有灰遮罩带"
+    assert img.getpixel((w // 4, 1)) == (255, 255, 255), "上缘不得有灰遮罩带"
 
 
 def test_main_mask_flag_keeps_mask(tmp_path):
@@ -836,8 +857,8 @@ def test_main_mask_flag_keeps_mask(tmp_path):
     img = Image.open(out)
     w, h = img.size
     # (210, 210, 210) = MASK_RGB(150) 以 alpha 110 压在白纸上的合成值
-    assert img.getpixel((1, h // 2)) == (210, 210, 210)
-    assert img.getpixel((w // 2, 1)) == (210, 210, 210)
+    assert img.getpixel((1, h // 4)) == (210, 210, 210)
+    assert img.getpixel((w // 4, 1)) == (210, 210, 210)
 
 
 def test_build_plan_jobs_is_still_positional(st):
@@ -851,13 +872,25 @@ def test_build_plan_jobs_is_still_positional(st):
 def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
     """全局约束：“cli 输出文案逐字不变”。重构前就应该通过——
     它是逐字冻结的回归锁，不是 RED 步骤：界面用的 `Job.note` 按 margin_source
-    分档，措辞与本句不同，cli 这一侧必须自己钉住。"""
-    code = cli.main(["--photos", *_four_red_photos(tmp_path), "--sheet", "A4",
-                     "--cell", "ID1", "--dpi", "25.4"])
-    assert code == 0
-    out = capsys.readouterr().out
-    assert ("将保留白边：依规格约 上3.0/下5.0/左3.4/右3.4mm（未经真机校准）"
-            in out)
+    分档，措辞与本句不同，cli 这一侧必须自己钉住。
+
+    钉整行而不只钉 note 子句：“每页 N 格 / 共 M 页”本轮从 `plan.count` /
+    `len(_pages(...))` 换成了 `job.count` / `len(render_all(...))`，只钉后半句
+    的话这两处漂了测试也不红。两档分支（白边 / 出血）都得钉。
+    """
+    photos = _four_red_photos(tmp_path)
+    # 不传 --gap：格数跟的是 cli 自己的默认值 0.0（72），不是对拍用的 2.0（56）
+    assert cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "ID1",
+                     "--dpi", "25.4"]) == 0
+    assert capsys.readouterr().out == (
+        "纸张 A4，每页 72 格，共 1 页。将保留白边：依规格约 "
+        "上3.0/下5.0/左3.4/右3.4mm（未经真机校准）\n")
+
+    assert cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4"]) == 0
+    assert capsys.readouterr().out == (
+        "纸张 A4，每页 4 格，共 1 页。"
+        "需人工裁切：沿灰线切开后即为 89×127mm 成品\n")
 ```
 
 - [ ] **Step 2: 跑到失败**
@@ -865,7 +898,8 @@ def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
 Run: `python -m pytest tests/test_cli.py -v -k "mask or positional"`
 Expected: 两条遮罩测试 FAIL —— `unrecognized arguments: --mask`，以及左/上缘
 仍探到 `(210,210,210)`；`test_build_plan_jobs_is_still_positional` 是调用形状
-回归锁，本步即绿
+回归锁，本步即绿。（`test_cli_stdout_note_wording_is_frozen` 也是回归锁，
+本步同样即绿：它钉的是重构前后逐字相同的那一行）
 
 - [ ] **Step 3: 改 `cli.py`**
 
@@ -919,6 +953,19 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
 ```
 
 其余段落（`--out` 建父目录与"仅第一页"提示、`--pdf`、`--print`）保持原样不动。
+
+薄转发落地后 `jobs.build_layout` 的 docstring 就成了假话（它写着“本 commit
+里两边仍是两份实现，等价测试是真对拍”，而 Task 3 代码块里那段注释到此为止
+就是历史现场），一并改掉：
+
+```python
+    """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
+
+    本函数是唯一真相源，cli.build_plan_jobs 只是它的薄转发（Task 4）。
+    与旧 cli 实现的等价性已在历史提交上逐字段对拍过一次，此后不再靠
+    两份实现互比——那只会退化成自己比自己，改由绝对格数与报错整句钉住。
+    """
+```
 
 - [ ] **Step 4: 退役 `test_jobs.py` 里的两条对拍测试**
 
@@ -993,6 +1040,17 @@ python -c "from PIL import Image; im=Image.open('_lab/out/t4.png'); print(im.get
 ```
 Expected: 最后一行是 `(255, 255, 255)`，不是 `(210, 210, 210)`。探针取 x=1 而不是
 x=3：dpi 25.4 下 A4 的遮罩带只覆盖 0..2 像素，取 3 探的是带外，本来就很白。
+
+逐字冻结不能只靠新测试自己钉自己（那只能证明“现在是这样”，证不了“和历史
+一样”），所以本步还跑两个专用脚本：
+
+```bash
+python .superpowers/sdd/verify_t4_cli_parity.py      # 从 0370989 取旧 cli，五组参数逐字节对拍
+python .superpowers/sdd/verify_t4_store_isolation.py  # 把 %APPDATA% 指到已校准过的配置再跑测试
+```
+Expected: 前者“五组输出完全相同”，后者先在毒配置下把裸 cli 输出刷成
+`上0.5/下0.5/左0.5/右0.5mm`（证明风险真存在），再给出 `pytest rc = 0`——
+测试已经被 fixture 隔开。
 
 - [ ] **Step 7: 提交**
 
@@ -2291,6 +2349,14 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   于是一条恒真一条恒假——导出没关遮罩也报不了；⑦ Step 3 的 import 行去掉 `specs`
   （使用点全在被删的函数体内，照抄会留一个未用 import），`Image` 随 `load_photo`
   搬走一起删。两处均经 `.superpowers/sdd/check_t4_plan_verbatim.py` 逐行校对。
+- **T4 round-1 评审后的四处计划内修正**：⑧ `tests/test_cli.py` 加 autouse 的
+  `_isolated_store`——`cli.main` 自己 `store.Store()` 读 `%APPDATA%`，不隔离则
+  测试钉的边距数字取决于开发机配置（T6/T7 的 `MainWindow` 同样用默认路径，
+  界面校准后会连带把 pytest 跑红）；⑨ 逐字冻结锁改钉整行（含“每页 N 格 /
+  共 M 页”，本轮这两个量换了来源）并用 `verify_t4_cli_parity.py` 与重构前的
+  cli 逐字节对拍，不再只靠新测试自证；⑩ 薄转发落地后 `jobs.build_layout` 里
+  “两边仍是两份实现”的注释成了假话，随 T4 改写；⑪ 顶缘遮罩探针避开 105mm
+  列缝（`w//2` 正好是格缝）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

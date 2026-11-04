@@ -9,13 +9,11 @@ import io
 from pathlib import Path
 
 import img2pdf
-from PIL import Image
+from PIL import Image  # noqa: F401  接口文档性导入：images 元素即 PIL.Image
 
-MM_TO_PT = 72.0 / 25.4
-
-
-def mm_to_pt(mm: float) -> float:
-    return mm * MM_TO_PT
+# 换算唯一入口在 units（T13 评审 I-1：不得在消费模块自带第二套 mm→pt 公式）；
+# re-export 保住 pdf_export.mm_to_pt 的既有测试入口
+from photoprint.core.units import MM_TO_PT, mm_to_pt  # noqa: F401
 
 
 def export_pdf(images, sheet, out_path):

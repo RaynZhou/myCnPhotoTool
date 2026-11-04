@@ -31,6 +31,14 @@ def px_to_mm(px: float, dpi: float) -> float:
     return px / ppmm(dpi)
 
 
+MM_TO_PT = 72.0 / 25.4  # PostScript 点/毫米换算因子
+
+
+def mm_to_pt(mm: float) -> float:
+    """毫米 → PostScript 点（1pt == 1/72 英寸），PDF 页面尺寸专用。"""
+    return mm * MM_TO_PT
+
+
 def win_mm(value_mm: float) -> int:
     """转 Windows DEVMODE 的 0.1mm 整数单位（1mm = 10 单位）。
 

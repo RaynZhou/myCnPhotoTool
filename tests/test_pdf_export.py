@@ -8,12 +8,14 @@ Image = pytest.importorskip("PIL.Image")
 img2pdf = pytest.importorskip("img2pdf")
 from PIL import Image as PILImage  # noqa: E402
 
-from photoprint.core import specs  # noqa: E402
+from photoprint.core import specs
+from photoprint.core import units
 from photoprint.win import pdf_export  # noqa: E402
 
 
 def test_mm_to_pt():
-    assert pdf_export.mm_to_pt(25.4) == pytest.approx(72.0)
+    # 唯一入口在 units；pdf_export 只做 re-export（换算归口约束）
+    assert units.mm_to_pt(25.4) == pytest.approx(72.0)
     assert pdf_export.mm_to_pt(89.0) == pytest.approx(252.283, abs=0.01)
     assert pdf_export.mm_to_pt(127.0) == pytest.approx(360.0, abs=0.01)
 

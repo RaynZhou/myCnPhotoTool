@@ -135,7 +135,13 @@ git commit -m "feat(core): 纸面裁切偏移换算 rotate_offset"
 **Interfaces:**
 - Consumes: `crop.rotate_offset`（T1）、`crop.cell_crop_box` 的既有 `dx_mm/dy_mm` 形参
 - Produces: `render.place_rotated_dest(dest_mm, target_h_mm) -> tuple[float, float, float, float]`；
-  `render.render_page(..., dx_mm: float = 0.0, dy_mm: float = 0.0)`
+  `render.render_page(..., dx_mm: float = 0.0, dy_mm: float = 0.0)`；
+  `render.offset_mm_for_cell(offset_pct, w_mm, h_mm) -> tuple[float, float]`
+
+偏移的纸面语义要在两种模式下都成立，而 `crop.cell_crop_box` 对 `dx_mm/dy_mm` 的用法
+并不相同（实测：FILL 挪的是取景窗 `crop_px`，dest 不变；FIT 挪的是 `dest_mm`）。同一
+个 `dx_mm=+1` 在 FILL 下画面会往**左**走。因此渲染层必须按生效的裁切模式补一次反号：
+FILL（含 `bleed_trim`，它的 `crop_mode` 也是 fill）取负，fit 不取负。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -214,6 +220,25 @@ def test_dx_offset_moves_rotated_cell_picture_right_on_paper():
     assert moved.getpixel((157, 95)) == (255, 0, 0)     # 移进来才见红
 
 
+def test_fill_mode_offset_moves_picture_toward_paper_direction():
+    """FILL 的 dx/dy 在 crop 里挪的是取景窗，画面在纸面上反向；
+    界面偏移是纸面语义，渲染层须按模式补一次反号。"""
+    a4, plan = _a4_id1_plan()
+    photo = Image.new("RGB", (200, 100), (255, 255, 255))
+    photo.paste(Image.new("RGB", (40, 100), (255, 0, 0)), (80, 0))  # 中央红带
+    ix, iy, iw, ih = plan.cells[0].inner_mm()
+    y = int(iy + ih / 2)
+    args = (plan, [photo] * plan.count, a4, DPI, modes.FILL_PRINTABLE)
+    low = render.render_page(*args, show_mask=False, dx_mm=-3.0)
+    high = render.render_page(*args, show_mask=False, dx_mm=3.0)
+
+    def first_red(page):
+        return min(x for x in range(int(ix), int(ix + iw))
+                   if page.getpixel((x, y)) == (255, 0, 0))
+
+    assert first_red(high) > first_red(low)  # dx 为正 → 画面往纸面右边走
+
+
 def test_offset_mm_for_cell_half_page_is_50_pct():
     """±50% 就是半格：ID1 内框 25×32 → 12.5 / 16.0mm。"""
     assert render.offset_mm_for_cell((50.0, -50.0), 25.0, 32.0) == (12.5, -16.0)
@@ -227,7 +252,7 @@ def test_offset_mm_for_cell_zero_is_zero():
 
 Run: `python -m pytest tests/test_render_offset.py -v`
 Expected: FAIL — 前两条 `AttributeError: ... has no attribute 'place_rotated_dest'`；
-中间两条（透传偏移的两条像素测试）`TypeError: render_page() got an unexpected
+中间三条（透传偏移的像素测试）`TypeError: render_page() got an unexpected
 keyword argument 'dy_mm' / 'dx_mm'`；后两条 `AttributeError: ... 'offset_mm_for_cell'`
 
 - [ ] **Step 3: 加纯函数并改签名**
@@ -272,6 +297,10 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         # 界面偏移是纸面语义，旋转格须先换算到旋转前坐标再交给 crop
         in_dx, in_dy = crop.rotate_offset(dx_mm, dy_mm) if cell.rotated \
             else (dx_mm, dy_mm)
+        if cm == crop.FILL:
+            # FILL 的 dx/dy 挪的是取景窗，画面在纸面上会反向；fit 挪的是
+            # 落位矩形，本身已是纸面语义，故只在 fill 档补一次反号
+            in_dx, in_dy = -in_dx, -in_dy
         pl = crop.cell_crop_box(photo.width, photo.height, target_w, target_h,
                                cm, dx_mm=in_dx, dy_mm=in_dy,
                                ppmm=units.ppmm(dpi))
@@ -290,7 +319,7 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_render_offset.py -v`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 5: 全量回归 + 本机证据**
 

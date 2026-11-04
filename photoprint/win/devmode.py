@@ -54,4 +54,7 @@ def build(api, printer, w_mm, h_mm, paper_code=None):
         dm = api.document_properties(handle, printer, "get")
     finally:
         api.close_printer(handle)
-    return modify(dm, size, w_mm, h_mm, paper_code), size
+    # 先就地改再返回 dm 本体：写成 `return modify(...), size` 会把
+    # modify 的返回值（size）当成 dm，下游 T12 拿到的第一元素是 int（T11 评审 I-1）
+    modify(dm, size, w_mm, h_mm, paper_code)
+    return dm, size

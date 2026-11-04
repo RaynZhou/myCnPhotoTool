@@ -84,6 +84,9 @@ def test_build_asks_size_then_gets_filled_struct():
     api = FakeApi(size=520)
     dm, size = devmode.build(api, "Canon G3800 series", 89.0, 127.0)
     assert size == 520
+    # T11 评审 Important：必须钉住第一元素是已填好的 dm 本体——
+    # 曾写 `return modify(...), size` 而 modify 返回 size，元组实为 (520, 520)
+    assert dm.dmPaperWidth == 890 and dm.dmPaperSize == devmode.DMPAPER_USER
     assert api.mode_log == ["size", "get"], "必须先按驱动回报的 size 分配再取回，不得新建空结构"
 
 

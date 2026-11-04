@@ -27,6 +27,25 @@ def intersect_mm(a, b):
     return (x1, y1, x2 - x1, y2 - y1)
 
 
+def place_rotated_dest(dest_mm, target_h_mm):
+    """旋转前落位 → 纸面落位：顺时针 90° 时 x' = H-(y+h)，y' = x。
+
+    旧写法 `dx, dy, dw, dh = dy, dx, dh, dw` 是转置，只在落位居中时与真旋转
+    等价；一旦有裁切偏移，水平方向会整体反号（终审对旋转落位的补充说明）。
+    """
+    dx, dy, dw, dh = dest_mm
+    return ((target_h_mm - dh) - dy, dx, dh, dw)
+
+
+def offset_mm_for_cell(offset_pct, w_mm, h_mm):
+    """百分比偏移 → 该格的 mm 偏移：±50% 即最多挪半格。
+
+    换算本体留在 core：界面层禁做几何，而「按哪个尺寸换算」本身就是几何决策。
+    按格子内框而非纸张尺寸换算，否则同一页两种朝向的格子会偏移失真。
+    """
+    return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
+
+
 def _mask_bands(sheet, rect):
     """返回物理不可印区的四个矩形（mm），仅在未启用无边距时给出。"""
     m = sheet.margins
@@ -40,7 +59,8 @@ def _mask_bands(sheet, rect):
 
 
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
-                show_cut_lines=True, borderless_active=False):
+                show_cut_lines=True, borderless_active=False,
+                dx_mm=0.0, dy_mm=0.0):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。"""
     px_w = units.mm_to_px(sheet.w_mm, dpi)
     px_h = units.mm_to_px(sheet.h_mm, dpi)
@@ -67,8 +87,16 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
             ox, oy, ow, oh = got
         # 旋转格：先把原图按未旋转的目标比例裁，再转 90°，尺寸正好对上外框
         target_w, target_h = (oh, ow) if cell.rotated else (ow, oh)
+        # 界面偏移是纸面语义，旋转格须先换算到旋转前坐标再交给 crop
+        in_dx, in_dy = crop.rotate_offset(dx_mm, dy_mm) if cell.rotated \
+            else (dx_mm, dy_mm)
+        if cm == crop.FILL:
+            # FILL 的 dx/dy 挪的是取景窗，画面在纸面上会反向；fit 挪的是
+            # 落位矩形，本身已是纸面语义，故只在 fill 档补一次反号
+            in_dx, in_dy = -in_dx, -in_dy
         pl = crop.cell_crop_box(photo.width, photo.height, target_w, target_h,
-                               cm, ppmm=units.ppmm(dpi))
+                               cm, dx_mm=in_dx, dy_mm=in_dy,
+                               ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
         # dest_mm 是旋转前的目标矩形（宽高按未旋转的格子算）：照片转 90° 后
         # 宽高互换，落位偏移也须互换，否则尺寸检查拿错轴、缩放补偿到错误的
@@ -76,9 +104,7 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         dx, dy, dw, dh = pl.dest_mm
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
-            # 这是「转置」而非通用 90° 旋转映射：仅在落位居中时与 90° 旋转
-            # 等价，若将来支持非居中偏移须改为 x' = H-(y+h), y' = x
-            dx, dy, dw, dh = dy, dx, dh, dw
+            dx, dy, dw, dh = place_rotated_dest(pl.dest_mm, target_h)
         if dw and (abs(dw - piece.width / units.ppmm(dpi)) > 0.6
                    or abs(dh - piece.height / units.ppmm(dpi)) > 0.6):
             piece = piece.resize((max(1, units.round_px(dw * units.ppmm(dpi))),

@@ -1564,6 +1564,17 @@ def test_needed_sheets():
     assert pack.needed_sheets(4, 5) == 2
     assert pack.needed_sheets(4, 8) == 2
     assert pack.needed_sheets(0, 3) == 0  # 无格子可打属异常，交由调用方提示
+
+
+def test_bleed_seams_sit_on_the_outer_box_and_need_a_second_trim():
+    """出血模式的切缝按格子外框（块=成品+2*bleed）出：沿缝切出 95×133 的块，
+    裁到 89×127 是二道精裁，精裁线由渲染层按 inner_mm() 叠加（规格 5.2）。"""
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     bleed_mm=3.0, printable=specs.RectMM(0.0, 0.0, 190.0, 133.0))
+    assert plan.count == 2
+    assert [(c.axis, c.at_mm, c.from_mm, c.to_mm) for c in plan.cuts] == [
+        ("v", 95.0, 0.0, 133.0)]
+    assert plan.cells[0].inner_mm() == (3.0, 3.0, 89.0, 127.0)
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1625,15 +1636,10 @@ def build_cuts(cells, rect):
     seams("v", ("x_mm", "w_mm"), ("y_mm", "h_mm"), rect.x_mm, rect.w_mm)
     seams("h", ("y_mm", "h_mm"), ("x_mm", "w_mm"), rect.y_mm, rect.h_mm)
 
-    # 同一条缝上相邻线段合并，去掉重合项
-    merged = {}
-    for c in cuts:
-        merged.setdefault((c.axis, c.at_mm), []).append((c.from_mm, c.to_mm))
-    out = []
-    for (axis, at), spans in merged.items():
-        for a, b in merge_spans(spans):
-            out.append(CutLine(axis, at, a, b))
-    return sorted(out, key=lambda c: (c.axis, c.at_mm, c.from_mm))
+    # 每条缝 (axis, at_mm) 在 seams 内只生成一次，线段已按缝合并过，
+    # 这里只需总排序（评审 Important #2：曾有第二趟 merged 再合并，
+    # 作 756 组/4245 个缝桶验证全部为恒等操作，属死代码，已删）
+    return sorted(cuts, key=lambda c: (c.axis, c.at_mm, c.from_mm))
 
 
 def needed_sheets(plan_count: int, photo_count: int) -> int:
@@ -1673,12 +1679,12 @@ class LayoutPlan:
 - [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest tests/test_pack_cuts.py -v`
-Expected: PASS（8 passed）
+Expected: PASS（9 passed）
 
 - [ ] **Step 6: 全量回归**
 
 Run: `python -m pytest -v`
-Expected: 全绿（58 passed：units 6 + specs 12 + store 15 + pack 三组 25）
+Expected: 全绿（59 passed：units 6 + specs 12 + store 15 + pack 三组 26）
 
 - [ ] **Step 7: 提交**
 

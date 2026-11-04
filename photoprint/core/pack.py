@@ -263,15 +263,9 @@ def build_cuts(cells, rect):
     seams("v", ("x_mm", "w_mm"), ("y_mm", "h_mm"), rect.x_mm, rect.w_mm)
     seams("h", ("y_mm", "h_mm"), ("x_mm", "w_mm"), rect.y_mm, rect.h_mm)
 
-    # 同一条缝上相邻线段合并，去掉重合项
-    merged = {}
-    for c in cuts:
-        merged.setdefault((c.axis, c.at_mm), []).append((c.from_mm, c.to_mm))
-    out = []
-    for (axis, at), spans in merged.items():
-        for a, b in merge_spans(spans):
-            out.append(CutLine(axis, at, a, b))
-    return sorted(out, key=lambda c: (c.axis, c.at_mm, c.from_mm))
+    # 每条缝 (axis, at_mm) 在 seams 内只生成一次，线段已按缝合并过，
+    # 这里只需总排序
+    return sorted(cuts, key=lambda c: (c.axis, c.at_mm, c.from_mm))
 
 
 def needed_sheets(plan_count: int, photo_count: int) -> int:

@@ -94,3 +94,14 @@ def test_needed_sheets():
     assert pack.needed_sheets(4, 5) == 2
     assert pack.needed_sheets(4, 8) == 2
     assert pack.needed_sheets(0, 3) == 0  # 无格子可打属异常，交由调用方提示
+
+
+def test_bleed_seams_sit_on_the_outer_box_and_need_a_second_trim():
+    """出血模式的切缝按格子外框（块=成品+2*bleed）出：沿缝切出 95×133 的块，
+    裁到 89×127 是二道精裁，精裁线由渲染层按 inner_mm() 叠加（规格 5.2）。"""
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     bleed_mm=3.0, printable=specs.RectMM(0.0, 0.0, 190.0, 133.0))
+    assert plan.count == 2
+    assert [(c.axis, c.at_mm, c.from_mm, c.to_mm) for c in plan.cuts] == [
+        ("v", 95.0, 0.0, 133.0)]
+    assert plan.cells[0].inner_mm() == (3.0, 3.0, 89.0, 127.0)

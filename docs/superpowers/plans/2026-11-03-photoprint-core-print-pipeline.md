@@ -2415,7 +2415,9 @@ Expected: PASS（13 passed）
 把 `units.mm_to_px(cell 坐标)` 改成 int 截断（`int(...)`）：
 
 Run: `python -m pytest tests/test_render_geometry.py -v`
-Expected: `test_fill_mode_crops_to_cell_exactly` 失败（宽度得 88 而非 89）。改回后全绿。
+Expected: `test_bleed_mode_overlays_inner_trim_guides` 失败（横精裁线 `iy = 18.5` 被截成 18 而非 round_px 的 19）。改回后全绿。
+
+（T9 实现期实测订正：原预期写的“`test_fill_mode_crops_to_cell_exactly` 宽度得 88 而非 89”不成立——dpi=25.4 时 `ppmm==1.0` 且 `x_mm==16.0`、内框宽恰为 `89.0`，整条链上的值全是整数，截断与就近取整同值。若要杀 fill 那条宽度断言，变异点应改 resize 补偿阈值 `0.6 → 1000.0`（得 70）。两处变异各杀一条，套件对取整口径与物理尺寸补偿都不是盲区。）
 
 - [ ] **Step 6: 提交**
 
@@ -2503,8 +2505,9 @@ def test_probe_reads_paper_table_in_tenth_mm_and_device_in_px():
     assert r.paper_sizes_mm[0] == (210.0, 297.0)
     assert r.paper_sizes_mm[1] == (102.0, 152.0)
     assert r.paper_codes == [1, 2]
-    # 设备物理尺寸是像素 ⇒ 2480 / 300 * 25.4 = 210.13mm
-    assert r.physical_w_mm == pytest.approx(210.13, abs=0.05)
+    # 设备物理尺寸是像素 ⇒ 2480 / 300 × 25.4 = 209.97mm（A4 在 300dpi 下是
+    # 2480px 而非整 210mm，驱动本就留了 0.03mm 量化余量）
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
     assert r.dpi_x == 300
 
 
@@ -2515,7 +2518,7 @@ def test_probe_unit_conventions_are_isolated():
                            probe.HORZRES: 2412, probe.VERTRES: 3448,
                            probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
     r = probe.probe(api, "P")
-    assert r.physical_w_mm == pytest.approx(210.13, abs=0.05)
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
     assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)   # 34/300*25.4
     assert r.offset_y_mm == pytest.approx(2.54, abs=0.01)   # 30/300*25.4
     assert r.res_w_px == 2412
@@ -2669,9 +2672,12 @@ class ProbeResult:
 
 
 def _px_to_mm(px, dpi):
+    # 换算本体走 units.px_to_mm（全项目唯一入口，T10 派前核查：不得在 win
+    # 层开第二套公式）；这里的 dpi=0 守卫是脱机回读缺省值时的真实需求，
+    # 否则 units 会抛 ZeroDivisionError（T1 评审已裁决防御放调用侧）。
     if not dpi:
         return 0.0
-    return px / dpi * 25.4
+    return units.px_to_mm(px, dpi)
 
 
 def probe(api, printer, paper_code=None, dc=None):

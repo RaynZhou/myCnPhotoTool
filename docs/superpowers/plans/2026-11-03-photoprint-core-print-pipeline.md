@@ -3648,10 +3648,12 @@ def main():
     p2 = pack.pack(a4, specs.find_spec("4R"))
     allok &= check("A4+4R 格数", p2.count, 3)
 
-    # 3) 3R 直打：可打印区 82.2×119.0
+    # 3) 3R 直打：可打印区 82.2×119.0（换算唯一入口 specs.printable_rect；
+    # pack 默认装箱区是整张纸，plan.printable 拿到的是 89×127，不能当可打印区断言）
+    pr = specs.printable_rect(r3)
+    allok &= check("3R 可打印宽", pr.w_mm, 82.2, 1e-3)
+    allok &= check("3R 可打印高", pr.h_mm, 119.0, 1e-3)
     p3 = pack.pack(r3, r3)
-    allok &= check("3R 可打印宽", p3.printable.w_mm, 82.2, 1e-3)
-    allok &= check("3R 可打印高", p3.printable.h_mm, 119.0, 1e-3)
     page3 = render.render_page(p3, [synth(1, 0)], r3, DPI, modes.FILL_PRINTABLE)
     allok &= check("3R 页面宽", page3.width, 89)
 

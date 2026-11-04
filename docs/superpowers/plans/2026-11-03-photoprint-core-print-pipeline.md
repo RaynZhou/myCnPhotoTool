@@ -2681,24 +2681,26 @@ def _px_to_mm(px, dpi):
 
 
 def probe(api, printer, paper_code=None, dc=None):
-    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc）。"""
+    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc），
+    但不开关句柄。两条路径的回读方式必须一致：api.get_device_caps 接受
+    任何 dc/handle，dc 模式若短路成零值，T12 的 0.5mm 回读校验会拿
+    0×0 比对请求尺寸，必判“驱动忽略自定义尺寸”。"""
     target = dc if dc is not None else api.open_printer(printer)
     own_handle = dc is None
     try:
-        dpi_x = api.get_device_caps(target, LOGPIXELSX) if own_handle else 0
-        dpi_y = api.get_device_caps(target, LOGPIXELSY) if own_handle else 0
+        dpi_x = api.get_device_caps(target, LOGPIXELSX)
+        dpi_y = api.get_device_caps(target, LOGPIXELSY)
         names = api.device_caps(printer, DC_PAPERNAMES) or []
         codes = api.device_caps(printer, DC_PAPERS) or []
         sizes = api.device_caps(printer, DC_PAPERSIZE) or []
         # 真机上 hdc 才是当前纸张的物理参数来源；脱机时用设备默认
-        phys_w = api.get_device_caps(target, PHYSICALWIDTH) if own_handle else 0
-        phys_h = api.get_device_caps(target, PHYSICALHEIGHT) if own_handle else 0
-        off_x = api.get_device_caps(target, PHYSICALOFFSETX) if own_handle else 0
-        off_y = api.get_device_caps(target, PHYSICALOFFSETY) if own_handle else 0
-        hr = api.get_device_caps(target, HORZRES) if own_handle else 0
-        vr = api.get_device_caps(target, VERTRES) if own_handle else 0
-        if own_handle:
-            dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
+        phys_w = api.get_device_caps(target, PHYSICALWIDTH)
+        phys_h = api.get_device_caps(target, PHYSICALHEIGHT)
+        off_x = api.get_device_caps(target, PHYSICALOFFSETX)
+        off_y = api.get_device_caps(target, PHYSICALOFFSETY)
+        hr = api.get_device_caps(target, HORZRES)
+        vr = api.get_device_caps(target, VERTRES)
+        dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
     finally:
         if own_handle:
             api.close_printer(target)
@@ -2979,7 +2981,9 @@ git commit -m "feat: DEVMODE 纸张字段改写与私有区继承"
 
 **Files:**
 - Create: `photoprint/win/gdi_print.py`
+- Modify: `photoprint/win/probe.py`（dc 回读路径填实，T10 留的占位零值）
 - Test: `tests/test_gdi_verify.py`
+- Test: `tests/test_probe.py`（追加 dc 路径钉住测试）
 
 **Interfaces:**
 - Consumes: `devmode.build`、`probe.probe`、`units.mm_to_px`、`PIL.ImageWin.Dib`
@@ -3028,12 +3032,40 @@ def test_pick_dpi_respects_user_cap():
     assert gdi_print.pick_dpi(1200, cap=300) == 300
 ```
 
+注：本任务的 gdi 失败测试先于前置修复落地；Step 3 会再向 `tests/test_probe.py` 追加一条须先见 RED 的失败测试。
+
 - [ ] **Step 2: 运行确认失败**
 
 Run: `python -m pytest tests/test_gdi_verify.py -v`
-Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.gdi_print'`
+Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.gdi_print'`（实测可能形如 ImportError，同属缺失类失败）
 
-- [ ] **Step 3: 实现 gdi_print**
+- [ ] **Step 3: 前置修复——probe 的 dc 回读路径填实（T12 派前拦截①）**
+
+T10 实现里 `probe(api, printer, dc=...)` 把所有 `get_device_caps` 短路成了 0（当时记为占位，归本任务消费时填实）。不填实则 `print_job` 的回读校验拿 0×0mm 比对请求尺寸，每单必判“驱动忽略了自定义尺寸”。先写失败测试追加到 `tests/test_probe.py` 末尾：
+
+```python
+def test_probe_with_dc_reads_device_values():
+    """dc 复用路径与自开句柄路径回读一致（T12 的 0.5mm 校验依赖这条）。"""
+    api = FakeApi(dc_caps={probe.PHYSICALWIDTH: 2480, probe.PHYSICALHEIGHT: 3508,
+                           probe.PHYSICALOFFSETX: 34, probe.PHYSICALOFFSETY: 30,
+                           probe.HORZRES: 2412, probe.VERTRES: 3448,
+                           probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
+    r = probe.probe(api, "P", dc="hdc:X")
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
+    assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)
+    # dc 模式不得开关打印机句柄
+    assert not any(k in ("open", "close") for k, _ in api.calls)
+```
+
+Run: `python -m pytest tests/test_probe.py::test_probe_with_dc_reads_device_values -v`
+Expected: FAIL —`physical_w_mm` 得 0.0（占位短路未填实）
+
+然后把 `photoprint/win/probe.py` 的 `probe()` 改为 Task 10 Step 3 修订块同款（文档已同步）：删掉每行末尾的 `if own_handle else 0` 短路，`target` 无论自开还是复用都统一走 `api.get_device_caps(target, FIELD)`；`dpi_x, dpi_y = dpi_x or 300, dpi_y or 300` 不再分分支；`finally` 里仍只在 `own_handle` 时 `close_printer`。
+
+Run: `python -m pytest tests/test_probe.py -v`
+Expected: PASS（8 passed：原 7 条不受影响 + 新 1 条）
+
+- [ ] **Step 4: 实现 gdi_print**
 
 `photoprint/win/gdi_print.py`：
 
@@ -3077,7 +3109,6 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
     from PIL import ImageWin
 
     import win32con
-    import win32print
     import win32ui
 
     from photoprint.core import units
@@ -3089,8 +3120,11 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
 
     hprinter = api.open_printer(printer)
     try:
-        size = api.document_properties(hprinter, printer, "get")
-        dm_obj, size = _take_devmode(api, printer, size, sheet)
+        # T12 派前拦截②：原写法把 _take_devmode 的整条返回（即 build 的
+        # (dm, size) 元组）赋给了 dm_obj，真机 CreateDC 拿到 tuple 必错；
+        # build 内部已含“先问长度再取回”两步，这里直接解包它的返回
+        dm_obj, _size = dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
+                                     sheet.driver_paper_code)
         hdc = win32ui.CreateDCFromHandle(_create_dc(api, printer, port, dm_obj))
         try:
             result = probe.probe(api, printer, dc=_as_dc_ref(hdc))
@@ -3122,13 +3156,6 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
         api.close_printer(hprinter)
 
 
-def _take_devmode(api, printer, size, sheet):
-    from photoprint.win import devmode as dm_mod
-
-    return dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
-                        sheet.driver_paper_code)
-
-
 def _create_dc(api, printer, port, dm_obj):
     import win32print
 
@@ -3139,17 +3166,20 @@ def _as_dc_ref(hdc):
     return hdc
 ```
 
-注：`_as_dc_ref` 把 `PyCDC` 适配成 `probe.probe` 可回读的句柄对象；真机对接时若 `GetDeviceCaps` 走 `api.get_device_caps` 失败，改用 `hdc.GetDeviceCaps(field)`——两条路径都保留，验证以回读结果为准，任一失败即触发 PDF 兜底。
+注：`_as_dc_ref` 把 `PyCDC` 适配成 `probe.probe` 可回读的句柄对象；真机对接时若 `GetDeviceCaps` 走 `api.get_device_caps` 失败，改用 `hdc.GetDeviceCaps(field)`——两条路径都保留，验证以回读结果为准，任一失败即触发 PDF 兜底。`print_job` 顶层 `except Exception` 会把 `StartDoc` 之后的异常也在 DeleteDC/EndDoc 展开后统一转消息；本任务的脱机测试只盖 `verify_physical_size`/`pick_dpi` 两条纯函数与空图早退，送打链路由 M5 真机验收。
 
-- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: 运行确认通过 + 全量回归**
 
 Run: `python -m pytest tests/test_gdi_verify.py -v`
 Expected: PASS（5 passed）
 
-- [ ] **Step 5: 提交**
+Run: `python -m pytest`
+Expected: 全绿（117 passed：基线 111 + dc 钉住 1 + gdi 5）
+
+- [ ] **Step 6: 提交**
 
 ```bash
-git add photoprint/win/gdi_print.py tests/test_gdi_verify.py
+git add photoprint/win/gdi_print.py tests/test_gdi_verify.py photoprint/win/probe.py tests/test_probe.py
 git commit -m "feat: GDI 送页流程与 0.5mm 回读校验"
 ```
 

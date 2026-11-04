@@ -1,0 +1,75 @@
+"""裁放置：用 dpi=25.4 让 1 像素 = 1 毫米，便于逐位核对。"""
+import pytest
+
+from photoprint.core import crop
+
+PPMM = 1.0  # dpi 25.4
+
+
+def test_fill_minimal_cover_crops_sides():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL, ppmm=PPMM)
+    assert p.crop_px == (50, 0, 150, 100)
+    assert p.dest_mm == (0.0, 0.0, 100.0, 100.0)
+
+
+def test_fill_zoom_2_shrinks_crop():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=2.0, ppmm=PPMM)
+    assert p.crop_px == (75, 25, 125, 75)
+
+
+def test_fill_dx_moves_crop_and_clamps_inside_photo():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=2.0, dx_mm=10.0,
+                           ppmm=PPMM)
+    assert p.crop_px == (80, 25, 130, 75)
+    far = crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=2.0, dx_mm=500.0,
+                             ppmm=PPMM)
+    # 钳制在原图内 ⇒ 绝不出现白边
+    assert far.crop_px[2] == 200
+    assert far.crop_px[0] == 150
+
+
+def test_fill_never_exceeds_photo_bounds_at_min_zoom():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=1.0, dx_mm=-999,
+                           dy_mm=-999, ppmm=PPMM)
+    l, t, r, b = p.crop_px
+    assert l == 0 and t == 0
+    assert r <= 200 and b <= 100
+
+
+def test_fit_keeps_whole_image_and_letterboxes():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FIT, ppmm=PPMM)
+    assert p.crop_px == (0, 0, 200, 100)
+    x, y, w, h = p.dest_mm
+    assert (w, h) == pytest.approx((100.0, 50.0))
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(25.0)  # 上下各留 25mm 白边
+
+
+def test_fit_zoom_half_shrinks_dest():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=0.5, ppmm=PPMM)
+    x, y, w, h = p.dest_mm
+    assert (w, h) == pytest.approx((50.0, 25.0))
+    assert (x, y) == pytest.approx((25.0, 37.5))
+
+
+def test_fit_dx_clamped_inside_target():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=0.5, dx_mm=999,
+                           ppmm=PPMM)
+    assert p.dest_mm[0] == pytest.approx(50.0)  # 100 - 50，不得越出目标区
+
+
+def test_zoom_bounds_are_enforced():
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=0.5, ppmm=PPMM)
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=1.5, ppmm=PPMM)
+
+
+def test_default_ppmm_is_300dpi():
+    p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL)
+    assert p.crop_px == (50, 0, 150, 100)
+
+
+def test_unknown_mode_rejected():
+    with pytest.raises(ValueError, match="mode"):
+        crop.cell_crop_box(200, 100, 100, 100, "stretch", ppmm=PPMM)

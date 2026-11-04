@@ -4,6 +4,11 @@
   DeviceCapabilities(DC_PAPERSIZE) → (w, h)，单位 0.1mm
   GetDeviceCaps(PHYSICAL*/PHYSICALOFFSET*/HORZRES/VERTRES) → 设备像素，
     换算 mm 需 / LOGPIXELSX(或 Y) * 25.4
+
+设备上下文来源（真实契约，终审 C2）：
+  GetDeviceCaps 只认 hdc。把 OpenPrinter 的打印机句柄传进去不会报错，只会
+  一路回 0，于是 offset 全为 0 被误判成"无边距已生效"。自开路径必须
+  create_dc/delete_dc 自己的 DC；dc= 路径复用调用方的 DC，不开关打印机。
 """
 from __future__ import annotations
 
@@ -52,10 +57,30 @@ def _px_to_mm(px, dpi):
     return units.px_to_mm(px, dpi)
 
 
+def _paper_sizes_mm(sizes):
+    """DC_PAPERSIZE → [(w_mm, h_mm)]。
+
+    返回形状随 pywin32/驱动而异：多数是 ((w,h),...) 的 0.1mm 对，本机对
+    "Microsoft Print to PDF" 实测只回一个 int（张数），直接解包会 TypeError。
+    拿不到成对数据就回空表——纸张名与物理尺寸仍在，探测不该因此崩。
+    """
+    if not isinstance(sizes, (list, tuple)):
+        return []
+    out = []
+    for item in sizes:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append((item[0] / 10.0, item[1] / 10.0))
+    return out
+
+
 def probe(api, printer, paper_code=None, dc=None):
-    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc）。"""
-    target = dc if dc is not None else api.open_printer(printer)
-    own_handle = dc is None
+    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc）。
+
+    dc 缺省时自己 create_dc/delete_dc：拿打印机句柄当 hdc 用只会得到 0，
+    borderless_active 会把"没读到"误判成"无边距生效"（终审 C2）。
+    """
+    own_dc = dc is None
+    target = api.create_dc(printer) if own_dc else dc
     try:
         dpi_x = api.get_device_caps(target, LOGPIXELSX)
         dpi_y = api.get_device_caps(target, LOGPIXELSY)
@@ -71,13 +96,13 @@ def probe(api, printer, paper_code=None, dc=None):
         vr = api.get_device_caps(target, VERTRES)
         dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
     finally:
-        if own_handle:
-            api.close_printer(target)
+        if own_dc:
+            api.delete_dc(target)
     return ProbeResult(
         printer=printer,
         paper_names=list(names),
         paper_codes=list(codes),
-        paper_sizes_mm=[(w / 10.0, h / 10.0) for w, h in sizes] if sizes else [],
+        paper_sizes_mm=_paper_sizes_mm(sizes),
         physical_w_mm=_px_to_mm(phys_w, dpi_x),
         physical_h_mm=_px_to_mm(phys_h, dpi_y),
         offset_x_mm=_px_to_mm(off_x, dpi_x),
@@ -107,7 +132,11 @@ def borderless_active(result: ProbeResult) -> bool:
     """无边距是否生效：以驱动回报的物理偏移为零为唯一证据。
 
     绝不按"规格说支持无边距"就当成已生效——那是谎报的源头。
+    physical_w_mm == 0 说明探测本身失败（没拿到设备上下文），此时偏移也是 0，
+    若照旧判定就会把"没读到"包装成"无边距生效"，故必须先判失败。
     """
+    if not result.physical_w_mm:
+        return False
     return abs(result.offset_x_mm) <= 0.05 and abs(result.offset_y_mm) <= 0.05
 
 

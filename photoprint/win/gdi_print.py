@@ -2,6 +2,10 @@
 
 内存纪律：G3800 标称 4800×1200 dpi，按驱动 dpi 直出 A4 会是约 40000×25000
 像素，必然爆内存。因此渲染固定在 300/600 dpi，送图时用 StretchBlt 交给驱动放大。
+
+建 DC 的真实契约（本机 pywin32 实测，终审 C2）：win32print 没有 CreateDC，
+要 win32gui.CreateDC("WIN32", printer, devmode)，返回 int HDC；端口参数在
+现代驱动下无用，print_job 保留签名但不参与建 DC。
 """
 from __future__ import annotations
 
@@ -53,7 +57,7 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
         # build 内部已含"先问长度再取回"两步，这里直接解包它的返回
         dm_obj, _size = dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
                                      sheet.driver_paper_code)
-        hdc = win32ui.CreateDCFromHandle(_create_dc(api, printer, port, dm_obj))
+        hdc = win32ui.CreateDCFromHandle(_as_dc_ref(_create_dc(printer, dm_obj)))
         try:
             result = probe.probe(api, printer, dc=_as_dc_ref(hdc))
             ok, msg = verify_physical_size(result.physical_w_mm,
@@ -84,11 +88,15 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
         api.close_printer(hprinter)
 
 
-def _create_dc(api, printer, port, dm_obj):
-    import win32print
+def _create_dc(printer, dm_obj):
+    """建打印机 DC。port 不参与：win32gui.CreateDC 用驱动默认端口。"""
+    import win32gui
 
-    return win32print.CreateDC("Win32", printer, port, dm_obj)
+    return win32gui.CreateDC("WIN32", printer, dm_obj)
 
 
 def _as_dc_ref(hdc):
-    return hdc
+    """统一成 int HDC：PyCDC 走 GetSafeHdc()，int(PyCDC) 会 TypeError。"""
+    from photoprint.win.api import as_hdc
+
+    return as_hdc(hdc)

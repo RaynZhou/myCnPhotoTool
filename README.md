@@ -11,6 +11,7 @@
 - 12寸（254×305mm）超出 G3800 能力，已被阻断。
 
 ## 安装与运行
+依赖：Pillow（读图/渲染）、pywin32（GDI 直打）、img2pdf（等尺寸 PDF）、pytest（测试）、PySide6（后续界面）
 pip install -r requirements.txt
 python -m photoprint.cli --photos 1.jpg 2.jpg 3.jpg 4.jpg --sheet A4 --cell 3R --out _lab/out/page.png
 python -m photoprint.cli --photos *.jpg --sheet A4 --cell 3R --print --printer "Canon G3800 series"

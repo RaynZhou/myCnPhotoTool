@@ -55,8 +55,15 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
         r, b = l + crop_w, t + crop_h
         # 取整走 units.round_px（全项目口径，.5 向上）：内置 round 是银行家
         # 舍入，300dpi 下约 4.8% 的裁框边会恰落 .5，偏移方向不可预测（T7 评审 I-1）
-        return Placement((units.round_px(l), units.round_px(t),
-                          units.round_px(r), units.round_px(b)),
+        cl, ct, cr, cb = (units.round_px(l), units.round_px(t),
+                          units.round_px(r), units.round_px(b))
+        # 极端长宽比下裁框会被取整压成零宽/零高（r == l）：那会 crop 出
+        # 一张空图、整格留白，故至少保留 1 像素
+        if cr == cl:
+            cr = cl + 1
+        if cb == ct:
+            cb = ct + 1
+        return Placement((cl, ct, cr, cb),
                          (0.0, 0.0, float(target_w_mm), float(target_h_mm)))
 
     if not 0.2 <= zoom <= 1.0:

@@ -70,15 +70,20 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         pl = crop.cell_crop_box(photo.width, photo.height, target_w, target_h,
                                cm, ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
+        # dest_mm 是旋转前的目标矩形（宽高按未旋转的格子算）：照片转 90° 后
+        # 宽高互换，落位偏移也须互换，否则尺寸检查拿错轴、缩放补偿到错误的
+        # (w, h)，画面会撑出格子并压到邻格（终审 C1 实测）
+        dx, dy, dw, dh = pl.dest_mm
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
-        if pl.dest_mm[2] != 0 and (abs(pl.dest_mm[2] - piece.width / units.ppmm(dpi)) > 0.6
-                                   or abs(pl.dest_mm[3] - piece.height / units.ppmm(dpi)) > 0.6):
-            piece = piece.resize((max(1, units.round_px(pl.dest_mm[2] * units.ppmm(dpi))),
-                                  max(1, units.round_px(pl.dest_mm[3] * units.ppmm(dpi)))),
+            dx, dy, dw, dh = dy, dx, dh, dw
+        if dw and (abs(dw - piece.width / units.ppmm(dpi)) > 0.6
+                   or abs(dh - piece.height / units.ppmm(dpi)) > 0.6):
+            piece = piece.resize((max(1, units.round_px(dw * units.ppmm(dpi))),
+                                  max(1, units.round_px(dh * units.ppmm(dpi)))),
                                  Image.LANCZOS)
-        paste_x = units.mm_to_px(ox + pl.dest_mm[0], dpi)
-        paste_y = units.mm_to_px(oy + pl.dest_mm[1], dpi)
+        paste_x = units.mm_to_px(ox + dx, dpi)
+        paste_y = units.mm_to_px(oy + dy, dpi)
         page.paste(piece, (paste_x, paste_y))
 
     # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；

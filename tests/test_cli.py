@@ -100,3 +100,22 @@ def test_main_marks_first_page_only_for_multipage_out(tmp_path, capsys):
                      "--dpi", "25.4", "--out", str(out)])
     assert code == 0
     assert "仅第一页" in capsys.readouterr().out
+
+
+def test_id_photos_are_not_rotated(st):
+    """证件照是 cell：拼版必须禁旋转（全局约束 allow_rotate=False）。
+
+    旧写法三个 pack 调用都吃默认 allow_rotate=True，A4+ID1 gap2 被装成
+    63 格、其中 42 张横放，既不是 56 也不是证件照该有的朝向（终审 I1）。
+    """
+    plan, _mode = cli.build_plan_jobs(st, "A4", "ID1", 2.0,
+                                      modes.DEFAULT_BLEED_MM, None, False)
+    assert plan.count == 56
+    assert not any(c.rotated for c in plan.cells)
+
+
+def test_paper_role_cells_still_rotate(st):
+    """纸类拼版（4R）不受影响：旋转仍是合法策略，不得被上式一起禁掉。"""
+    plan, _mode = cli.build_plan_jobs(st, "A4", "4R", 0.0,
+                                      modes.DEFAULT_BLEED_MM, None, False)
+    assert any(c.rotated for c in plan.cells)

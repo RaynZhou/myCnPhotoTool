@@ -26,8 +26,11 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)
     printable = specs.printable_rect(sheet, borderless_active=borderless_active)
+    # 全局约束：证件照这类"格"（role="cell"）拼版不得旋转——横放会把
+    # 一寸/二寸照排成横的；纸类（3R/4R）是照片本身，旋转是合法装箱策略
+    allow_rotate = cell.role != "cell"
     probe_plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
-                           printable=printable)
+                           allow_rotate=allow_rotate, printable=printable)
     if mode is None:
         mode = modes.default_mode(sheet, cell, probe_plan.count, borderless_active)
     modes.assert_mode_legal(sheet, mode)
@@ -35,13 +38,15 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     # 裁切模式在整张纸上装箱（无边距才容得下出血），其余在可打印区内装箱
     rect = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm) \
         if mode == modes.BLEED_TRIM else printable
-    plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=bleed, printable=rect)
+    plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=bleed,
+                     allow_rotate=allow_rotate, printable=rect)
     if plan.count == 0 and mode != modes.BLEED_TRIM:
         # 退化情形：格子与纸张同尺寸（如 3R 纸打 3R 照片）。
         # 按可打印矩形装箱必然得 0 格，改为整纸装一格，
         # 画面收回可打印区由 render 层的交集负责。
         full = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
-        plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0, printable=full)
+        plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
+                         allow_rotate=allow_rotate, printable=full)
     if plan.count == 0:
         raise ValueError(f"{sheet.label} 放不下 {cell.label}，请换大纸或改小格子")
     return plan, mode

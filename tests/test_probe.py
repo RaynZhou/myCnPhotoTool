@@ -27,12 +27,13 @@ class FakeApi:
             return self.sizes
         return self.caps.get(field, 0)
 
-    def open_printer(self, name):
-        self.calls.append(("open", name))
+    def create_dc(self, name):
+        """真实 api 的建 DC 缝：win32gui.CreateDC 回 int HDC。"""
+        self.calls.append(("create_dc", name))
         return f"hdc:{name}"
 
-    def close_printer(self, handle):
-        self.calls.append(("close", handle))
+    def delete_dc(self, handle):
+        self.calls.append(("delete_dc", handle))
 
     def get_device_caps(self, handle, field):
         self.calls.append(("dc", field))
@@ -84,6 +85,22 @@ def test_borderless_active_only_when_offsets_zero():
     assert probe.borderless_active(probe.probe(nonzero, "P")) is False
 
 
+def test_paper_size_table_survives_non_pair_shape():
+    """DC_PAPERSIZE 在本机某驱动上只回 int（张数）：探测不得因此崩。"""
+    api = FakeApi(papers=["A4"], sizes=90)
+    r = probe.probe(api, "P")
+    assert r.paper_sizes_mm == []
+    assert r.paper_names == ["A4"]
+
+
+def test_borderless_not_inferred_from_failed_probe():
+    """探测失败（物理宽度 0）时不得把"没读到"当成"无边距生效"。"""
+    failed = probe.ProbeResult(printer="P", physical_w_mm=0.0,
+                               physical_h_mm=0.0, offset_x_mm=0.0,
+                               offset_y_mm=0.0)
+    assert probe.borderless_active(failed) is False
+
+
 def test_match_driver_paper_is_case_and_space_insensitive():
     names = ["ISO A4", "Letter", "4 X 6", "5 x 7"]
     code, hit = probe.match_driver_paper(names, "4x6")
@@ -111,10 +128,13 @@ def test_diff_report_empty_when_consistent():
     assert probe.diff_report(specs.find_spec("4R"), r) == []
 
 
-def test_probe_closes_printer_handle():
+def test_probe_releases_own_dc():
+    """自开路径必须删掉自己建的 DC；打印机句柄不是 DC，拿它读能力只会得 0。"""
     api = FakeApi(dc_caps={probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
-    probe.probe(api, "P")
-    assert ("close", "hdc:P") in api.calls
+    r = probe.probe(api, "P")
+    assert ("create_dc", "P") in api.calls
+    assert ("delete_dc", "hdc:P") in api.calls
+    assert r.dpi_x == 300
 
 
 def test_probe_with_dc_reads_device_values():
@@ -126,5 +146,5 @@ def test_probe_with_dc_reads_device_values():
     r = probe.probe(api, "P", dc="hdc:X")
     assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
     assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)
-    # dc 模式不得开关打印机句柄
-    assert not any(k in ("open", "close") for k, _ in api.calls)
+    # dc 模式不得自建/删除 DC（那是调用方的，直打时它与 hdc 是同一个）
+    assert not any(k in ("create_dc", "delete_dc") for k, _ in api.calls)

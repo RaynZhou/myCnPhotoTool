@@ -31,3 +31,23 @@ def test_pick_dpi_caps_4800_to_600():
 
 def test_pick_dpi_respects_user_cap():
     assert gdi_print.pick_dpi(1200, cap=300) == 300
+
+
+def test_create_dc_goes_through_win32gui():
+    """win32print 没有 CreateDC（本机实测）：建 DC 必须走 win32gui。"""
+    import inspect
+
+    src = inspect.getsource(gdi_print._create_dc)
+    assert "win32gui.CreateDC" in src
+    assert "win32print" not in src
+
+
+def test_as_dc_ref_accepts_int_and_pycdc():
+    """PyCDC 不能直接 int()（TypeError），必须先 GetSafeHdc()。"""
+
+    class FakeCDC:
+        def GetSafeHdc(self):
+            return 99
+
+    assert gdi_print._as_dc_ref(5) == 5
+    assert gdi_print._as_dc_ref(FakeCDC()) == 99

@@ -103,3 +103,16 @@ def test_fill_crop_box_uses_half_up_rounding():
     p = crop.cell_crop_box(100, 80, 100, 152, crop.FILL, zoom=2,
                            dx_mm=-1.3, ppmm=units.ppmm(300))
     assert p.crop_px == (37, 20, 63, 60)
+
+
+def test_zero_area_crop_box_keeps_at_least_one_pixel():
+    """终审 Minor：极端长宽比会让裁框取整成零宽/零高（r == l），
+
+    那会 crop 出一张空图、整格留白。4000x1 的照片塞进 25x32mm 的格子，
+    未加守卫时 round_px(l) == round_px(r) == 2000。
+    """
+    p = crop.cell_crop_box(4000, 1, 25.0, 32.0, crop.FILL,
+                           ppmm=units.ppmm(25.4))
+    x0, y0, x1, y1 = p.crop_px
+    assert x1 > x0 and y1 > y0
+    assert (x0, x1) == (2000, 2001)

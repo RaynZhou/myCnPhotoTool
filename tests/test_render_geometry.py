@@ -134,13 +134,27 @@ def test_photo_count_mismatch_leaves_remaining_cells_white():
 
 
 def test_rotated_cell_places_rotated_photo():
-    """A4 打 5R 需要横放：外框 w>h 时照片必须转 90° 后落入。"""
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("5R"))
-    cell = next(c for c in plan.cells if c.rotated)
-    img = render.render_page(plan, [None] * plan.count, specs.find_spec("A4"), DPI,
-                             modes.FILL_PRINTABLE)
-    assert cell.w_mm == 178.0 and cell.h_mm == 127.0
+    """A4 打 4R 需要横放：照片转 90° 后必须正好落在格内（C1 回归）。
+
+    旧版用 [None] * count 渲染——整页全白也能通过，等于什么都没测。
+    旋转格的 dest_mm 是旋转前的 (w, h)，若不交换轴就按 (102, 152) 缩放，
+    实际宽度会被撑到 152mm 冲进邻格并越过纸边（终审 C1 实测）。
+    """
+    a4 = specs.find_spec("A4")
+    plan = pack.pack(a4, specs.find_spec("4R"), printable=specs.printable_rect(a4))
+    assert plan.count == 2 and all(c.rotated for c in plan.cells)
+    img = render.render_page(plan, _photos(plan.count, (255, 0, 0)), a4, DPI,
+                             modes.FILL_PRINTABLE, show_cut_lines=False,
+                             show_mask=False)
     assert img.size == (210, 297)
+    for c in plan.cells:
+        x0, y0 = units.round_px(c.x_mm), units.round_px(c.y_mm)
+        w, h = units.round_px(c.w_mm), units.round_px(c.h_mm)
+        for pt in ((x0 + 1, y0 + 1), (x0 + w - 2, y0 + 1),
+                   (x0 + 1, y0 + h - 2), (x0 + w - 2, y0 + h - 2)):
+            assert img.getpixel(pt) == (255, 0, 0), (c, pt)
+    # 溢出的画面会越过格子边界：格间留白必须仍是纸白
+    assert img.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_single_cell_on_same_size_paper_stays_inside_printable():

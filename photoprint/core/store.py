@@ -53,6 +53,22 @@ def _margins_from_dict(m: dict) -> specs.Margins:
                          float(m.get("left", 3.4)), float(m.get("right", 3.4)))
 
 
+def _margins_ok(m) -> bool:
+    """margins_mm 的每个值都必须能转 float。
+
+    手改过的 papers.json 常见形状是语法正确、值是字符串（"top": "bad"），
+    这类条目留在内存里只会在 resolve 时抛 ValueError，把启动流程卡死。
+    """
+    if not isinstance(m, dict):
+        return False
+    for value in m.values():
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 class Store:
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else DEFAULT_PATH
@@ -76,9 +92,10 @@ class Store:
         overrides = disk.get("overrides")
         if isinstance(overrides, dict):
             # 逐条也要形状对，否则 resolve 会在后面某次调用里招
+            # 边距值也要能转 float：整条覆盖作废，才符合“任何损坏都降级成没有”
             self.raw["overrides"] = {
                 k: v for k, v in overrides.items()
-                if isinstance(v, dict) and isinstance(v.get("margins_mm"), dict)}
+                if isinstance(v, dict) and _margins_ok(v.get("margins_mm"))}
         last_job = disk.get("last_job")
         self.raw["last_job"] = last_job if isinstance(last_job, dict) else {}
         items = disk.get("user_sizes")

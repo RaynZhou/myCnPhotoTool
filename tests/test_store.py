@@ -166,3 +166,19 @@ def test_user_size_rejects_bad_key(tmp_store):
                            False, specs.Margins(), "spec")
         with pytest.raises(ValueError, match="key"):
             tmp_store.add_user_size(s)
+
+
+def test_override_with_bad_margin_value_is_dropped(tmp_store):
+    """终审 Minor：边距值不可转 float 的整条覆盖必须丢弃。
+
+    docstring 承诺“任何损坏都降级成没有，结对不抛”：值留在内存里会在
+    渲染时炸成 ValueError，比丢掉一条标定严重得多。
+    """
+    Path(tmp_store.path).write_text(json.dumps({"overrides": {
+        "3R": {"margins_mm": {"top": "bad"}, "margin_source": "calibrated"},
+    }}), encoding="utf-8")
+    tmp_store.load()  # 不得抛
+    assert "3R" not in tmp_store.raw["overrides"]
+    s = tmp_store.resolve("3R")
+    assert s.margin_source == "spec"
+    assert s.margins.top == 3.0

@@ -182,11 +182,18 @@ def test_main_mask_flag_keeps_mask(tmp_path):
 
 
 def test_build_plan_jobs_is_still_positional(st):
-    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。"""
+    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。
+
+    还得钉格子几何：gap 与 bleed 是相邻同类型的 float 位置参数，转发时写错
+    顺序不会炸签名，只会静默换掉出血与间距。Task 4 退役对拍测试后，这条是
+    唯一守这层转发映射的测试——只钉 (count, mode) 的话 4 格照样是 4 格，
+    参数换了位也绿。（实测：正确 (95.0, 105.0)，互换 gap/bleed → (89.0, 106.5)）
+    """
     plan, mode = cli.build_plan_jobs(st, "A4", "3R", 0.0,
                                      modes.DEFAULT_BLEED_MM, None, False)
     assert plan.count == 4
     assert mode == modes.BLEED_TRIM
+    assert (plan.cells[0].w_mm, plan.cells[1].x_mm) == (95.0, 105.0)
 
 
 def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):

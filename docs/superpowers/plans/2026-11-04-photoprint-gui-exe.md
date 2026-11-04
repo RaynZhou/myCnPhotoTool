@@ -862,11 +862,18 @@ def test_main_mask_flag_keeps_mask(tmp_path):
 
 
 def test_build_plan_jobs_is_still_positional(st):
-    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。"""
+    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。
+
+    还得钉格子几何：gap 与 bleed 是相邻同类型的 float 位置参数，转发时写错
+    顺序不会炸签名，只会静默换掉出血与间距。Task 4 退役对拍测试后，这条是
+    唯一守这层转发映射的测试——只钉 (count, mode) 的话 4 格照样是 4 格，
+    参数换了位也绿。（实测：正确 (95.0, 105.0)，互换 gap/bleed → (89.0, 106.5)）
+    """
     plan, mode = cli.build_plan_jobs(st, "A4", "3R", 0.0,
                                      modes.DEFAULT_BLEED_MM, None, False)
     assert plan.count == 4
     assert mode == modes.BLEED_TRIM
+    assert (plan.cells[0].w_mm, plan.cells[1].x_mm) == (95.0, 105.0)
 
 
 def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
@@ -2356,7 +2363,11 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   共 M 页”，本轮这两个量换了来源）并用 `verify_t4_cli_parity.py` 与重构前的
   cli 逐字节对拍，不再只靠新测试自证；⑩ 薄转发落地后 `jobs.build_layout` 里
   “两边仍是两份实现”的注释成了假话，随 T4 改写；⑪ 顶缘遮罩探针避开 105mm
-  列缝（`w//2` 正好是格缝）。
+  列缝（`w//2` 正好是格缝）；⑫ 对拍退役后 `gap_mm`/`bleed_mm` 这两个相邻同
+  类型位置参数的转发映射没了守卫（实测互换后 34 条仍全绿），
+  `test_build_plan_jobs_is_still_positional` 补钉格子几何
+  `(cells[0].w_mm, cells[1].x_mm) == (95.0, 105.0)`，互换时实测变
+  `(89.0, 106.5)` 当场红。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

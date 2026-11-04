@@ -3189,12 +3189,14 @@ git commit -m "feat: GDI 送页流程与 0.5mm 回读校验"
 
 **Files:**
 - Create: `photoprint/win/pdf_export.py`
+- Modify: `photoprint/core/units.py`（新增 `mm_to_pt`：换算唯一入口约束，T13 评审 I-1 裁决）
 - Test: `tests/test_pdf_export.py`
 
 **Interfaces:**
-- Consumes: `PIL.Image`、`img2pdf`
+- Consumes: `PIL.Image`、`img2pdf`、`units.mm_to_pt`
 - Produces:
-  - `pdf_export.mm_to_pt(mm: float) -> float`
+  - `units.mm_to_pt(mm: float) -> float`（全项目 mm→pt 唯一定义）
+  - `pdf_export.mm_to_pt`（从 units re-export，保住既有测试入口）
   - `pdf_export.export_pdf(images: list[Image], sheet, out_path) -> Path`
 
 - [ ] **Step 1: 写失败测试**
@@ -3212,12 +3214,14 @@ Image = pytest.importorskip("PIL.Image")
 img2pdf = pytest.importorskip("img2pdf")
 from PIL import Image as PILImage  # noqa: E402
 
-from photoprint.core import specs  # noqa: E402
+from photoprint.core import specs
+from photoprint.core import units
 from photoprint.win import pdf_export  # noqa: E402
 
 
 def test_mm_to_pt():
-    assert pdf_export.mm_to_pt(25.4) == pytest.approx(72.0)
+    # 唯一入口在 units；pdf_export 只做 re-export（换算归口约束）
+    assert units.mm_to_pt(25.4) == pytest.approx(72.0)
     assert pdf_export.mm_to_pt(89.0) == pytest.approx(252.283, abs=0.01)
     assert pdf_export.mm_to_pt(127.0) == pytest.approx(360.0, abs=0.01)
 
@@ -3261,9 +3265,22 @@ def test_empty_input_rejected(tmp_path):
 - [ ] **Step 2: 运行确认失败**
 
 Run: `python -m pytest tests/test_pdf_export.py -v`
-Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.pdf_export'`（若 `img2pdf` 未装则先 `pip install img2pdf`，并确认已写进 `requirements.txt`）
+Expected: FAIL —收集期 `ImportError: cannot import name 'mm_to_pt' from 'photoprint.core.units'`（units 先行形态）或 `ModuleNotFoundError: No module named 'photoprint.win.pdf_export'`（若 img2pdf 未装则先 `pip install img2pdf`，并确认已写进 `requirements.txt`）
 
-- [ ] **Step 3: 实现 pdf_export**
+- [ ] **Step 3a: units 新增 mm_to_pt**
+
+在 `photoprint/core/units.py` 的 `px_to_mm` 之后追加：
+
+```python
+MM_TO_PT = 72.0 / 25.4  # PostScript 点/毫米换算因子
+
+
+def mm_to_pt(mm: float) -> float:
+    """毫米 → PostScript 点（1pt == 1/72 英寸），PDF 页面尺寸专用。"""
+    return mm * MM_TO_PT
+```
+
+- [ ] **Step 3b: 实现 pdf_export**
 
 `photoprint/win/pdf_export.py`：
 
@@ -3279,13 +3296,11 @@ import io
 from pathlib import Path
 
 import img2pdf
-from PIL import Image
+from PIL import Image  # noqa: F401  接口文档性导入：images 元素即 PIL.Image
 
-MM_TO_PT = 72.0 / 25.4
-
-
-def mm_to_pt(mm: float) -> float:
-    return mm * MM_TO_PT
+# 换算唯一入口在 units（T13 评审 I-1：不得在消费模块自带第二套 mm→pt 公式）；
+# re-export 保住 pdf_export.mm_to_pt 的既有测试入口
+from photoprint.core.units import MM_TO_PT, mm_to_pt  # noqa: F401
 
 
 def export_pdf(images, sheet, out_path):
@@ -3312,8 +3327,8 @@ Expected: PASS（5 passed）（若 `img2pdf` 未装则先 `pip install img2pdf`�
 - [ ] **Step 5: 提交**
 
 ```bash
-git add photoprint/win/pdf_export.py tests/test_pdf_export.py
-git commit -m "feat: 等尺寸 PDF 兜底导出"
+git add photoprint/win/pdf_export.py photoprint/core/units.py tests/test_pdf_export.py
+git commit -m "feat: 等尺寸 PDF 兜底导出（mm_to_pt 归口 units）"
 ```
 
 ---

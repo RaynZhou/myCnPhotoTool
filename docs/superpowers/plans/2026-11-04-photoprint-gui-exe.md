@@ -193,13 +193,25 @@ def test_dy_offset_moves_picture_down_on_paper():
     assert moved.getpixel(tail) == (255, 0, 0)
 
 
-def test_zero_offset_renders_identically_to_before_this_change():
-    a4, plan = _a4_id1_plan()
-    photo = Image.new("RGB", (100, 100), (0, 128, 255))
+def test_dx_offset_moves_rotated_cell_picture_right_on_paper():
+    """旋转格的纸面水平偏移必须真往右：旧转置写法会整体反号（终审 C1）。
+
+    A4+4R 两格都是旋转格，纸面格子 152×102，旋转前目标 102×152；
+    正方形照片 FIT 后为 102×102，纸面起点 x = 29+25 = 54（占 54..155）。
+    dx_mm=+3 → 旋转前 dy=-3 → 纸面起点 x=57（占 57..158）。
+    """
+    a4, r4 = specs.find_spec("A4"), specs.find_spec("4R")
+    plan = pack.pack(a4, r4, gap_mm=0.0, allow_rotate=True,
+                     printable=specs.printable_rect(a4))
+    assert [c.rotated for c in plan.cells] == [True, True]
+    photo = Image.new("RGB", (100, 100), (255, 0, 0))
     args = (plan, [photo] * plan.count, a4, DPI, modes.FIT_TO_PRINTABLE)
-    assert list(render.render_page(*args, show_mask=False).getdata()) == \
-        list(render.render_page(*args, show_mask=False, dx_mm=0.0,
-                                dy_mm=0.0).getdata())
+    base = render.render_page(*args, show_mask=False)
+    moved = render.render_page(*args, show_mask=False, dx_mm=3.0)
+    assert base.getpixel((55, 95)) == (255, 0, 0)       # 起点左侧 1mm 仍在画内
+    assert moved.getpixel((55, 95)) == (255, 255, 255)  # 右移 3mm 后露白
+    assert base.getpixel((157, 95)) == (255, 255, 255)  # 原本右侧留白 25mm
+    assert moved.getpixel((157, 95)) == (255, 0, 0)     # 移进来才见红
 
 
 def test_offset_mm_for_cell_half_page_is_50_pct():
@@ -214,7 +226,9 @@ def test_offset_mm_for_cell_zero_is_zero():
 - [ ] **Step 2: 跑到失败**
 
 Run: `python -m pytest tests/test_render_offset.py -v`
-Expected: FAIL — 前四条 `AttributeError: ... has no attribute 'place_rotated_dest'`；后两条 `TypeError: render_page() got an unexpected keyword argument 'dy_mm'`；最两条 `AttributeError: ... 'offset_mm_for_cell'`
+Expected: FAIL — 前两条 `AttributeError: ... has no attribute 'place_rotated_dest'`；
+中间两条（透传偏移的两条像素测试）`TypeError: render_page() got an unexpected
+keyword argument 'dy_mm' / 'dx_mm'`；后两条 `AttributeError: ... 'offset_mm_for_cell'`
 
 - [ ] **Step 3: 加纯函数并改签名**
 
@@ -549,7 +563,7 @@ def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Imag
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_jobs.py -v`
-Expected: 14 passed（parametrize 4 条 + 其余 10 条）
+Expected: 13 passed（parametrize 4 条 + 其余 9 条）
 
 - [ ] **Step 5: 全量回归 + 提交**
 
@@ -793,7 +807,8 @@ git commit -m "feat(store): last_job 读写与形状降级"
 **Interfaces:**
 - Consumes: 任意无参可调用（后续任务传 `job.render`）
 - Produces: `worker.RenderTask`（信号 `succeeded(object)` / `failed(str)`）、
-  `worker.start(fn) -> tuple[QThread, RenderTask]`（**内部已 `thread.start()`**）、
+  `worker.start(fn) -> tuple[QThread, RenderTask]`（**只组装不启动**，
+    调用方连完信号后自己 `thread.start()`）、
   `view.to_pixmap(img: Image.Image) -> QPixmap`
 
 - [ ] **Step 1: 建包与 offscreen 配置**

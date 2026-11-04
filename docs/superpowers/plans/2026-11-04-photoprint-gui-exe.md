@@ -862,7 +862,7 @@ def test_main_mask_flag_keeps_mask(tmp_path):
 
 
 def test_build_plan_jobs_is_still_positional(st):
-    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。
+    """历史调用形状不得变：本文件 6 处调用全按 7 个位置参数（无关键字）调它。
 
     还得钉格子几何：gap 与 bleed 是相邻同类型的 float 位置参数，转发时写错
     顺序不会炸签名，只会静默换掉出血与间距。Task 4 退役对拍测试后，这条是
@@ -2356,7 +2356,8 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   于是一条恒真一条恒假——导出没关遮罩也报不了；⑦ Step 3 的 import 行去掉 `specs`
   （使用点全在被删的函数体内，照抄会留一个未用 import），`Image` 随 `load_photo`
   搬走一起删。两处均经 `.superpowers/sdd/check_t4_plan_verbatim.py` 逐行校对。
-- **T4 round-1 评审后的四处计划内修正**：⑧ `tests/test_cli.py` 加 autouse 的
+- **T4 各轮评审后的六处计划内修正**（⑧⑨⑩⑪ 出自 round-1，⑫ 出自 round-2，
+  ⑬ 出自 round-3）：⑧ `tests/test_cli.py` 加 autouse 的
   `_isolated_store`——`cli.main` 自己 `store.Store()` 读 `%APPDATA%`，不隔离则
   测试钉的边距数字取决于开发机配置（T6/T7 的 `MainWindow` 同样用默认路径，
   界面校准后会连带把 pytest 跑红）；⑨ 逐字冻结锁改钉整行（含“每页 N 格 /
@@ -2367,7 +2368,10 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   类型位置参数的转发映射没了守卫（实测互换后 34 条仍全绿），
   `test_build_plan_jobs_is_still_positional` 补钉格子几何
   `(cells[0].w_mm, cells[1].x_mm) == (95.0, 105.0)`，互换时实测变
-  `(89.0, 106.5)` 当场红。
+  `(89.0, 106.5)` 当场红（round-2 发现；`w_mm` 只随 bleed 变、`x_mm` 只随 gap 变，
+  两条合起来在该邻域内对 (gap, bleed) 是一一映射）；⑬ 同测试首句里的“既有脚本”
+  已无存在（`_lab/` 无调用点，对拍调用随 Step 4 退役），改为本文件 6 处调用。
+  ⑫⑬ 已经 round-3 复审 Approved（M-R2-1 已修，变异注入实测仅该一条变红）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

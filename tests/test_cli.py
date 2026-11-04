@@ -182,7 +182,7 @@ def test_main_mask_flag_keeps_mask(tmp_path):
 
 
 def test_build_plan_jobs_is_still_positional(st):
-    """历史调用形状不得变：test_cli 与既有脚本都按 7 个位置参数调它。
+    """历史调用形状不得变：本文件 6 处调用全按 7 个位置参数（无关键字）调它。
 
     还得钉格子几何：gap 与 bleed 是相邻同类型的 float 位置参数，转发时写错
     顺序不会炸签名，只会静默换掉出血与间距。Task 4 退役对拍测试后，这条是

@@ -149,6 +149,13 @@ def test_mm_to_scene_is_tenth_mm():
     assert units.mm_to_scene(89.0) == 890
     assert units.mm_to_scene(3.4) == 34
     assert units.mm_to_scene(0.25) == 3  # 2.5 个 0.1mm 单位，同样 .5 向上
+
+
+def test_round_px_is_half_up():
+    # 全项目取整口径的公共入口（T7 评审 I-1：crop 层也必须走它）
+    assert units.round_px(2.5) == 3
+    assert units.round_px(20.5) == 21
+    assert units.round_px(-0.5) == 0  # floor(v+0.5)，负半同样向大数一侧
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -191,8 +198,8 @@ import math
 MM_PER_INCH = 25.4
 
 
-def _round_half_up(value: float) -> int:
-    """就近取整，.5 一律向上。
+def round_px(value: float) -> int:
+    """就近取整，.5 一律向上。全项目取整口径，渲染/裁切层都用它。
 
     不用内置 round()：它是银行家舍入，round(2.5) == 2、round(20.5) == 20，
     而本项目的几何断言（尤其 dpi=25.4 时 1 像素 = 1 毫米那批）需要的是
@@ -208,7 +215,7 @@ def ppmm(dpi: float) -> float:
 
 def mm_to_px(mm: float, dpi: float) -> int:
     """mm 转像素，就近取整（.5 向上）。"""
-    return _round_half_up(mm * ppmm(dpi))
+    return round_px(mm * ppmm(dpi))
 
 
 def px_to_mm(px: float, dpi: float) -> float:
@@ -226,13 +233,13 @@ def win_mm(value_mm: float) -> int:
 
 def mm_to_scene(mm: float) -> int:
     """场景坐标：1 单位 = 0.1mm，整数以免累积误差。"""
-    return _round_half_up(mm * 10)
+    return round_px(mm * 10)
 ```
 
 - [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest tests/test_units.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 6: 提交**
 
@@ -1702,7 +1709,7 @@ git commit -m "feat: 裁切参考线推导与分页计算"
 - Test: `tests/test_crop.py`
 
 **Interfaces:**
-- Consumes: `units.ppmm`
+- Consumes: `units.ppmm`、`units.round_px`
 - Produces:
   - `crop.Placement(crop_px: tuple[int, int, int, int], dest_mm: tuple[float, float, float, float])`
   - `crop.cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode, zoom=1.0, dx_mm=0.0, dy_mm=0.0, ppmm=None) -> Placement`
@@ -1717,7 +1724,7 @@ git commit -m "feat: 裁切参考线推导与分页计算"
 """裁放置：用 dpi=25.4 让 1 像素 = 1 毫米，便于逐位核对。"""
 import pytest
 
-from photoprint.core import crop
+from photoprint.core import crop, units
 
 PPMM = 1.0  # dpi 25.4
 
@@ -1781,7 +1788,10 @@ def test_zoom_bounds_are_enforced():
         crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=1.5, ppmm=PPMM)
 
 
-def test_default_ppmm_is_300dpi():
+def test_default_ppmm_accepted():
+    """解析结果对 ppmm 不变（分子分母同现被约掉），本条钉不住「默认=300dpi」；
+    它钉的是默认值不为 None 也能算完、不触守卫（评审 I-3，原名
+    test_default_ppmm_is_300dpi 名不副实）。"""
     p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL)
     assert p.crop_px == (50, 0, 150, 100)
 
@@ -1789,6 +1799,33 @@ def test_default_ppmm_is_300dpi():
 def test_unknown_mode_rejected():
     with pytest.raises(ValueError, match="mode"):
         crop.cell_crop_box(200, 100, 100, 100, "stretch", ppmm=PPMM)
+
+
+def test_fill_zoom_upper_bound_enforced():
+    # 评审 I-2：原 test_zoom_bounds_are_enforced 只钉了 FILL 下界与 FIT 上界
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=4.5, ppmm=PPMM)
+
+
+def test_fit_zoom_lower_bound_enforced():
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=0.1, ppmm=PPMM)
+
+
+def test_fit_aspect_ratio_preserved_on_non_square_target():
+    """评审 I-2：正方形目标下 min() 两支数值相等，钉不住退化为只按宽缩放。"""
+    p = crop.cell_crop_box(200, 100, 400, 50, crop.FIT, ppmm=PPMM)
+    x, y, w, h = p.dest_mm
+    assert (w, h) == pytest.approx((100.0, 50.0))  # 按宽缩放会得 400×200 越格
+    assert (x, y) == pytest.approx((150.0, 0.0))
+
+
+def test_fill_crop_box_uses_half_up_rounding():
+    """评审 I-1：未取整的 l 恰为 36.5，必须按全项目 round_px 口径得 37，
+    而非银行家舍入的 36。"""
+    p = crop.cell_crop_box(100, 80, 100, 152, crop.FILL, zoom=2,
+                           dx_mm=-1.3, ppmm=units.ppmm(300))
+    assert p.crop_px == (37, 20, 63, 60)
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1824,8 +1861,8 @@ _VALID_MODES = (FILL, FIT)
 class Placement:
     """crop_px 为原图像素裁框，dest_mm 为相对目标区左上角的落位。"""
 
-    crop_px: tuple
-    dest_mm: tuple
+    crop_px: tuple[int, int, int, int]
+    dest_mm: tuple[float, float, float, float]
 
 
 def _clamp(value, lo, hi):
@@ -1856,8 +1893,10 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
         l = _clamp(cx - crop_w / 2.0, 0.0, photo_w_px - crop_w)
         t = _clamp(cy - crop_h / 2.0, 0.0, photo_h_px - crop_h)
         r, b = l + crop_w, t + crop_h
-        return Placement((int(round(l)), int(round(t)),
-                          int(round(r)), int(round(b))),
+        # 取整走 units.round_px（全项目口径，.5 向上）：内置 round 是银行家
+        # 舍入，300dpi 下约 4.8% 的裁框边会恰落 .5，偏移方向不可预测（T7 评审 I-1）
+        return Placement((units.round_px(l), units.round_px(t),
+                          units.round_px(r), units.round_px(b)),
                          (0.0, 0.0, float(target_w_mm), float(target_h_mm)))
 
     if not 0.2 <= zoom <= 1.0:
@@ -1874,7 +1913,7 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_crop.py -v`
-Expected: PASS（10 passed）
+Expected: PASS（14 passed）
 
 - [ ] **Step 5: 提交**
 

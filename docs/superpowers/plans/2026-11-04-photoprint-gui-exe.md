@@ -2236,6 +2236,17 @@ from pathlib import Path
 from photoprint.core import store
 
 LOG_NAME = "error.log"
+_UI_CALLBACK = None    # 崩溃落日志后给界面的回调（仅主线程钩子调）
+
+
+def set_ui_callback(cb) -> None:
+    """注册崩溃后的界面回调（收一个日志 Path）；传 None 可撤销。
+
+    启动早期（窗口未建）先 `install()` 保护启动崩溃、此时回调为空；
+    建好 `MainWindow` 后由入口再调本函数接上状态栏提示。
+    """
+    global _UI_CALLBACK
+    _UI_CALLBACK = cb
 
 
 def log_path() -> Path:
@@ -2266,9 +2277,16 @@ def install(path=None) -> Path:
     target = Path(path) if path else None
 
     def hook(etype, value, tb):
-        write((etype, value, tb), target)
+        written = write((etype, value, tb), target)
+        # 主线程才能碰界面；提示本身坏了也不能反过来掩盖原异常处理。
+        if written is not None and _UI_CALLBACK is not None:
+            try:
+                _UI_CALLBACK(written)
+            except Exception:
+                pass
 
     def thread_hook(args):
+        # 子线程钩子只落盘、不回调 UI：跨线程改 QWidget 不安全。
         write((args.exc_type, args.exc_value, args.exc_traceback), target)
 
     sys.excepthook = hook
@@ -2298,6 +2316,9 @@ def run(argv=None):
     app = QApplication(argv if argv is not None else sys.argv[:1])
     win = main_window.MainWindow()
     win.show()
+    # 建好窗口后才接状态栏提示：启动阶段的崩溃（win 未成）只落盘、不误碰 UI。
+    crashlog.set_ui_callback(
+        lambda p: win._set_status(f"已记录错误日志：{p}", error=True))
     return app.exec()
 
 
@@ -2895,6 +2916,7 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   补列 parity 脚本。均回写计划 Step 2/3 逐字块（check_t10_parity_verbatim 实测 MATCH、字节相等）。实跑：parity 同尺寸/同像素/遮罩正对照/四边纯白全 True RC=0、无 getdata 弃用告警；全量 228 passed RC=0。
 - **T10 round-2 确认性复审（㉙）**：round-2 给 (A) Spec Approved（附一处必订正的措辞 N-1）、(B) 质量 Approved（附 N-1 必修、N-2/N-3/N-4 CONSIDER），零 Critical；round-1 六条 5 条已闭、B-1/B-5 判“部分闭合（代码改了但声明超出证据）”。逐条独立复核后坐实 **N-1 为真 over-claim**：`git grep DEFAULT_OUTPUT_DPI` 仅 jobs.py:16 定义与 parity 脚本引用、无生产消费者→界面 dpi 默认实来自 `main_window.py:28 DPI_CHOICES` 字面量 + `:144 setCurrentIndex(1)`，与脚本的 `jobs.DEFAULT_OUTPUT_DPI` **同值不同源**；`test_app_main_window.py:111-131` 的 spy 只钉 `show_mask is False` + `dpi == 600.0`（跟随所选）、**不检查控件默认值**；其 :104-108 那条负断言在 25.4 dpi 下零牙（恒真）。修法（严格限“验收与文档”范围、纯文档收窄）：docstring 分三档明写“出血真同源 / dpi 同值不同源 / store 读真实 %APPDATA% 刻意一致 fail-loud”、同步收窄 spec §11.5a 与 ㉘ 措辞；N-2（两侧同读真实 store）判定不改（改动会解耦 GUI/CLI store、反引入 parity 假失败风险），已在 docstring 明记前提；N-3 `str(int(DPI))`→`str(DPI)`（已核 cli `--dpi type=float`、“300.0”合法）；N-4a 正对照 `masked` 存 `parity_mask_control.png` 留人工复核探针落带内。**跨任务残留登记交 fin（全分支终审）整枝**：T7 `test_app_main_window.py:104-108` 恒真遮罩断言、及 UI 默认常量未被任何测试断言（评审首选修法：补 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()`/`w.bleed_box.value()`，并把 :107-108 改 dpi=DEFAULT_OUTPUT_DPI + 4 点正断言 + show_mask=True 正对照）。round-2 既 (A)(B) Approved 且 N-1 已闭，此波只清 SHOULD/CONSIDER，不派 round-3。
 - **全分支终审前的整枝（㉚）**：T10 round-2 登记的两条跨任务测试残留属本仓反复踩的“恒真空转”同族（T4⑥/T5⑮/T8M-2/T10 B-2/B-3），在 fin 整枝：① `test_app_main_window.py::test_exported_page_has_no_unprintable_mask` 原在 25.4 dpi 下用负断言 `!= (210,210,210)`、探针 (3, ·) 落遮罩带外（该 dpi 带只 0..2px）→零牙；改 `dpi=jobs.DEFAULT_OUTPUT_DPI`（带 0..39px 包住四边探针）+ 4 点正断言 `== (255,255,255)` + `show_mask=True` 正对照（同 parity B-2 口径）。② 新增 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()==jobs.DEFAULT_OUTPUT_DPI` 与 `w.bleed_box.value()==modes.DEFAULT_BLEED_MM`，补上控件默认值此前无任何断言的那半边（也让 N-1 里“同值不同源”的 dpi 从测试层面变成“同源”约束）。两波均实测验牙：① 把 `render_page` 遮罩闸改为无视 `show_mask` 恒画→①号测 RC=1；② 把 `setCurrentIndex(1)→(0)`→②号测 RC=1；两个变异均已原样还原（git diff 仅留 test 文件）。计划 T7 逐字块同步回写、`check_t7_plan_verbatim` 缺失 0；全量 229 passed RC=0。
+- **全分支终审与修复波（㉛）**：对整枝净改动 `c0d84a2..a33d489` 派发 CodeReview 终审，返回 **(A) Spec = Needs work**（唯一驱动项 A-2）、**(B) 质量 = Approved**（2 Minor + 3 Consider，零 Critical）。逐条独立复核：A-2 坐实为真——spec §9 L204 确有“并在状态栏提示‘已记录错误日志’”，但 `crashlog` 钩子只落盘、未接 UI 回调（`已记录错误日志` 全仓仅出现在 spec）；根因是**计划级遗漏**：计划 T8 段从头就没把这条 §9 要求列进去，T8 三轮按计划实现无从发现，终审正确捕获。修法（闭 A-2）：`crashlog` 加模块级 `_UI_CALLBACK`+`set_ui_callback`，主线程 `hook` 写完日志（`write` 返回路径非 None）后回调、`try/except Exception` 兜底防提示本身坏掉掩盖原异常；子线程 `thread_hook` 只落盘不回调（跨线程改 QWidget 不安全）；`__main__.run` 在 `win.show()` 之后注册 `win._set_status(..., error=True)`（启动早期窗口未成时回调为空、只落盘）。新增测 `test_install_hook_notifies_ui_callback` 双向钉“主线程回调 / 子线程不碰 UI”（变异：让 thread_hook 也回调→`assert got==[]` RC=1，实测验牙后还原）。顺手闭 Minor：**B-1**（`export_to` 顶部先 `_debounce.stop()+_refresh()`，消除陈旧 `self.job` × 实时 dpi 混用）、**B-2**（`test_bad_numeric_configs_do_not_block_startup` 加 `@pytest.mark.filterwarnings("error::RuntimeWarning")`，让 `offset_pct=1e19` 的 shiboken C int 溢出 RuntimeWarning 升成 error、护栏真承重）。A-3/B-3/B-4/B-5 经核为非阻塞/计划已声明偏差/架构示性，不改。计划 T8 crashlog/`__main__` 逐字块同步回写、`check_t8_plan_verbatim` 缺失 0；全量 **230 passed RC=0**（较 229 净增 1）、`m1m2_check`/`check_gui_cli_parity` 均 RC=0（parity 全 True）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

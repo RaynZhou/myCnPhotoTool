@@ -113,3 +113,34 @@ def test_install_replaces_both_hooks(tmp_path):
         assert "ValueError" in text and "子线程炸了" in text
     finally:
         sys.excepthook, threading.excepthook = old, old_thread
+
+
+
+def test_install_hook_notifies_ui_callback(tmp_path):
+    """spec §9：崩溃落日志后还要在状态栏提示"已记录错误日志"。
+
+    主线程 sys.excepthook 写完日志后回调界面；threading.excepthook 在子线程，
+    跨线程碰 QWidget 不安全，故只落盘不回调（否则删了"子线程不碰 UI"的区分本用例会红）。
+    """
+    old = sys.excepthook, threading.excepthook, crashlog._UI_CALLBACK
+    got = []
+    target = tmp_path / "error.log"
+    try:
+        crashlog.install(target)
+        crashlog.set_ui_callback(lambda p: got.append(p))
+        try:
+            raise RuntimeError("预览炸了")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())
+        assert got == [target] and target.exists()
+        got.clear()
+        try:
+            raise ValueError("子线程炸了")
+        except ValueError as exc:
+            args = types.SimpleNamespace(exc_type=type(exc), exc_value=exc,
+                                        exc_traceback=exc.__traceback__)
+            threading.excepthook(args)
+        assert got == []
+        assert "子线程炸了" in target.read_text(encoding="utf-8")
+    finally:
+        sys.excepthook, threading.excepthook, crashlog._UI_CALLBACK = old

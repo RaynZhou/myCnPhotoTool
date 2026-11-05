@@ -17,6 +17,9 @@ def run(argv=None):
     app = QApplication(argv if argv is not None else sys.argv[:1])
     win = main_window.MainWindow()
     win.show()
+    # 建好窗口后才接状态栏提示：启动阶段的崩溃（win 未成）只落盘、不误碰 UI。
+    crashlog.set_ui_callback(
+        lambda p: win._set_status(f"已记录错误日志：{p}", error=True))
     return app.exec()
 
 

@@ -12,6 +12,17 @@ from pathlib import Path
 from photoprint.core import store
 
 LOG_NAME = "error.log"
+_UI_CALLBACK = None    # 崩溃落日志后给界面的回调（仅主线程钩子调）
+
+
+def set_ui_callback(cb) -> None:
+    """注册崩溃后的界面回调（收一个日志 Path）；传 None 可撤销。
+
+    启动早期（窗口未建）先 `install()` 保护启动崩溃、此时回调为空；
+    建好 `MainWindow` 后由入口再调本函数接上状态栏提示。
+    """
+    global _UI_CALLBACK
+    _UI_CALLBACK = cb
 
 
 def log_path() -> Path:
@@ -42,9 +53,16 @@ def install(path=None) -> Path:
     target = Path(path) if path else None
 
     def hook(etype, value, tb):
-        write((etype, value, tb), target)
+        written = write((etype, value, tb), target)
+        # 主线程才能碰界面；提示本身坏了也不能反过来掩盖原异常处理。
+        if written is not None and _UI_CALLBACK is not None:
+            try:
+                _UI_CALLBACK(written)
+            except Exception:
+                pass
 
     def thread_hook(args):
+        # 子线程钩子只落盘、不回调 UI：跨线程改 QWidget 不安全。
         write((args.exc_type, args.exc_value, args.exc_traceback), target)
 
     sys.excepthook = hook

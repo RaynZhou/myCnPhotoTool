@@ -298,6 +298,10 @@ class MainWindow(QMainWindow):
         """导出等尺寸 PDF。测试直接调它，不经文件对话框。"""
         from photoprint.win import pdf_export
 
+        # 先把待防抖的控件值落成 job：self.job 是上次 _refresh 的快照，而下面
+        # 的校验与 dpi 取的是实时值，不先同步就会拿陈旧 job 配新参数导出。
+        self._debounce.stop()
+        self._refresh()
         if self.job is None or not any(ph is not None for ph in self.photos):
             raise ValueError("没有可导出的照片")
         pages = jobs.render_all(self.job, self._params()["dpi"], show_mask=False)

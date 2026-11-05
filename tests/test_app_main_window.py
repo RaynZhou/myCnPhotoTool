@@ -250,6 +250,7 @@ def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
     assert w.h_slider.value() == 0 and w.v_slider.value() == 0
 
 
+@pytest.mark.filterwarnings("error::RuntimeWarning")
 @pytest.mark.parametrize("key,value", [
     ("gap_mm", int("9" * 400)),        # float(huge int) → OverflowError
     ("bleed_mm", int("9" * 400)),
@@ -258,7 +259,12 @@ def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
 ])
 def test_bad_numeric_configs_do_not_block_startup(qapp, tmp_path, key, value):
     """I5/W1：数值字段超大值一律不得卡启动——写入控件的 OverflowError 必须被
-    _restore_last_job 的降级护栏接住。删护栏则本用例在 __init__ 抛。"""
+    _restore_last_job 的降级护栏接住。删护栏则本用例在 __init__ 抛。
+
+    标 filterwarnings=error::RuntimeWarning：`offset_pct=1e19` 走的是
+    `int(1e19)` 能转、但 `slider.setValue` 喂给 shiboken C int 溢出只发
+    RuntimeWarning（默认不抛），升成 error 后该用例才真踩到护栏。
+    """
     s = _store(tmp_path)
     s.set_last_job({"sheet_key": "A4", "cell_key": "3R", key: value})
     s.save()

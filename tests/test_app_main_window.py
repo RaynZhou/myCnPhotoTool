@@ -365,3 +365,75 @@ def test_close_event_retires_threads_without_timeout(qapp, tmp_path):
     w.close()                                    # 触发 closeEvent → _retire_threads(timeout=None)
     assert th.wait_args == [None]                # closeEvent 改用默认超时 → 此处变红
     assert w._stale == []
+
+
+def _rotate_btn(w):
+    return w.findChild(type(w.export_btn), "rotate_btn")
+
+
+def test_rotate_without_selection_prompts_and_keeps_state(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.photo_list.clearSelection()
+    before = list(w.photo_rotations)
+    _rotate_btn(w).click()
+    assert w.photo_rotations == before == [0, 0, 0, 0]
+    assert "请先选中照片" in w.statusBar().currentMessage()
+
+
+def test_rotate_cycles_90_degrees_and_marks_list(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.photo_list.setCurrentRow(1)
+    _rotate_btn(w).click()
+    assert w.photo_rotations == [0, 90, 0, 0]
+    assert "↻90°" in w.photo_list.item(1).text()
+    assert "↻" not in w.photo_list.item(0).text()   # 0° 行逐字保持原文案
+    w._refresh()
+    assert w.job.rotations == (0, 90, 0, 0)         # 角度进了编排层（Task 2 接口）
+    for _ in range(3):                              # 4 次一循环回 0
+        _rotate_btn(w).click()
+    assert w.photo_rotations == [0, 0, 0, 0]
+    assert "↻" not in w.photo_list.item(1).text()
+
+
+def test_rotate_then_refresh_changes_preview_pixels(qapp, tmp_path):
+    """所见即所得的构造保证：按钮 → photo_rotations → build_job → 渲染层，
+    全链路走通后当前页像素必须真的变了（断言像素，不断言中间变量）。
+
+    不用 _fill 的纯色图：纯色（含仅角上小标记、标记被裁切/缩采样抹平的情形）
+    转 90° 画面可以逐像素不变，"!=" 断言无牙（探针实测）——用左右双色图，
+    FIT 居中摆放后采样区域必然跨到两色。"""
+    twotone = tmp_path / "twotone.jpg"
+    img = Image.new("RGB", (400, 200), (170, 30, 40))
+    img.paste(Image.new("RGB", (200, 200), (30, 170, 40)), (0, 0))
+    img.save(twotone)
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(str(twotone))
+    w._refresh()
+    before = w.job.render(0, 25.4).tobytes()
+    w.photo_list.setCurrentRow(0)
+    _rotate_btn(w).click()
+    w._refresh()
+    assert w.job.render(0, 25.4).tobytes() != before
+
+
+def test_clear_resets_rotations(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.photo_list.setCurrentRow(0)
+    _rotate_btn(w).click()
+    w._on_clear_photos()
+    assert w.photo_rotations == []
+
+
+def test_failed_photo_still_tracks_rotation(qapp, tmp_path):
+    """读取失败占位项也允许记角度（渲染时被跳过，数据不坏）：不做特殊分支。"""
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"not an image")
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(str(bad))
+    w.photo_list.setCurrentRow(0)
+    _rotate_btn(w).click()
+    assert w.photo_rotations == [90]
+    assert "↻90°" in w.photo_list.item(0).text()

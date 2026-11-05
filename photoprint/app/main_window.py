@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.st.load()
         self.photos = []        # PIL 图；读取失败的占位 None 会被渲染当空格
         self.photo_paths = []
+        self.photo_rotations = []  # 逐图顺时针角度，与 photos 严格等长同序
         self.page_index = 0
         self.job = None
         self._thread = None
@@ -109,9 +110,14 @@ class MainWindow(QMainWindow):
         add_btn.clicked.connect(self._on_add_photos)
         clear_btn = QPushButton("清空")
         clear_btn.clicked.connect(self._on_clear_photos)
+        rotate_btn = QPushButton("旋转 90°")
+        rotate_btn.setObjectName("rotate_btn")
+        rotate_btn.clicked.connect(self._on_rotate)
+        self.rotate_btn = rotate_btn
         btns = QHBoxLayout()
         btns.addWidget(add_btn)
         btns.addWidget(clear_btn)
+        btns.addWidget(rotate_btn)
         panel.addRow("", btns)
 
         # 纸张只列 role=paper；格子列 role=cell 加全部 role=paper（人设计 4.3）
@@ -200,7 +206,8 @@ class MainWindow(QMainWindow):
             self.job = jobs.build_job(self.st, self.photos, p["sheet_key"],
                                       p["cell_key"], gap_mm=p["gap_mm"],
                                       bleed_mm=p["bleed_mm"], mode=p["mode"],
-                                      offset_pct=p["offset_pct"])
+                                      offset_pct=p["offset_pct"],
+                                      rotations=tuple(self.photo_rotations))
         except ValueError as exc:      # 放不下 / 非法模式组合 / 未知尺寸
             self.job = None
             self._set_status(str(exc), error=True)
@@ -285,18 +292,41 @@ class MainWindow(QMainWindow):
         except Exception as exc:      # IO 边界什么都可能抛，全部收敛
             self.photos.append(None)
             self.photo_paths.append(str(path))
-            item = QListWidgetItem(f"{name}（读取失败）")
+            self.photo_rotations.append(0)
+            item = QListWidgetItem(self._photo_item_text(name, None, 0))
             item.setForeground(QColor(ERROR_COLOR))
             self.photo_list.addItem(item)
             self._set_status(f"无法读取 {name}：{exc}", error=True)
             return
         self.photos.append(img)
         self.photo_paths.append(str(path))
+        self.photo_rotations.append(0)
         self.photo_list.addItem(
-            QListWidgetItem(f"{name}  {img.width}×{img.height}px"))
+            QListWidgetItem(self._photo_item_text(name, img, 0)))
+
+    @staticmethod
+    def _photo_item_text(name, img, angle):
+        """列表项文字单一真相源：0° 时逐字等于旧文案，既有断言不受扰动。"""
+        if img is None:
+            base = f"{name}（读取失败）"
+        else:
+            base = f"{name}  {img.width}×{img.height}px"
+        return base if angle == 0 else f"{base}  ↻{angle}°"
+
+    def _on_rotate(self):
+        row = self.photo_list.currentRow()
+        if not 0 <= row < len(self.photo_rotations):
+            self._set_status("请先选中照片")     # 正常色：这是引导，不是错误
+            return
+        self.photo_rotations[row] = (self.photo_rotations[row] + 90) % 360
+        item = self.photo_list.item(row)
+        img = self.photos[row] if row < len(self.photos) else None
+        item.setText(self._photo_item_text(
+            Path(self.photo_paths[row]).name, img, self.photo_rotations[row]))
+        self._debounce.start()
 
     def _on_clear_photos(self):
-        self.photos, self.photo_paths = [], []
+        self.photos, self.photo_paths, self.photo_rotations = [], [], []
         self.photo_list.clear()
         self.page_index = 0
         self._refresh()

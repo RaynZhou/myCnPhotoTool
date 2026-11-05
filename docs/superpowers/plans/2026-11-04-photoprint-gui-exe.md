@@ -2345,14 +2345,6 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $venv = Join-Path $root ".venv-build"
 
-if (-not (Test-Path $venv)) {
-    python -m venv $venv
-}
-$py = Join-Path $venv "Scripts\python.exe"
-& $py -m pip install --upgrade pip
-& $py -m pip install -r (Join-Path $root "requirements.txt")
-& $py -m pip install -r (Join-Path $root "requirements-build.txt")
-
 if ($Clean) {
     foreach ($d in "build", "dist") {
         $p = Join-Path $root $d
@@ -2360,22 +2352,45 @@ if ($Clean) {
     }
 }
 
+$py = Join-Path $venv "Scripts\python.exe"
+# 判解释器真存在（只看目录会放过半残 venv，炸在后面 & $py 找不到命令）
+if (-not (Test-Path $py)) {
+    python -m venv $venv
+    if ($LASTEXITCODE -ne 0) { throw "python -m venv 失败 rc=$LASTEXITCODE" }
+}
+& $py --version
+& $py -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip 升级失败 rc=$LASTEXITCODE" }
+& $py -m pip install -r (Join-Path $root "requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "装运行时依赖失败 rc=$LASTEXITCODE" }
+& $py -m pip install -r (Join-Path $root "requirements-build.txt")
+if ($LASTEXITCODE -ne 0) { throw "装构建期依赖失败 rc=$LASTEXITCODE" }
+
 # 入口是真实 .py 文件；--windowed 等于 --noconsole
+# 原生命令非零退出不会被 ErrorActionPreference=Stop 拦下（那是 7.3+ 才有的），必须手查 $LASTEXITCODE
+$buildStart = Get-Date
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name PhotoPrint `
     --paths $root (Join-Path $root "photoprint\app\__main__.py")
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败 rc=$LASTEXITCODE" }
 
-if (-not (Test-Path (Join-Path $root "dist\PhotoPrint.exe"))) {
+$exePath = Join-Path $root "dist\PhotoPrint.exe"
+if (-not (Test-Path $exePath)) {
     throw "构建结束但未产出 dist\PhotoPrint.exe"
 }
-$mb = [math]::Round((Get-Item (Join-Path $root "dist\PhotoPrint.exe")).Length / 1MB, 1)
-Write-Host "OK 产物：$root\dist\PhotoPrint.exe（$mb MB）"
+# 新鲜度：本次没真产出、但上一次残留 exe 还在原位时，不能对着旧 exe 报 OK
+if ((Get-Item $exePath).LastWriteTime -lt $buildStart) {
+    throw "dist\PhotoPrint.exe 时间戳早于本次构建，疑似上次残留"
+}
+$mb = [math]::Round((Get-Item $exePath).Length / 1MB, 1)
+Write-Host "OK 产物：$exePath（$mb MB）"
 ```
 
 - [ ] **Step 4: 跑构建**
 
 Run: `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1`
-Expected: 末尾输出 `OK 产物：…\dist\PhotoPrint.exe（… MB）`，体积落在 100–180MB。
-若体积低于 60MB，说明 PySide6 插件没收全，先查 `build\PhotoPrint\Analysis-00.toc` 里有无 `qwindows.dll`。
+Expected: 末尾输出 `OK 产物：…\dist\PhotoPrint.exe（… MB）`。
+体积估算：本应用只 import QtWidgets/QtGui/QtCore/QtNetwork、不带 WebEngine，实测约 60–70MB（低于早期 100–180MB 预估属正常）。
+若体积显著低于 60MB，才怀疑 PySide6 插件没收全，先查 `build\PhotoPrint\Analysis-00.toc` 里有无 `qwindows.dll`。
 
 - [ ] **Step 5: 写 `_lab/check_exe.ps1`**
 
@@ -2389,24 +2404,31 @@ if (-not (Test-Path $exe)) { throw "未找到 $exe，先跑 build_exe.ps1" }
 
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
-$p = Start-Process -FilePath $exe -PassThru
+# onefile 下真实窗口属子进程，父(引导)进程 MainWindowTitle 恒空——故按映像名轮询，
+# 不看 Start-Process 返回的父 PID；起跑前先清残留 PhotoPrint，避免上轮孤儿被本轮秒匹配假阳性。
+Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Process -FilePath $exe | Out-Null
 
 $found = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
-    $candidate = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-    if ($null -eq $candidate) { break }
-    if ($candidate.MainWindowTitle -like "*相片打印助手*") { $found = $candidate; break }
+    $found = Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -like "*相片打印助手*" } | Select-Object -First 1
+    if ($found) { break }
 }
 $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+$alive = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue)
 
 if ($null -eq $found) {
-    Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）"
-    if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+    # 区分“进程已崩/退”与“进程活着但本会话无可枚举窗口”（无交互桌面）
+    $state = if ($alive.Count -gt 0) { "进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
+             else { "进程已退出（崩溃或未能启动）" }
+    Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）：$state"
+    Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
     exit 1
 }
-Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s）"
-Stop-Process -Id $p.Id -Force
+Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s，PID $($found.Id)）"
+Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
 exit 0
 ```
 
@@ -2735,11 +2757,18 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   （内容逐字不变、只换编码），5.1 才正确按 UTF-8 读。重建后实跑 `build_exe.ps1 -Clean` 成功产出
   `dist\PhotoPrint.exe`（63.3 MB，Analysis-00.toc 已收 `qwindows.dll` 平台插件与 Qt6Core/Gui/Widgets）。
   体积低于 Step 4 预估的 100–180MB 但高于“<60MB 插件未收全”地板线：因应用只 import
-  QtWidgets/QtGui/QtCore/QtNetwork，PyInstaller 按 import 收集、不带 WebEngine。`check_exe.ps1` 在无交互
-  window station 的会话下因 `MainWindowTitle` 恒空而 FAIL；用存活性探针（进 12s 不退、子进程在跑、
-  不写 error.log）证实 exe 能正常启动——属人工验收环境限制非打包缺陷，留真机补一次带桌面的 OK。
-  另：外层 `2>&1 | Tee-Object` 管道的 ExitCode=1 是 pip/PyInstaller 把 INFO 写 stderr 触发本环境
+  QtWidgets/QtGui/QtCore/QtNetwork，PyInstaller 按 import 收集、不带 WebEngine（Step 4 预估已据此订正）。
+  另：外层 `2>&1 | Tee-Object` 管道偶发 ExitCode=1 是 pip/PyInstaller 把 INFO 写 stderr 触发本环境
   `$ErrorActionPreference=Stop` 的假报错，脚本本体跑到末行 Write-Host 未抛。
+- **T9 round-1 修复波（㉔）**：评审推翻了我初版 ㉓“check_exe FAIL 属无交互 window station 环境限制”的结论——
+  实测不成立。真相是 `check_exe.ps1` 有真实缺陷：PyInstaller onefile 是“父引导进程 + 子功能进程”，
+  窗口属子进程，而脚本按 `Start-Process -PassThru` 返回的**父 PID** 取 `MainWindowTitle`（引导进程恒无窗口，
+  任何机器上都恒空）→ 轮询 30 次必 FAIL。我独立复核：同会话按**映像名**轮询 `Get-Process -Name PhotoPrint`，
+  子进程 PID 的 `MainWindowTitle` 确为“相片打印助手”，连跑 3 次均 5–7s 命中、收尾残留 0。修法：check_exe 改按名
+  轮询、起跑前先杀残留 PhotoPrint（防上轮孤儿被本轮秒匹配假阳性，评审 I-B2）、两条退出路径都按名清进程、FAIL
+  消息带存活/退出态以区分“崩/退”与“无窗口”（M-B3）。同时 `build_exe.ps1` 补 `$LASTEXITCODE` 检查与产物新鲜度
+  判定（原生命令非零退出不被 Stop 拦下、且默认不删 dist 会对着旧 exe 假报 OK，评审 I-B3）——重建实测产 63.3MB、
+  验收真 OK。Step 3/4/5 计划正文与脚本已同步回写，逐字校对仍 0 缺失。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

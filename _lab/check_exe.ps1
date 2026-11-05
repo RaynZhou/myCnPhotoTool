@@ -7,22 +7,29 @@ if (-not (Test-Path $exe)) { throw "未找到 $exe，先跑 build_exe.ps1" }
 
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
-$p = Start-Process -FilePath $exe -PassThru
+# onefile 下真实窗口属子进程，父(引导)进程 MainWindowTitle 恒空——故按映像名轮询，
+# 不看 Start-Process 返回的父 PID；起跑前先清残留 PhotoPrint，避免上轮孤儿被本轮秒匹配假阳性。
+Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Process -FilePath $exe | Out-Null
 
 $found = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
-    $candidate = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-    if ($null -eq $candidate) { break }
-    if ($candidate.MainWindowTitle -like "*相片打印助手*") { $found = $candidate; break }
+    $found = Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowTitle -like "*相片打印助手*" } | Select-Object -First 1
+    if ($found) { break }
 }
 $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+$alive = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue)
 
 if ($null -eq $found) {
-    Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）"
-    if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+    # 区分“进程已崩/退”与“进程活着但本会话无可枚举窗口”（无交互桌面）
+    $state = if ($alive.Count -gt 0) { "进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
+             else { "进程已退出（崩溃或未能启动）" }
+    Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）：$state"
+    Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
     exit 1
 }
-Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s）"
-Stop-Process -Id $p.Id -Force
+Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s，PID $($found.Id)）"
+Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
 exit 0

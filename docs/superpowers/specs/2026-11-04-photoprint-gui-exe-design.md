@@ -246,8 +246,8 @@ if cell.rotated:
 4. `build_exe.ps1` 产出的 `PhotoPrint.exe` 双击可开、能选图、能看预览、能出 PDF；崩溃时
    `error.log` 有 traceback。（需带交互桌面真机执行，归终审。）
 5. 同一组照片与同一参数下，GUI 与 CLI 出同一张图：
-   - 5a. GUI 编排（`build_job`+`render`，默认常量与 `main_window` 同源）与 CLI 子进程同参数同像素、
-     四边纯白 —— `_lab/check_gui_cli_parity.py`（PNG，本 Task 10 已 ✅）。
+   - 5a. GUI 编排（`build_job`+`render`；出血与 `main_window` 同源，导出 dpi 取 `jobs.DEFAULT_OUTPUT_DPI`
+     与界面下拉默认 300 同值但不同源）与 CLI 子进程同参数同像素、四边纯白 —— `_lab/check_gui_cli_parity.py`（PNG，本 Task 10 已 ✅）。
    - 5b. **exe** 二进制导出的 PDF 与 CLI 导出的 PDF 页面像素一致（抽样比对首页）—— 需带交互桌面
      真机，归终审（☐）。
 

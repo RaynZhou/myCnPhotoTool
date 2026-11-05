@@ -2509,10 +2509,13 @@ Expected：
 同时钉住导出遮罩口径：两边产物的四边都得是纯白 (255, 255, 255)。
 测试图本脚本自造，不依赖任何已存在的目录。
 
-边界说明：GUI 侧是对界面那条编排（build_job → render(show_mask=False)）的**复述**，参数取
-与 main_window 同源的默认常量（非脚本自造字面量）；真实界面控件默认值、导出 dpi 与
-show_mask 另由 tests/test_app_main_window.py 的 render_all spy 钉住。exe 二进制级与 CLI 的
-**PDF** 像素一致需带交互桌面真机，不在本脚本范围（见 spec §11.5b / 终审）。
+边界说明：GUI 侧是对界面那条编排（build_job → render(show_mask=False)）的**复述**，参数来源分三档：
+出血 `bleed_mm` 与 main_window 真同源（都取 `modes.DEFAULT_BLEED_MM`）；导出 dpi 取
+`jobs.DEFAULT_OUTPUT_DPI`，与界面下拉默认 300 **同值但不同源**（界面默认来自 `DPI_CHOICES` 字面量，
+`DEFAULT_OUTPUT_DPI` 无生产消费者）；`store.Store()` 读真实 %APPDATA%（与界面校准同源、刻意一致，
+若被改动会两边一起变而 fail-loud、不产假阳）。真实界面控件的默认值与导出 dpi/show_mask 仅由
+tests/test_app_main_window.py 的 render_all spy 钉住「show_mask=False + dpi 跟随所选」，**不检查控件默认值**。
+exe 二进制级与 CLI 的 **PDF** 像素一致需带交互桌面真机，不在本脚本范围（见 spec §11.5b / 终审）。
 """
 from __future__ import annotations
 
@@ -2547,7 +2550,7 @@ def make_photos(tmp: Path):
 
 
 def build_gui_job(paths):
-    """界面走的那条编排：build_job（默认常量与 main_window 同源）+ 单页 render。"""
+    """界面走的那条编排：build_job（出血与 main_window 同源，dpi 见模块 docstring 分档）+ 单页 render。"""
     st = store.Store()
     st.load()
     photos = [jobs.load_photo(p) for p in paths]
@@ -2558,7 +2561,7 @@ def cli_page(paths, tmp: Path):
     """CLI 走的那条路：子进程跑真实命令行，不碰内部函数。"""
     out = tmp / "cli.png"
     subprocess.run([sys.executable, "-m", "photoprint.cli", "--photos", *paths,
-                    "--sheet", "A4", "--cell", "3R", "--dpi", str(int(DPI)),
+                    "--sheet", "A4", "--cell", "3R", "--dpi", str(DPI),
                     "--out", str(out)], check=True, cwd=str(ROOT))
     return Image.open(out)
 
@@ -2582,8 +2585,9 @@ def main() -> int:
         same_pixels = same_size and a.mode == b.mode and a.tobytes() == b.tobytes()
         # 正对照：同图开遮罩再渲一次，必须先钉四边确为灰遮罩色；否则下面的
         # "导出四边纯白" 可能因探针落到带外 / 整体渲染坏掉而恒真空转。
-        control_ok = all(px == MASK_RGB for px in edge_pixels(
-            job.render(0, DPI, show_mask=True)))
+        masked = job.render(0, DPI, show_mask=True)
+        control_ok = all(px == MASK_RGB for px in edge_pixels(masked))
+        masked.save(OUT / "parity_mask_control.png")   # 存正对照图，留人工复核探针落带内
         clean = (all(px == CLEAN_RGB for px in edge_pixels(a))
                  and all(px == CLEAN_RGB for px in edge_pixels(b)))
         a.save(OUT / "parity_gui.png")
@@ -2860,11 +2864,12 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   采纳并实测复核后修：B-2/B-3（遮罩断言原来只探 2 边、用负断言 `!= (210,210,210)`，渲染整体坏也恒真——同 T4⑥/T5⑮/T8M-2 那类“恒真空转”）
   → 改探 4 边、正断言 `== (255,255,255)`、并加“同图 show_mask=True 再渲一次先钉四边确为 (210,210,210)”的正对照（实测 4 边 False→255、True→210）；
   B-4（`list(a.getdata())` 已被 Pillow 判废、Pillow≥12 无上限→14 硬失败，且 869 万像素×2 元组列表瞬时 ~1.3GB）→改 `a.tobytes()==b.tobytes()`（实测确定性）；
-  B-5（脚本字面量 300.0/3.0 重复 `jobs.DEFAULT_OUTPUT_DPI`/`modes.DEFAULT_BLEED_MM`、造第二真相源）→改用常量（顺带缓解 B-1：参数与 main_window 默认同源）；
+  B-5（脚本字面量 300.0/3.0 重复 `jobs.DEFAULT_OUTPUT_DPI`/`modes.DEFAULT_BLEED_MM`、造第二真相源）→改用常量（当时写“缓解 B-1：参数与 main_window 默认同源”，round-2 实测只出血真同源、dpi 同值不同源，措辞已收窄，见 ㉙）；
   B-1 未按评审首选“在 _lab 起真 MainWindow”扩展（计定计划逐字设 GUI 侧为复述），残差以 B-5 + docstring 边界声明 + 交由 test_app_main_window 的 render_all spy 兑现。
   A-1/A-2/A-3/A-4（均为诚实划界）：spec §9 体积订正为实测 63.3MB（QtNetwork 非 import、由 hook 连带收集）、收集凭证改可复现命令（`\('img2pdf'`→顶层、`\('PIL`→86 条，原写“79”不可复现已改）；
   §9 与 §11.4/§11.5 明写“收集≠exe 进程内真能出 PDF”、将 §11.5 拆为 5a（GUI编排≡CLI PNG，本任务 ✅）/5b（exe≡CLI PDF，带桌面终审 ☐）；README check_exe 行标“需交互桌面、无桌面必 FAIL”、
   补列 parity 脚本。均回写计划 Step 2/3 逐字块（check_t10_parity_verbatim 实测 MATCH、字节相等）。实跑：parity 同尺寸/同像素/遮罩正对照/四边纯白全 True RC=0、无 getdata 弃用告警；全量 228 passed RC=0。
+- **T10 round-2 确认性复审（㉙）**：round-2 给 (A) Spec Approved（附一处必订正的措辞 N-1）、(B) 质量 Approved（附 N-1 必修、N-2/N-3/N-4 CONSIDER），零 Critical；round-1 六条 5 条已闭、B-1/B-5 判“部分闭合（代码改了但声明超出证据）”。逐条独立复核后坐实 **N-1 为真 over-claim**：`git grep DEFAULT_OUTPUT_DPI` 仅 jobs.py:16 定义与 parity 脚本引用、无生产消费者→界面 dpi 默认实来自 `main_window.py:28 DPI_CHOICES` 字面量 + `:144 setCurrentIndex(1)`，与脚本的 `jobs.DEFAULT_OUTPUT_DPI` **同值不同源**；`test_app_main_window.py:111-131` 的 spy 只钉 `show_mask is False` + `dpi == 600.0`（跟随所选）、**不检查控件默认值**；其 :104-108 那条负断言在 25.4 dpi 下零牙（恒真）。修法（严格限“验收与文档”范围、纯文档收窄）：docstring 分三档明写“出血真同源 / dpi 同值不同源 / store 读真实 %APPDATA% 刻意一致 fail-loud”、同步收窄 spec §11.5a 与 ㉘ 措辞；N-2（两侧同读真实 store）判定不改（改动会解耦 GUI/CLI store、反引入 parity 假失败风险），已在 docstring 明记前提；N-3 `str(int(DPI))`→`str(DPI)`（已核 cli `--dpi type=float`、“300.0”合法）；N-4a 正对照 `masked` 存 `parity_mask_control.png` 留人工复核探针落带内。**跨任务残留登记交 fin（全分支终审）整枝**：T7 `test_app_main_window.py:104-108` 恒真遮罩断言、及 UI 默认常量未被任何测试断言（评审首选修法：补 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()`/`w.bleed_box.value()`，并把 :107-108 改 dpi=DEFAULT_OUTPUT_DPI + 4 点正断言 + show_mask=True 正对照）。round-2 既 (A)(B) Approved 且 N-1 已闭，此波只清 SHOULD/CONSIDER，不派 round-3。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

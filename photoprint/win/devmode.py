@@ -43,13 +43,18 @@ def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):
     return size
 
 
-def build(api, printer, w_mm, h_mm, paper_code=None):
-    """取驱动默认 devmode 后改纸张字段。返回 (dm, size)。
+def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
+    """取驱动默认 DEVMODE → 写纸张几何 →（可选）弹驱动页选介质 → 再盖一次
+    几何 → 交回驱动校验回填。返回 (dm, size)。
+
+    I-1：弹窗返回的 dm 可能被用户/驱动改成别的表单尺寸，故 prompt 之后再
+    `modify` 一次把几何钉回请求值；`modify` 只动纸张字段、从不碰私有区，
+    所以用户选的介质（活在私有扩展区）原样保留。弹窗抛错则静默降级为
+    "用驱动当前介质"（几何已在弹窗前写好，继续走 update 即可），不外抛。
 
     三步不可合并（真实契约）：
       1. DocumentProperties(fMode=0, None, None) 问出含私有区的总长；
-      2. GetPrinter(2)["pDevMode"] 取回驱动当前设置——把 None 当输入去 "get"
-         在本机直接 pywintypes.error 87；
+      2. GetPrinter(2)["pDevMode"] 取回驱动当前设置；
       3. 改完再用 DM_IN_BUFFER|DM_OUT_BUFFER 交回驱动校验/回填。
     """
     handle = api.open_printer(printer)
@@ -59,9 +64,20 @@ def build(api, printer, w_mm, h_mm, paper_code=None):
             raise RuntimeError("DocumentProperties 返回 0，无法取得 DEVMODE")
         dm = api.get_devmode(handle)
         # 先就地改再返回 dm 本体：写成 `return modify(...), size` 会把
-        # modify 的返回值（size）当成 dm，下游 T12 拿到的第一元素是 int（T11 评审 I-1）
+        # modify 的返回值（size）当成 dm，下游拿到的第一元素是 int
         modify(dm, size, w_mm, h_mm, paper_code)
+        if prompt:
+            try:
+                dm = api.prompt_devmode(handle, printer, dm)
+            except Exception:
+                pass          # 驱动无配置页：降级为继承当前介质，不中断打印
+            modify(dm, size, w_mm, h_mm, paper_code)   # 几何以请求为准（I-1）
         api.document_properties(handle, printer, "update", dm)
     finally:
         api.close_printer(handle)
     return dm, size
+
+
+def build(api, printer, w_mm, h_mm, paper_code=None):
+    """旧入口：等价 prompt=False。CLI / print_job 行为逐字不变。"""
+    return build_with_prompt(api, printer, w_mm, h_mm, paper_code, prompt=False)

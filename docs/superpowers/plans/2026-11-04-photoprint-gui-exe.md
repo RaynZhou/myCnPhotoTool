@@ -1615,7 +1615,7 @@ def test_offset_sliders_reach_jobs(qapp, tmp_path):
 
 def test_page_navigation_clamps_at_edges(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path, n=5)          # 5 张亍 A4+3R 是 2 页
+    _fill(w, tmp_path, n=5)          # 5 张于 A4+3R 是 2 页
     assert w.job.page_count == 2
     w._go_page(1)
     assert w.page_index == 1
@@ -1759,7 +1759,7 @@ class MainWindow(QMainWindow):
         for s in list(specs.CELL_PRESETS) + list(specs.PAPER_PRESETS):
             self.cell_box.addItem(s.label, s.key)
         # 默认选 3R 而非下拉首项 ID1：spec/Step 5 手工核对都写“默认 A4/3R”，
-        # findData 找不到（3R 已不在预设里）时退回首项，不留 -1。
+        # 3R 在 PAPER_PRESETS 里、findData 必命中；max(0, …) 只是防 findData 返回 -1。
         self.cell_box.setCurrentIndex(max(0, self.cell_box.findData("3R")))
         panel.addRow("格子", self.cell_box)
 
@@ -1855,27 +1855,31 @@ class MainWindow(QMainWindow):
             lambda msg, g=gen: self._on_render_failed(msg, g))
         self._thread.start()
 
-    def _retire_threads(self):
+    def _retire_threads(self, timeout=2000):
         """quit 打不断正在 run 的渲染，wait 超时就不能丢引用——丢了引用，在跑的
-        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。"""
+        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。
+        timeout=None 是无上限等到底（关窗收尾用：渲染有限，值得等，且不留
+        _stale——它是实例属性，随窗口析构即释放，那时再丢引用同样会崩）。"""
         threads = self._stale + ([self._thread] if self._thread is not None else [])
         keep = []
         for th in threads:
             if th.isRunning():
                 th.quit()
-                if not th.wait(2000):
+                if timeout is None:
+                    th.wait()
+                elif not th.wait(timeout):
                     keep.append(th)
         self._stale = keep
 
-    def _on_preview(self, image, gen=None):
-        if gen is not None and gen != self._gen:
+    def _on_preview(self, image, gen):
+        if gen != self._gen:
             return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
         pm = view.to_pixmap(image)
         self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
                                         Qt.SmoothTransformation))
 
-    def _on_render_failed(self, msg, gen=None):
-        if gen is None or gen == self._gen:
+    def _on_render_failed(self, msg, gen):
+        if gen == self._gen:
             self._set_status(msg, error=True)
 
     def _go_page(self, delta):
@@ -1988,17 +1992,23 @@ class MainWindow(QMainWindow):
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
             try:
                 hx, vy = int(pct[0]), int(pct[1])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
             else:
                 self.h_slider.setValue(hx)
                 self.v_slider.setValue(vy)
-        for p in job.get("photo_paths") or []:
+        paths = job.get("photo_paths")
+        for p in (paths if isinstance(paths, (list, tuple)) else []):
             self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
 
     def _last_out_dir(self):
         d = self.st.get_last_job().get("out_dir")
-        return d if d and Path(d).is_dir() else ""
+        if not isinstance(d, str):       # 坏配置（非字符串）不报错：与其余字段同口径降级
+            return ""
+        try:
+            return d if d and Path(d).is_dir() else ""
+        except (OSError, ValueError):    # 含空字节等非法路径，Path 会抛，一律当“无”处理
+            return ""
 
     def _start_dir(self):
         return self._last_out_dir() or str(Path.home())
@@ -2007,14 +2017,14 @@ class MainWindow(QMainWindow):
         self._debounce.stop()      # 关窗后 debounce 若还 fire 会另起线程，绕过收尾
         self.save_last_job()
         self._gen += 1             # 之后任何回投都算过期帧
-        self._retire_threads()     # 收干净当前与遗留线程（含 wait 超时留存的）
+        self._retire_threads(timeout=None)   # 收尾无上限等到底，不留随窗口析构即失效的 _stale
         super().closeEvent(event)
 ```
 
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_app_main_window.py -v`
-Expected: 11 passed（含 round-1 修复波新增的 export dpi/遮罩、坏 offset_pct 不卡启动、closeEvent 停 debounce 三条）
+Expected: 16 passed（round-1 修复波新增 3 条 + round-2 修复波新增 5 条：坏 photo_paths/out_dir、offset 溢出、代际过期帧、retire 留引用、closeEvent 无上限 wait）
 
 - [ ] **Step 5: 全量回归 + 手工看一扇窗口**
 
@@ -2573,6 +2583,23 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   与其余字段降级同口径。全局约束“异常一律收敛不外抛”正是被 I4 破坏、本轮修复。
   说明：I2 的代际/留引用是竞态防御，预览实测 ~11ms、测试造不出确定性的慢线程
   迟到时序，故不入变异表（同 T6 M4 已知冗余处理）。
+- **T7 round-2 复审的修复波（⑱）**：CodeReview round-2 实测复核后确认，逐条已修并
+  回写 Step 3 块、补 5 条测试、变异表扩到 16 点全杀：
+  （I5）round-1 的 I4 只堵了 offset_pct，同函数/同全局约束还有三条外抛路（均实测复现）：
+  坏 `photo_paths`（不可选代）抛在 `__init__`；`offset_pct=[Infinity,0]` 的 `int(inf)`
+  抛 `OverflowError`（except 只接 TypeError/ValueError）；坏 `out_dir`（非字符串）的 `Path` 抛
+  在 `save_last_job`/`_start_dir`。修法：photo_paths 加 isinstance 防御、except 补 OverflowError、
+  `_last_out_dir` 加 isinstance + try/except。
+  （I8）closeEvent 退休用默认 2000ms 超时会把未停线程留进 `_stale`，而 `_stale` 是实例
+  属性、随窗口析构即释放→那时丢引用同样会崩。修法：`_retire_threads(timeout)` 参数化，
+  关窗收尾传 `None` 无上限等到底（渲染有限、值得等）。
+  （I6）代际守卫与 keep.append 此前零承重：报告以“造不出竞态”为由未入变异表，但混淆了
+  “复现竞态”与“测守卫”——守卫是纯函数式调用，直接 `_on_preview(img, gen=self._gen-1)` 与
+  注 FakeThread 进 `_stale` 就能确定性钉住（不碰真线程、不孤儿它）。`gen` 改为必填位置参数
+  （M1，去掉 `gen=None` 可静默绕过的口子）。修后 T7 16 passed、全量 210 passed RC=0。
+  （M2）`_build_ui` 注释“3R 已不在预设里”与事实相反（3R 在 PAPER_PRESETS）→改为 findData 必命中。
+  变异表新增 I5a/I5b/I5c/I6a/I6b/I8 六点全杀（共 16）；_on_render_failed 的 gen 判断无测试能造
+  慢线程失败迟到时序，仍不入表（同 T6 M4）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         for s in list(specs.CELL_PRESETS) + list(specs.PAPER_PRESETS):
             self.cell_box.addItem(s.label, s.key)
         # 默认选 3R 而非下拉首项 ID1：spec/Step 5 手工核对都写“默认 A4/3R”，
-        # findData 找不到（3R 已不在预设里）时退回首项，不留 -1。
+        # 3R 在 PAPER_PRESETS 里、findData 必命中；max(0, …) 只是防 findData 返回 -1。
         self.cell_box.setCurrentIndex(max(0, self.cell_box.findData("3R")))
         panel.addRow("格子", self.cell_box)
 
@@ -220,27 +220,31 @@ class MainWindow(QMainWindow):
             lambda msg, g=gen: self._on_render_failed(msg, g))
         self._thread.start()
 
-    def _retire_threads(self):
+    def _retire_threads(self, timeout=2000):
         """quit 打不断正在 run 的渲染，wait 超时就不能丢引用——丢了引用，在跑的
-        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。"""
+        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。
+        timeout=None 是无上限等到底（关窗收尾用：渲染有限，值得等，且不留
+        _stale——它是实例属性，随窗口析构即释放，那时再丢引用同样会崩）。"""
         threads = self._stale + ([self._thread] if self._thread is not None else [])
         keep = []
         for th in threads:
             if th.isRunning():
                 th.quit()
-                if not th.wait(2000):
+                if timeout is None:
+                    th.wait()
+                elif not th.wait(timeout):
                     keep.append(th)
         self._stale = keep
 
-    def _on_preview(self, image, gen=None):
-        if gen is not None and gen != self._gen:
+    def _on_preview(self, image, gen):
+        if gen != self._gen:
             return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
         pm = view.to_pixmap(image)
         self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
                                         Qt.SmoothTransformation))
 
-    def _on_render_failed(self, msg, gen=None):
-        if gen is None or gen == self._gen:
+    def _on_render_failed(self, msg, gen):
+        if gen == self._gen:
             self._set_status(msg, error=True)
 
     def _go_page(self, delta):
@@ -353,17 +357,23 @@ class MainWindow(QMainWindow):
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
             try:
                 hx, vy = int(pct[0]), int(pct[1])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
             else:
                 self.h_slider.setValue(hx)
                 self.v_slider.setValue(vy)
-        for p in job.get("photo_paths") or []:
+        paths = job.get("photo_paths")
+        for p in (paths if isinstance(paths, (list, tuple)) else []):
             self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
 
     def _last_out_dir(self):
         d = self.st.get_last_job().get("out_dir")
-        return d if d and Path(d).is_dir() else ""
+        if not isinstance(d, str):       # 坏配置（非字符串）不报错：与其余字段同口径降级
+            return ""
+        try:
+            return d if d and Path(d).is_dir() else ""
+        except (OSError, ValueError):    # 含空字节等非法路径，Path 会抛，一律当“无”处理
+            return ""
 
     def _start_dir(self):
         return self._last_out_dir() or str(Path.home())
@@ -372,5 +382,5 @@ class MainWindow(QMainWindow):
         self._debounce.stop()      # 关窗后 debounce 若还 fire 会另起线程，绕过收尾
         self.save_last_job()
         self._gen += 1             # 之后任何回投都算过期帧
-        self._retire_threads()     # 收干净当前与遗留线程（含 wait 超时留存的）
+        self._retire_threads(timeout=None)   # 收尾无上限等到底，不留随窗口析构即失效的 _stale
         super().closeEvent(event)

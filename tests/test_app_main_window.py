@@ -7,6 +7,7 @@ pytest.importorskip("PIL", reason="需要 Pillow")
 pytest.importorskip("PySide6", reason="需要 Qt 绑定")
 
 from PySide6.QtCore import QElapsedTimer, QEventLoop  # noqa: E402
+from PySide6.QtGui import QPixmap  # noqa: E402
 
 from PIL import Image  # noqa: E402
 
@@ -124,9 +125,10 @@ def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(jobs, "render_all", spy)
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
+    w.dpi_box.setCurrentIndex(2)         # 改选 600：钉的是“跟随所选”而非硬编码默认 300
     w.export_to(str(tmp_path / "page.pdf"))
-    assert seen["show_mask"] is False          # 导出不带灰遮罩（全局约束）
-    assert seen["dpi"] == 300.0                 # 用下拉选中的 dpi，不是预览 96
+    assert seen["show_mask"] is False     # 导出不带灰遮罩（全局约束）
+    assert seen["dpi"] == 600.0           # 取的是下拉所选值，不是预览 96、也不是默认 300
 
 
 def test_too_big_cell_reports_instead_of_crashing(qapp, tmp_path):
@@ -180,7 +182,7 @@ def test_offset_sliders_reach_jobs(qapp, tmp_path):
 
 def test_page_navigation_clamps_at_edges(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path, n=5)          # 5 张亍 A4+3R 是 2 页
+    _fill(w, tmp_path, n=5)          # 5 张于 A4+3R 是 2 页
     assert w.job.page_count == 2
     w._go_page(1)
     assert w.page_index == 1
@@ -199,3 +201,83 @@ def test_close_event_stops_debounce(qapp, tmp_path):
     w.h_slider.setValue(10)          # 触发 debounce，还没到期
     w.close()
     assert not w._debounce.isActive()
+
+
+def test_bad_photo_paths_and_out_dir_do_not_block_startup(qapp, tmp_path):
+    """I5：与 offset_pct 同函数、同全局约束（异常一律收敛不外抛）——坏
+    photo_paths（不可迭代）不卡 __init__；坏 out_dir（非字符串）不卡写回。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R", "photo_paths": 5,
+                    "out_dir": 123})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))       # photo_paths=5 不应抛
+    assert w.photos == []
+    w.save_last_job()                          # 坏 out_dir 走 _last_out_dir 降级，不应抛
+
+
+def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
+    """I5：store.save 默认 allow_nan，offset_pct=[Infinity, 0] 能落盘；
+    int(inf) 抛 OverflowError，必须在 (TypeError, ValueError, OverflowError) 里兼到。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
+                    "offset_pct": [float("inf"), 0]})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))       # 不应抛
+    assert w.h_slider.value() == 0 and w.v_slider.value() == 0
+
+
+def test_stale_generation_preview_frame_is_dropped(qapp, tmp_path):
+    """I6：代际守卫是纯函数式调用，不需造竞态就能钉。删 `_on_preview` 的
+    `if gen != self._gen: return` 则过期帧也会落 pixmap，本用例变红。"""
+    w = MainWindow(st=_store(tmp_path))
+    img = Image.new("RGB", (20, 20), (1, 2, 3))
+    w.preview.setPixmap(QPixmap())            # 空哨兵
+    w._on_preview(img, w._gen - 1)            # 过期帧：不得上屏
+    assert w.preview.pixmap().isNull()
+    w._on_preview(img, w._gen)                # 当代帧：应落 pixmap
+    assert not w.preview.pixmap().isNull()
+
+
+class _FakeThread:
+    """不 start 的假线程，专测 _retire_threads 的引用留存/释放与 wait 传参。"""
+    def __init__(self, stops):
+        self._running, self._stops, self.wait_args = True, stops, []
+
+    def isRunning(self):
+        return self._running
+
+    def quit(self):
+        if self._stops:
+            self._running = False
+
+    def wait(self, timeout=None):
+        self.wait_args.append(timeout)
+        return not self._running
+
+
+def test_retire_threads_keeps_then_clears_stale_reference(qapp, tmp_path):
+    """I6：wait 超时的线程必须留在 _stale（丢引用→在跑线程被回收→硬崩）；
+    线程自己跑完后下轮退休应被踢出，防 _stale 无界增长。假线程注进 _stale，
+    不动 w._thread（那是 __init__ 起的真线程，_settle 已泵停，换引用会孤儿它）。"""
+    w = MainWindow(st=_store(tmp_path))
+    _settle(w, qapp)                             # 泵停 __init__ 的真线程，保持被 w._thread 引用
+    stuck = _FakeThread(stops=False)
+    w._stale = [stuck]
+    w._retire_threads()                        # 默认 2000ms 超时
+    assert w._stale == [stuck]                 # 删 keep.append → 此处变红
+    assert stuck.wait_args == [2000]
+    stuck._running = False                     # 模拟那条线程随后自己跑完
+    w._retire_threads()
+    assert w._stale == []                       # 停干净后不留
+
+
+def test_close_event_retires_threads_without_timeout(qapp, tmp_path):
+    """I8：closeEvent 收尾必须走无上限 wait(None)，不因 2000ms 超时把线程
+    留进随窗口析构即失效的 _stale（那时丢引用同样会崩）。经真 close 触发。"""
+    w = MainWindow(st=_store(tmp_path))
+    _settle(w, qapp)                             # 泵停 __init__ 的真线程，不动 w._thread
+    th = _FakeThread(stops=True)
+    w._stale = [th]
+    w.close()                                    # 触发 closeEvent → _retire_threads(timeout=None)
+    assert th.wait_args == [None]                # closeEvent 改用默认超时 → 此处变红
+    assert w._stale == []

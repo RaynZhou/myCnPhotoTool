@@ -203,12 +203,14 @@ if cell.rotated:
   `%APPDATA%\PhotoPrint\error.log`（目录由 `store.default_path()` 的父目录推导，不另起一套路
   径规则），并在状态栏提示"已记录错误日志"。
 - 打包参数：`--onefile --windowed --name PhotoPrint`。`PySide6` 的 `platforms/qwindows.dll`
-  由 PyInstaller 官方 hook 自动收集；`img2pdf`、`Pillow` 需实测确认无遗漏。
+  由 PyInstaller 官方 hook 自动收集；`img2pdf`、`Pillow` 已实测确认收全（T10 grep
+  `build\PhotoPrint\Analysis-00.toc` 命中 `img2pdf.py` 与 `('PIL', …)`/`('PIL.Image', …)` 等 79 条 PIL 子模块）。
 - 新建 `requirements-build.txt` 写入 `pyinstaller`；`requirements.txt` 不动。
 - 新建 `build_exe.ps1`（项目根）：建 venv → 装两份 requirements → 跑 PyInstaller → 打印产物
   路径与体积。
-- 预期与已知代价：单文件约 100–180MB，冷启动 3–10 秒（解包临时目录）；无控制台，崩溃只留日
-  志。
+- 预期与已知代价：早期按全量 PySide6 估 100–180MB；实测 63.3MB——本应用只 import
+  QtWidgets/QtGui/QtCore/QtNetwork、不带 WebEngine，PyInstaller 按 import 收集故显著更小。冷启动
+  3–10 秒（解包临时目录）；无控制台，崩溃只留日志。
 - 验证脚本 `_lab/check_exe.ps1`：构建 → 启动 exe → 断言进程存活且窗口标题正确 → 打印体积与启
   动耗时。属需手工比对类，按项目约定放 `_lab/`，输出进 `_lab/out/`。
 

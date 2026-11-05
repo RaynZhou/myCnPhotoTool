@@ -2516,10 +2516,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PIL import Image
+# 本目录脚本以 `python _lab/xxx.py` 直跑时 sys.path[0] 是 _lab/、非仓库根，
+# 需显式把根加进来（与 m1m2_check.py 同法），否则 `import photoprint` 当场失败。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from photoprint import jobs
-from photoprint.core import store
+from PIL import Image  # noqa: E402
+
+from photoprint import jobs  # noqa: E402
+from photoprint.core import store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "_lab" / "out"

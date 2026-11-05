@@ -8,3 +8,8 @@ __pycache__/
 .pytest_cache/
 # 本地手工验证脚本的输出
 _lab/out/
+# PyInstaller 产物与构建用虚环境
+build/
+dist/
+*.spec
+.venv-build/

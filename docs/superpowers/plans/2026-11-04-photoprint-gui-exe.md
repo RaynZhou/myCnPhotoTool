@@ -2728,6 +2728,18 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   盖不到，属测试侧属性）。采纳一行断言守卫：`if bad_path is None: assert (tmp_path/…/error.log).exists()`，
   既钉住隔离不被动回退、又坐实 path=None 分支真走到了 tmp_path。实测删 patch 后该用例转 RC=1。
   产品代码 crashlog.py 本轮未改。
+- **T9 打包实现期的环境适配（㉓）**：两个 `.ps1` 脚本含中文注释与全角标点（：（）），
+  实跑发现 Windows PowerShell 5.1 读**无 BOM 的 UTF-8** 会按系统 GBK 码页解码、全角字符
+  打断字符串字面量解析（首跑 `build_exe.ps1` 在 line34 `Write-Host "OK 产物：…"` 直接报
+  `字符串缺少终止符` ParserError，根本没进到 venv）。修法：两个 `.ps1` 存为 **UTF-8 with BOM**
+  （内容逐字不变、只换编码），5.1 才正确按 UTF-8 读。重建后实跑 `build_exe.ps1 -Clean` 成功产出
+  `dist\PhotoPrint.exe`（63.3 MB，Analysis-00.toc 已收 `qwindows.dll` 平台插件与 Qt6Core/Gui/Widgets）。
+  体积低于 Step 4 预估的 100–180MB 但高于“<60MB 插件未收全”地板线：因应用只 import
+  QtWidgets/QtGui/QtCore/QtNetwork，PyInstaller 按 import 收集、不带 WebEngine。`check_exe.ps1` 在无交互
+  window station 的会话下因 `MainWindowTitle` 恒空而 FAIL；用存活性探针（进 12s 不退、子进程在跑、
+  不写 error.log）证实 exe 能正常启动——属人工验收环境限制非打包缺陷，留真机补一次带桌面的 OK。
+  另：外层 `2>&1 | Tee-Object` 管道的 ExitCode=1 是 pip/PyInstaller 把 INFO 写 stderr 触发本环境
+  `$ErrorActionPreference=Stop` 的假报错，脚本本体跑到末行 Write-Host 未抛。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

@@ -1,7 +1,9 @@
 import pytest
 
 from PySide6.QtCore import QElapsedTimer, QEventLoop
+from PySide6.QtWidgets import QApplication
 
+from photoprint import jobs
 from photoprint.app.main_window import MainWindow
 from photoprint.core import store
 from photoprint.win import gdi_print
@@ -73,18 +75,30 @@ def test_enum_failure_leaves_combo_empty_not_crash(qapp, tmp_path):
 
 def test_on_print_sends_all_pages_and_ok_status(qapp, tmp_path, monkeypatch):
     seen = {}
+    real_render = jobs.render_all
+
+    def spy_render(job, dpi, show_mask=None):
+        seen["show_mask"] = show_mask
+        seen["render_dpi"] = dpi
+        return real_render(job, dpi, show_mask=show_mask)
 
     def fake_print_pages(api, printer, images, sheet, dpi, *, prompt=True):
         seen["n"] = len(images)
         seen["printer"] = printer
+        seen["dpi"] = dpi
         seen["prompt"] = prompt
         return {"ok": True, "pages": len(images), "message": ""}
 
+    monkeypatch.setattr(jobs, "render_all", spy_render)
     monkeypatch.setattr(gdi_print, "print_pages", fake_print_pages)
     w = _win(tmp_path, photos=5)      # 5 张 3R 上 A4 会多页
+    w.dpi_box.setCurrentIndex(2)      # 改选 600：钉 dpi 跟随所选而非默认
     w._on_print()
     assert seen["prompt"] is True
-    assert seen["n"] == w.job.page_count            # I-2：全部页
+    assert seen["show_mask"] is False          # I-2：遮罩绝不进相纸
+    assert seen["render_dpi"] == 600.0 and seen["dpi"] == 600.0   # dpi 同源透传
+    assert seen["printer"] == "Canon G3800"    # 打向选中的那台，不写死
+    assert seen["n"] == w.job.page_count       # I-2：全部页
     assert seen["n"] >= 1
     assert "已发送" in w.statusBar().currentMessage()
 
@@ -94,7 +108,9 @@ def test_on_print_failure_red_status(qapp, tmp_path, monkeypatch):
                         lambda *a, **k: {"ok": False, "pages": 0, "message": "缺纸"})
     w = _win(tmp_path)
     w._on_print()
-    assert "缺纸" in w.statusBar().currentMessage()
+    assert w.statusBar().currentMessage() == "未打印：缺纸"
+    assert "color:#b00000" in w.statusBar().styleSheet()   # 钉住红色 error 态
+    assert QApplication.overrideCursor() is None           # 游标已配平释放
 
 
 def test_on_print_no_printer_selected_does_not_call(qapp, monkeypatch, tmp_path):
@@ -115,3 +131,4 @@ def test_on_print_exception_contained_no_raise(qapp, tmp_path, monkeypatch):
     w = _win(tmp_path)
     w._on_print()                    # 不得抛（窗口化 exe 静默闪退防线）
     assert "driver exploded" in w.statusBar().currentMessage()
+    assert QApplication.overrideCursor() is None   # 异常路径也要释放游标

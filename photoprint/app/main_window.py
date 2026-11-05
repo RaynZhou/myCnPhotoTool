@@ -401,7 +401,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._set_status(f"排版失败：{exc}", error=True)
             return
-        if self.job is None or not any(ph is not None for ph in self.photos):
+        if self.job is None:
+            return                    # _rebuild_job 已把准确原因写进状态栏，不覆盖
+        if not any(ph is not None for ph in self.photos):
             self._set_status("没有可打印的照片", error=True)
             return
         printer = self.printer_box.currentText()

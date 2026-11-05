@@ -2409,13 +2409,26 @@ $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
 # onefile 下真实窗口属子进程（引导父进程无窗口）→ 必须按映像名而非父 PID 取标题。
 # 但 PhotoPrint 就是产品 exe 名，绝不能按名全机强杀（会打掉用户自己开着的实例、丢 last_job）。
-# 归属边界：先快照已有 PhotoPrint PID，匹配与清理只认"本轮新增"的进程，别处/既存实例一律不碰。
+# 归属边界用"排除法"：只排除快照时已存在的 PhotoPrint；快照之后（含整个轮询窗口）新起的
+# 外部实例仍会被当成本轮 own，匹配与清理都可能误伤——dev-only 手工脚本可接受的窄 TOCTOU。
 $before = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+if ($before.Count -gt 0) {
+    Write-Host "注：检测到 $($before.Count) 个既存 PhotoPrint 实例，本轮不碰也不回收（历史孤儿需手工清）"
+}
 Start-Process -FilePath $exe | Out-Null
 
 function Get-OwnPhotoPrint {
     Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
         Where-Object { $before -notcontains $_.Id }
+}
+
+# 先礼貌关窗（走 closeEvent 落 last_job），仍没退的再强杀——把"误伤外部实例"的后果从
+# 强杀丢数据降为正常关窗。只对"本轮 own"（含 TOCTOU 窗口内误纳者）生效。
+function Stop-OwnPhotoPrint {
+    foreach ($proc in @(Get-OwnPhotoPrint)) { [void]$proc.CloseMainWindow() }
+    Start-Sleep -Seconds 2
+    @(Get-OwnPhotoPrint) | Where-Object { -not $_.HasExited } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 $found = $null
@@ -2434,11 +2447,11 @@ if ($null -eq $found) {
     $state = if ($alive.Count -gt 0) { "本轮进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
              else { "本轮进程已退出（崩溃或未能启动）" }
     Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）：$state"
-    $alive | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-OwnPhotoPrint
     exit 1
 }
 Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s，PID $($found.Id)）"
-Get-OwnPhotoPrint | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-OwnPhotoPrint
 exit 0
 ```
 
@@ -2786,12 +2799,23 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   带桌面的真机 OK 仍归 Task 10/终审验证项。本轮采纳 round-2 评审两条新 Important：
   ① **I-2（round-1 把窄杀改成了宽杀）**：`check_exe.ps1` 改为“先快照已有 PhotoPrint PID、匹配与清理只认本轮新增”，
   不再按名全机 `Stop-Process`（`PhotoPrint` 即产品 exe 名，宽杀会掉用户自己实例、丢 `last_job` 落盘）——实测
-  预开一个“外部”实例后跑 check_exe，外部实例全部存活、仅 check_exe 自己那批被清；归属边界真立住。补回
+  预开一个“外部”实例后跑 check_exe，外部实例全部存活、仅 check_exe 自己那批被清（但该探针只覆盖了
+  “既存于快照”这一支，快照后新起者见 ㉖ TOCTOU）。补回
   “本轮进程全没即早退”（Minor-4，真崩不再白等 30s）。② **I-1（`$PSScriptRoot`↔CWD 两基准）**：`build_exe.ps1`
   给 PyInstaller 显式传 `--distpath/--workpath/--specpath` 锈定到 $root，免得从别处按绝对路径调用时产物落到 CWD
   dist 、而产物检查与 `-Clean` 锚 $root 导致错报。另采 M-B2 新加了 `tests/test_build_scripts_encoding.py`
   （.ps1 BOM 字节守卫，剥 BOM→RC=1）；已把它补进 Task 9 Files/Step 7 git add。回写 Step 3/5 块与 Step 6 预期（含 PID）。
   回归 228 passed（系统解释器 RC=0）；注：**勿用 `.venv-build` 解释器跑回归**（Qt 退出 fastfail 会 RC≠0 但用例全过）。
+- **T9 round-3 修复波（㉖）**：round-3 复审确认 round-2 两条 Important 已闭、(A) Spec Approved，但新提 I-3：
+  归属快照用“排除法”，只排除快照时已存在的实例；快照后至清理前（命中约 5–6s、走 FAIL 则满 30s）新起的
+  外部 PhotoPrint 仍会被当成本轮 own → 匹配（假阳性 OK）与清理（误伤）两向都可能。评审给的定级意见是“收紧
+  措词+登台账即可降为 Minor”（不改归属算法）。已执行：① L12 注释写实 TOCTOU 窄窗；② 清理改“先
+  `CloseMainWindow()` 礼貌关窗（走 closeEvent 落 last_job）、2s 后仍未退才强杀”→ 最坏情况从“强杀丢数据”降为
+  “被礼貌关窗”；③ 开头打印既存实例数并明写“历史孤儿不自动回收、需手工清”（M-B2 孤儿累积）。回写 Step 5 逐字
+  块。登台账遗留交 Task 10/终审：A-1——spec §9 要求“实测确认 img2pdf/Pillow 无遗漏 + exe 真能出 PDF”尚未坐实
+  （现仅 qwindows/Qt6* 有收集凭证），且 63.3MB 低于 spec §9 原 100–180MB、Step 4 就地订正未回同步 spec；
+  这两条（加 exe 导出 PDF 实测 + spec §9 区间/证据二选一同步）归 Task 10。M-B1（`.gitignore` `*.spec` 全域偏宽）：
+  保留计划逐字选择，若后续需入库手写 spec 再收窄为 `/PhotoPrint.spec`。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

@@ -9,13 +9,26 @@ $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
 # onefile 下真实窗口属子进程（引导父进程无窗口）→ 必须按映像名而非父 PID 取标题。
 # 但 PhotoPrint 就是产品 exe 名，绝不能按名全机强杀（会打掉用户自己开着的实例、丢 last_job）。
-# 归属边界：先快照已有 PhotoPrint PID，匹配与清理只认"本轮新增"的进程，别处/既存实例一律不碰。
+# 归属边界用"排除法"：只排除快照时已存在的 PhotoPrint；快照之后（含整个轮询窗口）新起的
+# 外部实例仍会被当成本轮 own，匹配与清理都可能误伤——dev-only 手工脚本可接受的窄 TOCTOU。
 $before = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+if ($before.Count -gt 0) {
+    Write-Host "注：检测到 $($before.Count) 个既存 PhotoPrint 实例，本轮不碰也不回收（历史孤儿需手工清）"
+}
 Start-Process -FilePath $exe | Out-Null
 
 function Get-OwnPhotoPrint {
     Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
         Where-Object { $before -notcontains $_.Id }
+}
+
+# 先礼貌关窗（走 closeEvent 落 last_job），仍没退的再强杀——把"误伤外部实例"的后果从
+# 强杀丢数据降为正常关窗。只对"本轮 own"（含 TOCTOU 窗口内误纳者）生效。
+function Stop-OwnPhotoPrint {
+    foreach ($proc in @(Get-OwnPhotoPrint)) { [void]$proc.CloseMainWindow() }
+    Start-Sleep -Seconds 2
+    @(Get-OwnPhotoPrint) | Where-Object { -not $_.HasExited } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
 $found = $null
@@ -34,9 +47,9 @@ if ($null -eq $found) {
     $state = if ($alive.Count -gt 0) { "本轮进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
              else { "本轮进程已退出（崩溃或未能启动）" }
     Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）：$state"
-    $alive | Stop-Process -Force -ErrorAction SilentlyContinue
+    Stop-OwnPhotoPrint
     exit 1
 }
 Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s，PID $($found.Id)）"
-Get-OwnPhotoPrint | Stop-Process -Force -ErrorAction SilentlyContinue
+Stop-OwnPhotoPrint
 exit 0

@@ -375,6 +375,7 @@ def test_rotate_without_selection_prompts_and_keeps_state(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
     w.photo_list.clearSelection()
+    assert w.photo_list.currentRow() == -1      # 前提显式钉住，不依赖 addItem 不置当前行的细节（T3 评审 M-1）
     before = list(w.photo_rotations)
     _rotate_btn(w).click()
     assert w.photo_rotations == before == [0, 0, 0, 0]
@@ -386,6 +387,7 @@ def test_rotate_cycles_90_degrees_and_marks_list(qapp, tmp_path):
     _fill(w, tmp_path)
     w.photo_list.setCurrentRow(1)
     _rotate_btn(w).click()
+    assert w._debounce.isActive()                # 点了就得起防抖，不靠手工 _refresh 兜（T3 评审 I-1）
     assert w.photo_rotations == [0, 90, 0, 0]
     assert "↻90°" in w.photo_list.item(1).text()
     assert "↻" not in w.photo_list.item(0).text()   # 0° 行逐字保持原文案
@@ -403,7 +405,7 @@ def test_rotate_then_refresh_changes_preview_pixels(qapp, tmp_path):
 
     不用 _fill 的纯色图：纯色（含仅角上小标记、标记被裁切/缩采样抹平的情形）
     转 90° 画面可以逐像素不变，"!=" 断言无牙（探针实测）——用左右双色图，
-    FIT 居中摆放后采样区域必然跨到两色。"""
+    居中取景（默认档与 FIT/FILL 同为中心取景）后采样区域必然跨到两色。"""
     twotone = tmp_path / "twotone.jpg"
     img = Image.new("RGB", (400, 200), (170, 30, 40))
     img.paste(Image.new("RGB", (200, 200), (30, 170, 40)), (0, 0))

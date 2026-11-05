@@ -375,7 +375,8 @@ class MainWindow(QMainWindow):
             "gap_mm": p["gap_mm"], "bleed_mm": p["bleed_mm"], "dpi": p["dpi"],
             "offset_pct": [self.h_slider.value(), self.v_slider.value()],
             "out_dir": out_dir or self._last_out_dir(),
-            "photo_paths": list(self.photo_paths)})
+            "photo_paths": list(self.photo_paths),
+            "rotations": list(self.photo_rotations)})
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
 
@@ -409,6 +410,27 @@ class MainWindow(QMainWindow):
         paths = job.get("photo_paths")
         for p in (paths if isinstance(paths, (list, tuple)) else []):
             self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞（append_photo 内部已收敛）
+        self._restore_rotations(job)
+
+    def _restore_rotations(self, job):
+        """rotations 与 photo_paths 按下标对齐：任一元素不可转 int 就整体不
+        恢复（全 0）——逐项降级会把"第 3 张转了"错位成"第 4 张转了"，比全丢
+        更糟。长度不符按规格第 5 节截断/补 0。角度原样存，归一只在 core 做。"""
+        rots = job.get("rotations")
+        n = len(self.photo_rotations)
+        if rots is None or not isinstance(rots, (list, tuple)):
+            return
+        try:
+            vals = [int(v) for v in rots]
+        except (TypeError, ValueError, OverflowError):
+            return
+        vals = vals[:n]
+        self.photo_rotations = vals + [0] * (n - len(vals))
+        for row in range(n):
+            img = self.photos[row] if row < len(self.photos) else None
+            name = Path(self.photo_paths[row]).name
+            self.photo_list.item(row).setText(
+                self._photo_item_text(name, img, self.photo_rotations[row]))
 
     def _select_by_data(self, box, value):
         idx = box.findData(value)

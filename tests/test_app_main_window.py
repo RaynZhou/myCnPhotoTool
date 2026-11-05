@@ -439,3 +439,51 @@ def test_failed_photo_still_tracks_rotation(qapp, tmp_path):
     _rotate_btn(w).click()
     assert w.photo_rotations == [90]
     assert "↻90°" in w.photo_list.item(0).text()
+
+
+def test_rotations_roundtrip_through_two_windows(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.photo_list.setCurrentRow(1)
+    _rotate_btn(w).click()
+    w.save_last_job(out_dir=str(tmp_path))
+    again = MainWindow(st=_store(tmp_path))
+    assert again.photo_rotations == [0, 90, 0, 0]        # 角度与照片下标对齐
+    assert "↻90°" in again.photo_list.item(1).text()
+
+
+@pytest.mark.parametrize("bad", ["[90]", [90, "x"], [90, None]])
+def test_bad_rotations_config_degrades_to_all_zero(qapp, tmp_path, bad):
+    """形状坏 / 含不可转 int 的条目：整体不恢复（全 0），其余字段照常——
+    逐项降级会让角度错位到别的照片上，比全不恢复更糟（规格第 5 节）。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "ID1",
+                    "photo_paths": _make_photos(tmp_path, 2),
+                    "rotations": bad})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))                   # 不应抛
+    assert w.photo_rotations == [0, 0]
+
+
+def test_rotations_length_mismatch_truncates_or_pads(qapp, tmp_path):
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "ID1",
+                    "photo_paths": _make_photos(tmp_path, 2),
+                    "rotations": [90, 180, 270, 45]})     # 超长：截到 2
+    s.save()
+    w = MainWindow(st=_store(tmp_path))
+    assert w.photo_rotations == [90, 180]
+    # 45 不在 {0,90,180,270}，core 归一按 0 渲染；界面原样保留，不在此层换算
+
+
+def test_rotations_out_of_range_still_renderable(qapp, tmp_path):
+    """-90 存得下、渲染等价于 270：归一只在 core 做，界面不换算。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "ID1",
+                    "photo_paths": _make_photos(tmp_path, 1),
+                    "rotations": [-90]})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))
+    assert w.photo_rotations == [-90]
+    w._refresh()
+    assert w.job is not None                              # 渲染路径不被坏角度打死

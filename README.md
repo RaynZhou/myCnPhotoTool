@@ -19,7 +19,7 @@ pip install -r requirements.txt
 python -m photoprint.app          # 选照片 → 选纸张/格子 → 预览 → 导出 PDF
 ### 单文件 exe
 .\build_exe.ps1                   # 产出 dist\PhotoPrint.exe（需联网装 pyinstaller）
-.\_lab\check_exe.ps1              # 启动验收
+.\_lab\check_exe.ps1              # 启动验收（需交互桌面会话，无桌面必 FAIL）
 
 ### 命令行
 python -m photoprint.cli --photos 1.jpg 2.jpg 3.jpg 4.jpg --sheet A4 --cell 3R --out _lab/out/page.png
@@ -27,6 +27,7 @@ python -m photoprint.cli --print 需要 --printer；PowerShell 下 `--photos *.j
 请逐个列出或用 `(Get-ChildItem *.jpg).FullName`
 python -m pytest -q            # 全部几何断言
 python _lab/m1m2_check.py      # 本机可验证的端到端证据
+python _lab/check_gui_cli_parity.py  # GUI/CLI 同图与导出无遮罩（需仓库根在 sys.path，脚本自带 bootstrap）
 
 ## 驱动里建立 3R 表单（一次性，之后直打更稳）
 1. 控制面板 → 设备和打印机 → Canon G3800 → 打印首选项 → 页设置

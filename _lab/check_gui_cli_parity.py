@@ -1,7 +1,12 @@
 """GUI 与 CLI 必须出同一张图：共用 jobs 编排的机器化验证。
 
-同时钉住导出遮罩口径：两边产物的四边都不得是 (210, 210, 210)。
+同时钉住导出遮罩口径：两边产物的四边都得是纯白 (255, 255, 255)。
 测试图本脚本自造，不依赖任何已存在的目录。
+
+边界说明：GUI 侧是对界面那条编排（build_job → render(show_mask=False)）的**复述**，参数取
+与 main_window 同源的默认常量（非脚本自造字面量）；真实界面控件默认值、导出 dpi 与
+show_mask 另由 tests/test_app_main_window.py 的 render_all spy 钉住。exe 二进制级与 CLI 的
+**PDF** 像素一致需带交互桌面真机，不在本脚本范围（见 spec §11.5b / 终审）。
 """
 from __future__ import annotations
 
@@ -17,11 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
-from photoprint.core import store  # noqa: E402
+from photoprint.core import modes, store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "_lab" / "out"
-DPI = 300.0
+DPI = jobs.DEFAULT_OUTPUT_DPI
+CLEAN_RGB = (255, 255, 255)   # 导出（show_mask=False）时四边应是纯白纸色
+MASK_RGB = (210, 210, 210)    # 预览遮罩（show_mask=True）合成到纸边的灰遮罩色（见 core/render.py）
 
 
 def make_photos(tmp: Path):
@@ -33,13 +40,12 @@ def make_photos(tmp: Path):
     return paths
 
 
-def gui_page(paths):
-    """界面走的那条路：build_job + 单页 render。"""
+def build_gui_job(paths):
+    """界面走的那条编排：build_job（默认常量与 main_window 同源）+ 单页 render。"""
     st = store.Store()
     st.load()
     photos = [jobs.load_photo(p) for p in paths]
-    job = jobs.build_job(st, photos, "A4", "3R", bleed_mm=3.0)
-    return job.render(0, DPI, show_mask=False)
+    return jobs.build_job(st, photos, "A4", "3R", bleed_mm=modes.DEFAULT_BLEED_MM)
 
 
 def cli_page(paths, tmp: Path):
@@ -51,10 +57,11 @@ def cli_page(paths, tmp: Path):
     return Image.open(out)
 
 
-def edge_is_clean(img) -> bool:
+def edge_pixels(img):
+    """产物四边中点各取一点：左、上、右、下。"""
     w, h = img.size
-    return (img.getpixel((3, h // 2)) != (210, 210, 210)
-            and img.getpixel((w // 2, 3)) != (210, 210, 210))
+    return [img.getpixel(xy) for xy in
+            [(3, h // 2), (w // 2, 3), (w - 4, h // 2), (w // 2, h - 4)]]
 
 
 def main() -> int:
@@ -62,14 +69,22 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         paths = make_photos(tmp)
-        a, b = gui_page(paths), cli_page(paths, tmp)
+        job = build_gui_job(paths)
+        a = job.render(0, DPI, show_mask=False)
+        b = cli_page(paths, tmp)
         same_size = a.size == b.size
-        same_pixels = same_size and list(a.getdata()) == list(b.getdata())
-        clean = edge_is_clean(a) and edge_is_clean(b)
+        same_pixels = same_size and a.mode == b.mode and a.tobytes() == b.tobytes()
+        # 正对照：同图开遮罩再渲一次，必须先钉四边确为灰遮罩色；否则下面的
+        # "导出四边纯白" 可能因探针落到带外 / 整体渲染坏掉而恒真空转。
+        control_ok = all(px == MASK_RGB for px in edge_pixels(
+            job.render(0, DPI, show_mask=True)))
+        clean = (all(px == CLEAN_RGB for px in edge_pixels(a))
+                 and all(px == CLEAN_RGB for px in edge_pixels(b)))
         a.save(OUT / "parity_gui.png")
         b.save(OUT / "parity_cli.png")
-    print(f"同尺寸 {same_size} · 同像素 {same_pixels} · 四边无遮罩 {clean}")
-    return 0 if (same_size and same_pixels and clean) else 1
+    # 上一行 cli_page 已让子进程按逐字冻结文案自行打印过，本行是本脚本结论。
+    print(f"同尺寸 {same_size} · 同像素 {same_pixels} · 遮罩正对照 {control_ok} · 四边导出纯白 {clean}")
+    return 0 if (same_size and same_pixels and control_ok and clean) else 1
 
 
 if __name__ == "__main__":

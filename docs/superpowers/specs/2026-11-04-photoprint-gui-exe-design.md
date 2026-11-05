@@ -203,16 +203,21 @@ if cell.rotated:
   `%APPDATA%\PhotoPrint\error.log`（目录由 `store.default_path()` 的父目录推导，不另起一套路
   径规则），并在状态栏提示"已记录错误日志"。
 - 打包参数：`--onefile --windowed --name PhotoPrint`。`PySide6` 的 `platforms/qwindows.dll`
-  由 PyInstaller 官方 hook 自动收集；`img2pdf`、`Pillow` 已实测确认收全（T10 grep
-  `build\PhotoPrint\Analysis-00.toc` 命中 `img2pdf.py` 与 `('PIL', …)`/`('PIL.Image', …)` 等 79 条 PIL 子模块）。
+  由 PyInstaller 官方 hook 自动收集；`img2pdf`、`Pillow` 收集面已实测坐全（T10 复核：
+  `Select-String build\PhotoPrint\Analysis-00.toc -Pattern "\('img2pdf'"` 命中顶层 `img2pdf.py`，
+  `-Pattern "\('PIL"` 得 86 条 PIL 条目；凭证在 gitignore 的 `build/` 里，复核需先重跑 `build_exe.ps1`）。
+  **注：这只证明模块被收进包，不证明冻结进程内 `import img2pdf`/落盘成功——exe 进程实际出 PDF
+  （§11.4/§11.5）仍待带交互桌面的终审执行，本设计不代为判定。**
 - 新建 `requirements-build.txt` 写入 `pyinstaller`；`requirements.txt` 不动。
 - 新建 `build_exe.ps1`（项目根）：建 venv → 装两份 requirements → 跑 PyInstaller → 打印产物
   路径与体积。
 - 预期与已知代价：早期按全量 PySide6 估 100–180MB；实测 63.3MB——本应用只 import
-  QtWidgets/QtGui/QtCore/QtNetwork、不带 WebEngine，PyInstaller 按 import 收集故显著更小。冷启动
+  QtWidgets/QtGui/QtCore（`QtNetwork` 代码里没 import，是 PySide6 hook 连带收集）、不带 WebEngine，
+  PyInstaller 按 import 收集故显著更小。冷启动
   3–10 秒（解包临时目录）；无控制台，崩溃只留日志。
-- 验证脚本 `_lab/check_exe.ps1`：构建 → 启动 exe → 断言进程存活且窗口标题正确 → 打印体积与启
-  动耗时。属需手工比对类，按项目约定放 `_lab/`，输出进 `_lab/out/`。
+- 验证脚本 `_lab/check_exe.ps1`：**不构建**（先跑 `build_exe.ps1`）→ 启动 exe → 按映像名轮询子进程
+  窗口标题正确 → 打印体积与启动耗时。属需手工比对类，按项目约定放 `_lab/`，输出进 `_lab/out/`。
+  窗口标题枚举需交互式桌面会话，headless 会话必 FAIL（脚本自己会区分“崩/退”与“无窗口”）。
 
 ## 10. 测试方案
 
@@ -236,9 +241,15 @@ if cell.rotated:
 1. `python -m pytest tests/ -q` 全绿（145 + 新增）。
 2. `python _lab/m1m2_check.py` 仍 12 条全 OK、exit 0。
 3. `python -m photoprint.cli ... --pdf` 产物四边为纯白（无 210 灰边），`--mask` 时才带遮罩。
+   当前由 `_lab/check_gui_cli_parity.py` 的 `--out` PNG 四边探针 + 遮罩正对照覆盖；`--pdf` 四边
+   待带桌面终审比对。
 4. `build_exe.ps1` 产出的 `PhotoPrint.exe` 双击可开、能选图、能看预览、能出 PDF；崩溃时
-   `error.log` 有 traceback。
-5. 同一组照片与同一参数下，exe 导出的 PDF 与 CLI 导出的 PDF 页面像素一致（抽样比对首页）。
+   `error.log` 有 traceback。（需带交互桌面真机执行，归终审。）
+5. 同一组照片与同一参数下，GUI 与 CLI 出同一张图：
+   - 5a. GUI 编排（`build_job`+`render`，默认常量与 `main_window` 同源）与 CLI 子进程同参数同像素、
+     四边纯白 —— `_lab/check_gui_cli_parity.py`（PNG，本 Task 10 已 ✅）。
+   - 5b. **exe** 二进制导出的 PDF 与 CLI 导出的 PDF 页面像素一致（抽样比对首页）—— 需带交互桌面
+     真机，归终审（☐）。
 
 ## 12. 遗留与后续
 

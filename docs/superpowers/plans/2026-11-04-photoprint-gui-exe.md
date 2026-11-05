@@ -2506,8 +2506,13 @@ Expected：
 ```python
 """GUI 与 CLI 必须出同一张图：共用 jobs 编排的机器化验证。
 
-同时钉住导出遮罩口径：两边产物的四边都不得是 (210, 210, 210)。
+同时钉住导出遮罩口径：两边产物的四边都得是纯白 (255, 255, 255)。
 测试图本脚本自造，不依赖任何已存在的目录。
+
+边界说明：GUI 侧是对界面那条编排（build_job → render(show_mask=False)）的**复述**，参数取
+与 main_window 同源的默认常量（非脚本自造字面量）；真实界面控件默认值、导出 dpi 与
+show_mask 另由 tests/test_app_main_window.py 的 render_all spy 钉住。exe 二进制级与 CLI 的
+**PDF** 像素一致需带交互桌面真机，不在本脚本范围（见 spec §11.5b / 终审）。
 """
 from __future__ import annotations
 
@@ -2523,11 +2528,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
-from photoprint.core import store  # noqa: E402
+from photoprint.core import modes, store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "_lab" / "out"
-DPI = 300.0
+DPI = jobs.DEFAULT_OUTPUT_DPI
+CLEAN_RGB = (255, 255, 255)   # 导出（show_mask=False）时四边应是纯白纸色
+MASK_RGB = (210, 210, 210)    # 预览遮罩（show_mask=True）合成到纸边的灰遮罩色（见 core/render.py）
 
 
 def make_photos(tmp: Path):
@@ -2539,13 +2546,12 @@ def make_photos(tmp: Path):
     return paths
 
 
-def gui_page(paths):
-    """界面走的那条路：build_job + 单页 render。"""
+def build_gui_job(paths):
+    """界面走的那条编排：build_job（默认常量与 main_window 同源）+ 单页 render。"""
     st = store.Store()
     st.load()
     photos = [jobs.load_photo(p) for p in paths]
-    job = jobs.build_job(st, photos, "A4", "3R", bleed_mm=3.0)
-    return job.render(0, DPI, show_mask=False)
+    return jobs.build_job(st, photos, "A4", "3R", bleed_mm=modes.DEFAULT_BLEED_MM)
 
 
 def cli_page(paths, tmp: Path):
@@ -2557,10 +2563,11 @@ def cli_page(paths, tmp: Path):
     return Image.open(out)
 
 
-def edge_is_clean(img) -> bool:
+def edge_pixels(img):
+    """产物四边中点各取一点：左、上、右、下。"""
     w, h = img.size
-    return (img.getpixel((3, h // 2)) != (210, 210, 210)
-            and img.getpixel((w // 2, 3)) != (210, 210, 210))
+    return [img.getpixel(xy) for xy in
+            [(3, h // 2), (w // 2, 3), (w - 4, h // 2), (w // 2, h - 4)]]
 
 
 def main() -> int:
@@ -2568,14 +2575,22 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         paths = make_photos(tmp)
-        a, b = gui_page(paths), cli_page(paths, tmp)
+        job = build_gui_job(paths)
+        a = job.render(0, DPI, show_mask=False)
+        b = cli_page(paths, tmp)
         same_size = a.size == b.size
-        same_pixels = same_size and list(a.getdata()) == list(b.getdata())
-        clean = edge_is_clean(a) and edge_is_clean(b)
+        same_pixels = same_size and a.mode == b.mode and a.tobytes() == b.tobytes()
+        # 正对照：同图开遮罩再渲一次，必须先钉四边确为灰遮罩色；否则下面的
+        # "导出四边纯白" 可能因探针落到带外 / 整体渲染坏掉而恒真空转。
+        control_ok = all(px == MASK_RGB for px in edge_pixels(
+            job.render(0, DPI, show_mask=True)))
+        clean = (all(px == CLEAN_RGB for px in edge_pixels(a))
+                 and all(px == CLEAN_RGB for px in edge_pixels(b)))
         a.save(OUT / "parity_gui.png")
         b.save(OUT / "parity_cli.png")
-    print(f"同尺寸 {same_size} · 同像素 {same_pixels} · 四边无遮罩 {clean}")
-    return 0 if (same_size and same_pixels and clean) else 1
+    # 上一行 cli_page 已让子进程按逐字冻结文案自行打印过，本行是本脚本结论。
+    print(f"同尺寸 {same_size} · 同像素 {same_pixels} · 遮罩正对照 {control_ok} · 四边导出纯白 {clean}")
+    return 0 if (same_size and same_pixels and control_ok and clean) else 1
 
 
 if __name__ == "__main__":
@@ -2583,7 +2598,8 @@ if __name__ == "__main__":
 ```
 
 Run: `python _lab/check_gui_cli_parity.py`
-Expected: `同尺寸 True · 同像素 True · 四边无遮罩 True`，exit 0。
+Expected: `同尺寸 True · 同像素 True · 遮罩正对照 True · 四边导出纯白 True`，exit 0。
+“遮罩正对照”先用 show_mask=True 渲染钉住四边确为灰遮罩色，使“导出四边纯白”不是恒真断言。
 不一致就是两个出口漂移，先查 T3 的 `build_layout` 与 T4 的转发是否改了参数顺序。
 
 - [ ] **Step 3: 更新 README**
@@ -2599,7 +2615,7 @@ pip install -r requirements.txt
 python -m photoprint.app          # 选照片 → 选纸张/格子 → 预览 → 导出 PDF
 ### 单文件 exe
 .\build_exe.ps1                   # 产出 dist\PhotoPrint.exe（需联网装 pyinstaller）
-.\_lab\check_exe.ps1              # 启动验收
+.\_lab\check_exe.ps1              # 启动验收（需交互桌面会话，无桌面必 FAIL）
 
 ### 命令行
 python -m photoprint.cli --photos 1.jpg 2.jpg 3.jpg 4.jpg --sheet A4 --cell 3R --out _lab/out/page.png
@@ -2607,6 +2623,7 @@ python -m photoprint.cli --print 需要 --printer；PowerShell 下 `--photos *.j
 请逐个列出或用 `(Get-ChildItem *.jpg).FullName`
 python -m pytest -q            # 全部几何断言
 python _lab/m1m2_check.py      # 本机可验证的端到端证据
+python _lab/check_gui_cli_parity.py  # GUI/CLI 同图与导出无遮罩（需仓库根在 sys.path，脚本自带 bootstrap）
 ```
 
 同时在“已知物理限制”后补一行：
@@ -2836,6 +2853,18 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   关窗之后。回写 Step 5 逐字块（verbatim 仍 0）、两 .ps1 重编码保 BOM、`check_exe.ps1` 连跑两次走 FAIL 路径均干净退出 1、
   无异常、残留 0（本会话窗口枚举此刻不可用，带桌面 OK 归 Task 10）。round-4 既双 Approved，此波只清 SHOULD/CONSIDER，
   不再派 round-5。A-1 遗留交 Task 10（img2pdf/Pillow 收集 grep 凭证 + exe 导出 PDF 实测 + spec §9 区间与实测同步）。
+- **T10 实现与 round-1 评审（㉘）**：Task 10 交付 README 三段 + 新建 `_lab/check_gui_cli_parity.py` + A-1（spec §9 体积/收集同步）。
+  先遇一处 plan-mandated 脚本缺陷：计划逐字的 parity 脚本缺仓库根 `sys.path` bootstrap，按 Step 2 命令 `python _lab/check_gui_cli_parity.py`
+  直跑时 `sys.path[0]` 是 `_lab/`、`from photoprint import jobs` 当场 ModuleNotFoundError（与同目录 m1m2_check.py:10 靠显式插根同法）——
+  补一行 `sys.path.insert` 并后置 import 加 `# noqa: E402`，已回写 Step 2 逐字块。round-1 评审 (A)(B) 均“可转 Approved（附修复）”、零 Critical；
+  采纳并实测复核后修：B-2/B-3（遮罩断言原来只探 2 边、用负断言 `!= (210,210,210)`，渲染整体坏也恒真——同 T4⑥/T5⑮/T8M-2 那类“恒真空转”）
+  → 改探 4 边、正断言 `== (255,255,255)`、并加“同图 show_mask=True 再渲一次先钉四边确为 (210,210,210)”的正对照（实测 4 边 False→255、True→210）；
+  B-4（`list(a.getdata())` 已被 Pillow 判废、Pillow≥12 无上限→14 硬失败，且 869 万像素×2 元组列表瞬时 ~1.3GB）→改 `a.tobytes()==b.tobytes()`（实测确定性）；
+  B-5（脚本字面量 300.0/3.0 重复 `jobs.DEFAULT_OUTPUT_DPI`/`modes.DEFAULT_BLEED_MM`、造第二真相源）→改用常量（顺带缓解 B-1：参数与 main_window 默认同源）；
+  B-1 未按评审首选“在 _lab 起真 MainWindow”扩展（计定计划逐字设 GUI 侧为复述），残差以 B-5 + docstring 边界声明 + 交由 test_app_main_window 的 render_all spy 兑现。
+  A-1/A-2/A-3/A-4（均为诚实划界）：spec §9 体积订正为实测 63.3MB（QtNetwork 非 import、由 hook 连带收集）、收集凭证改可复现命令（`\('img2pdf'`→顶层、`\('PIL`→86 条，原写“79”不可复现已改）；
+  §9 与 §11.4/§11.5 明写“收集≠exe 进程内真能出 PDF”、将 §11.5 拆为 5a（GUI编排≡CLI PNG，本任务 ✅）/5b（exe≡CLI PDF，带桌面终审 ☐）；README check_exe 行标“需交互桌面、无桌面必 FAIL”、
+  补列 parity 脚本。均回写计划 Step 2/3 逐字块（check_t10_parity_verbatim 实测 MATCH、字节相等）。实跑：parity 同尺寸/同像素/遮罩正对照/四边纯白全 True RC=0、无 getdata 弃用告警；全量 228 passed RC=0。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

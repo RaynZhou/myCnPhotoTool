@@ -16,7 +16,14 @@
 pip install -r requirements.txt
 
 ### 图形界面
-python -m photoprint.app          # 选照片 → 选纸张/格子 → 预览 → 导出 PDF
+python -m photoprint.app          # 选照片 → 选纸张/格子 → 预览 → 导出 PDF / 直接打印
+
+### 在界面里直接打印（选介质）
+选中打印机 → 调好纸张/格子/模式 → 点「打印…」→ 弹出佳能驱动设置页，在其中选
+「介质类型」（如 高级光面照片纸 II）→ 确定即直打全部页。本工具保证自定义纸张尺寸
+不被驱动页重置；介质与无边距等由驱动自身管理、色彩走驱动对应的墨量/ICC 曲线。
+仍建议先在驱动"打印首选项"里建好 3R 自定义纸张表单（见下）。
+
 ### 单文件 exe
 .\build_exe.ps1                   # 产出 dist\PhotoPrint.exe（需联网装 pyinstaller）
 .\_lab\check_exe.ps1              # 启动验收（需交互桌面会话，无桌面必 FAIL）

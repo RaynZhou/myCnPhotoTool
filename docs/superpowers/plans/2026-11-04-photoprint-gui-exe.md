@@ -1474,6 +1474,8 @@ import pytest
 pytest.importorskip("PIL", reason="需要 Pillow")
 pytest.importorskip("PySide6", reason="需要 Qt 绑定")
 
+from PySide6.QtCore import QElapsedTimer, QEventLoop  # noqa: E402
+
 from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
@@ -1502,16 +1504,49 @@ def _fill(window, tmp_path, n=4):
     window._refresh()
 
 
-def _settle(window, qapp, rounds=60):
-    """offscreen 下没有自转的事件循环，手动泵到渲染线程停下、信号投递完。"""
-    for _ in range(rounds):
-        qapp.processEvents()
+def _settle(window, qapp, timeout_ms=5000):
+    """offscreen 下没有自转的事件循环，手动泵到渲染线程停下、信号投递完。
+
+    必须给 processEvents 传 maxTime：无参忙轮询不会等跨线程事件送达，
+    慢机上几百次空转都可能还没轮到子线程 quit 的回投（计划原 rounds=60
+    正是栽在这）。带超时就变成「事件一到立刻返回」，用墙钟兜底判定真挂了。
+    """
+    timer = QElapsedTimer()
+    timer.start()
+    while timer.elapsed() < timeout_ms:
+        qapp.processEvents(QEventLoop.AllEvents, 50)
         if window._thread is None:
             return
         if not window._thread.isRunning():
-            qapp.processEvents()
+            qapp.processEvents(QEventLoop.AllEvents, 50)
             return
     pytest.fail("预览线程未在预期时间内停下")
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_threads(qapp):
+    """每个用例收尾时停掉 debounce、泵停渲染线程、再关窗口。
+
+    多数用例只 _refresh（经 _render_async 起了渲染线程）却不关窗口；
+    线程跑到完成只会把 quit 排队到主线程，没人泵就永远不停；窗口随进程
+    退出被析构时线程还在跑→解释器硬崩（0xC0000409），即使 pytest 已打印
+    “N passed”，退出码仍非零、CI 会判失败。收尾三步：先停 debounce（否则
+    下面泵送会触发新的 250ms 延迟渲染又起一条线程），再泵到现有线程全停，
+    最后 close 触发 closeEvent 里的 quit+wait 兜底。
+    """
+    yield
+    wins = [w for w in qapp.topLevelWidgets() if isinstance(w, MainWindow)]
+    for w in wins:
+        w._debounce.stop()
+    timer = QElapsedTimer()
+    timer.start()
+    while timer.elapsed() < 3000:
+        qapp.processEvents(QEventLoop.AllEvents, 50)
+        if not any(w._thread is not None and w._thread.isRunning() for w in wins):
+            break
+    for w in wins:
+        w.close()
+    qapp.processEvents(QEventLoop.AllEvents, 100)
 
 
 def test_window_starts_with_preview_and_status(qapp, tmp_path):
@@ -1721,6 +1756,9 @@ class MainWindow(QMainWindow):
         self.cell_box = QComboBox()
         for s in list(specs.CELL_PRESETS) + list(specs.PAPER_PRESETS):
             self.cell_box.addItem(s.label, s.key)
+        # 默认选 3R 而非下拉首项 ID1：spec/Step 5 手工核对都写“默认 A4/3R”，
+        # findData 找不到（3R 已不在预设里）时退回首项，不留 -1。
+        self.cell_box.setCurrentIndex(max(0, self.cell_box.findData("3R")))
         panel.addRow("格子", self.cell_box)
 
         self.mode_box = QComboBox()
@@ -2474,6 +2512,25 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   还原后 25 条仍绿）；生产代码不动。顺带把成品里误置末尾的
   `test_save_failure_propagates_but_memory_still_effective` 上移到第 5 位，
   使文件顺序与计划逐字块一致，“上块末尾四条是补的”重新成立。
+- **T7 开工时的两处计划内部矛盾修正（⑯）**：
+  （a）`_build_ui` 原逐字块把 `cell_box` 默认落在下拉首项，而
+  `CELL_PRESETS[0]=ID1`，与 spec/Step 5 手工核对“默认 A4/3R”矛盾，
+  `test_page_navigation`（5 张 A4+3R=2 页）直接变红。修法：填充
+  循环后补 `setCurrentIndex(max(0, findData("3R")))`，意图明确为默认 3R。
+  （b）`_settle` 原逐字块用 `rounds=60` 的无参 `processEvents()` 忙轮询，
+  offscreen 下跨线程 `quit` 回投送达慢（隔离探测实测需 ~134 轮），
+  `test_window_starts_with_preview_and_status` 确定性失败 5/5。根因在测试
+  泵送方式（产品代码正确：真实应用有自转事件循环），修法：改为带
+  `maxTime` 的 `processEvents(QEventLoop.AllEvents, 50)` + 墙钟 `QElapsedTimer`
+  时间预算，事件一到立刻返回、超时才判挂；断言不放宽。
+  （c）计列原逐字测试都不关窗口：除 `test_window_starts`（经 `_settle`
+  泵停线程）外，其余 6 条只 `_refresh` 起了渲染线程却不收尾，线程完成
+  后只把 quit 排队到主线程、无人泵则不停；窗口随进程退出被析构时
+  线程还在跑 → 解释器硬崩（0xC0000409），退出码非零（实测原测试即使打印
+  8 passed 仍 RC=0xC0000409）。新增 autouse `_no_leaked_threads` fixture：
+  收尾先 stop debounce（否则泵送会触发新的 250ms 延迟渲染又起线程），再
+  泵到现有线程全停，最后 close 触发 closeEvent 里的 quit+wait 兜底（连跑
+  15 次 RC=0）。均回写进计划块。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

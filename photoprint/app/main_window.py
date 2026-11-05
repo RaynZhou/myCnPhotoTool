@@ -1,0 +1,350 @@
+"""单窗口表单界面：选图 → 选纸/格/模式 → 预览 → 导出等尺寸 PDF。
+
+本层不含 mm/像素换算与裁切几何（全局约束）：百分比偏移、页码切分、
+格子尺寸一律交 jobs/core。异常一律收敛成状态栏文字，不得外抛——
+窗口化 exe 没有控制台，抛出去就是静默闪退。
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+                               QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+                               QMainWindow, QMessageBox, QPushButton, QSlider,
+                               QVBoxLayout, QWidget)
+
+from photoprint import jobs
+from photoprint.app import view, worker
+from photoprint.core import modes, specs, store
+
+MODE_LABELS = (
+    ("自动", None),
+    ("完整放入（留白）", modes.FIT_TO_PRINTABLE),
+    ("铺满可打印区（留白边）", modes.FILL_PRINTABLE),
+    ("出血拼版（需人工裁切）", modes.BLEED_TRIM),
+)
+DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
+DEBOUNCE_MS = 250
+OFFSET_MAX_PCT = 50
+IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
+ERROR_COLOR = "#b00000"
+
+
+def _spin(lo, hi, value=0.0):
+    box = QDoubleSpinBox()
+    box.setRange(lo, hi)
+    box.setDecimals(1)
+    box.setSingleStep(0.5)
+    box.setValue(value)
+    return box
+
+
+def _slider_row(slider, label):
+    row = QHBoxLayout()
+    row.addWidget(slider, 1)
+    row.addWidget(label)
+    return row
+
+
+def _connect_param_changed(widget, handler):
+    """各控件的“值变了”信号名不同，这里统一接到 handler。
+
+    带 `*_` 是因为 valueChanged 会传值、currentIndexChanged 也传值，
+    而 handler（QTimer.start）不接受参数。
+    """
+    for name in ("valueChanged", "currentIndexChanged"):
+        sig = getattr(widget, name, None)
+        if sig is not None:
+            sig.connect(lambda *_: handler())
+            return
+    raise TypeError(f"控件没有可用的值变更信号：{type(widget).__name__}")
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, st=None):
+        super().__init__()
+        self.st = st if st is not None else store.Store()
+        self.st.load()
+        self.photos = []        # PIL 图；读取失败的占位 None 会被渲染当空格
+        self.photo_paths = []
+        self.page_index = 0
+        self.job = None
+        self._thread = None
+        self._task = None
+        self.setWindowTitle("相片打印助手")
+        self._build_ui()
+        # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._refresh)
+        for w in (self.sheet_box, self.cell_box, self.mode_box, self.gap_box,
+                  self.bleed_box, self.dpi_box, self.h_slider, self.v_slider):
+            _connect_param_changed(w, self._debounce.start)
+        self._restore_last_job()
+        self._refresh()
+
+    # ---------- 布局 ----------
+
+    def _build_ui(self):
+        root = QWidget()
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        body = QHBoxLayout()
+        outer.addLayout(body, 1)
+
+        panel = QFormLayout()
+        body.addLayout(panel)
+
+        self.photo_list = QListWidget()
+        self.photo_list.setFixedWidth(260)
+        self.photo_list.setMaximumHeight(150)
+        panel.addRow("照片", self.photo_list)
+
+        add_btn = QPushButton("添加照片…")
+        add_btn.clicked.connect(self._on_add_photos)
+        clear_btn = QPushButton("清空")
+        clear_btn.clicked.connect(self._on_clear_photos)
+        btns = QHBoxLayout()
+        btns.addWidget(add_btn)
+        btns.addWidget(clear_btn)
+        panel.addRow("", btns)
+
+        # 纸张只列 role=paper；格子列 role=cell 加全部 role=paper（人设计 4.3）
+        self.sheet_box = QComboBox()
+        for s in specs.PAPER_PRESETS:
+            self.sheet_box.addItem(s.label, s.key)
+        panel.addRow("纸张", self.sheet_box)
+
+        self.cell_box = QComboBox()
+        for s in list(specs.CELL_PRESETS) + list(specs.PAPER_PRESETS):
+            self.cell_box.addItem(s.label, s.key)
+        # 默认选 3R 而非下拉首项 ID1：spec/Step 5 手工核对都写“默认 A4/3R”，
+        # findData 找不到（3R 已不在预设里）时退回首项，不留 -1。
+        self.cell_box.setCurrentIndex(max(0, self.cell_box.findData("3R")))
+        panel.addRow("格子", self.cell_box)
+
+        self.mode_box = QComboBox()
+        for label, _value in MODE_LABELS:
+            self.mode_box.addItem(label)
+        panel.addRow("模式", self.mode_box)
+
+        self.gap_box = _spin(0.0, 50.0)
+        panel.addRow("格间距 mm", self.gap_box)
+        self.bleed_box = _spin(0.0, 20.0, modes.DEFAULT_BLEED_MM)
+        panel.addRow("出血 mm", self.bleed_box)
+
+        self.dpi_box = QComboBox()
+        for value, label in DPI_CHOICES:
+            self.dpi_box.addItem(label, value)
+        self.dpi_box.setCurrentIndex(1)      # 默认 300
+        panel.addRow("输出 dpi", self.dpi_box)
+
+        self.h_slider = QSlider(Qt.Horizontal)
+        self.h_slider.setRange(-OFFSET_MAX_PCT, OFFSET_MAX_PCT)
+        self.v_slider = QSlider(Qt.Horizontal)
+        self.v_slider.setRange(-OFFSET_MAX_PCT, OFFSET_MAX_PCT)
+        self.h_label = QLabel("0%")
+        self.v_label = QLabel("0%")
+        self.h_slider.valueChanged.connect(lambda v: self.h_label.setText(f"{v}%"))
+        self.v_slider.valueChanged.connect(lambda v: self.v_label.setText(f"{v}%"))
+        panel.addRow("水平微调", _slider_row(self.h_slider, self.h_label))
+        panel.addRow("垂直微调", _slider_row(self.v_slider, self.v_label))
+
+        self.preview = QLabel("（无预览）")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumSize(360, 480)
+        body.addWidget(self.preview, 1)
+
+        nav = QHBoxLayout()
+        self.prev_btn = QPushButton("上一页")
+        self.next_btn = QPushButton("下一页")
+        self.prev_btn.clicked.connect(lambda: self._go_page(-1))
+        self.next_btn.clicked.connect(lambda: self._go_page(1))
+        nav.addWidget(self.prev_btn)
+        nav.addWidget(self.next_btn)
+        nav.addStretch(1)
+        self.export_btn = QPushButton("导出 PDF…")
+        self.export_btn.clicked.connect(self._on_export)
+        nav.addWidget(self.export_btn)
+        outer.addLayout(nav)
+
+        self.statusBar().showMessage("就绪")
+
+    # ---------- 参数与刷新 ----------
+
+    def _params(self):
+        return {
+            "sheet_key": self.sheet_box.currentData(),
+            "cell_key": self.cell_box.currentData(),
+            "gap_mm": self.gap_box.value(),
+            "bleed_mm": self.bleed_box.value(),
+            "mode": MODE_LABELS[self.mode_box.currentIndex()][1],
+            "dpi": float(self.dpi_box.currentData()),
+            "offset_pct": (float(self.h_slider.value()),
+                           float(self.v_slider.value())),
+        }
+
+    def _refresh(self):
+        """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
+        p = self._params()
+        try:
+            self.job = jobs.build_job(self.st, self.photos, p["sheet_key"],
+                                      p["cell_key"], gap_mm=p["gap_mm"],
+                                      bleed_mm=p["bleed_mm"], mode=p["mode"],
+                                      offset_pct=p["offset_pct"])
+        except ValueError as exc:      # 放不下 / 非法模式组合 / 未知尺寸
+            self.job = None
+            self._set_status(str(exc), error=True)
+            self.export_btn.setEnabled(False)
+            return
+        self.page_index = min(self.page_index, self.job.page_count - 1)
+        self.export_btn.setEnabled(any(ph is not None for ph in self.photos))
+        self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
+                         f"{self.job.note}")
+        self._render_async()
+
+    def _render_async(self):
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(1000)
+        job, index = self.job, self.page_index
+        self._thread, self._task = worker.start(
+            lambda: job.render(index, jobs.PREVIEW_DPI, show_mask=True))
+        self._task.succeeded.connect(self._on_preview)
+        self._task.failed.connect(lambda msg: self._set_status(msg, error=True))
+        self._thread.start()
+
+    def _on_preview(self, image):
+        pm = view.to_pixmap(image)
+        self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
+                                        Qt.SmoothTransformation))
+
+    def _go_page(self, delta):
+        if self.job is None:
+            return
+        nxt = self.page_index + delta
+        if 0 <= nxt < self.job.page_count:
+            self.page_index = nxt
+            self._render_async()
+
+    def _set_status(self, text, error=False):
+        self.statusBar().setStyleSheet(f"color:{ERROR_COLOR}" if error else "")
+        self.statusBar().showMessage(text)
+
+    # ---------- 照片 ----------
+
+    def _on_add_photos(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择照片",
+                                                self._start_dir(), IMAGE_FILTER)
+        for p in paths:
+            self.append_photo(p)
+        self._debounce.start()
+
+    def append_photo(self, path):
+        """读图失败不阻塞其余：占位 None 进渲染当空格，列表标红。"""
+        name = Path(path).name
+        try:
+            img = jobs.load_photo(path)
+        except Exception as exc:      # IO 边界什么都可能抛，全部收敛
+            self.photos.append(None)
+            self.photo_paths.append(str(path))
+            item = QListWidgetItem(f"{name}（读取失败）")
+            item.setForeground(QColor(ERROR_COLOR))
+            self.photo_list.addItem(item)
+            self._set_status(f"无法读取 {name}：{exc}", error=True)
+            return
+        self.photos.append(img)
+        self.photo_paths.append(str(path))
+        self.photo_list.addItem(
+            QListWidgetItem(f"{name}  {img.width}×{img.height}px"))
+
+    def _on_clear_photos(self):
+        self.photos, self.photo_paths = [], []
+        self.photo_list.clear()
+        self.page_index = 0
+        self._refresh()
+
+    # ---------- 导出 ----------
+
+    def export_to(self, out_path):
+        """导出等尺寸 PDF。测试直接调它，不经文件对话框。"""
+        from photoprint.win import pdf_export
+
+        if self.job is None or not any(ph is not None for ph in self.photos):
+            raise ValueError("没有可导出的照片")
+        pages = jobs.render_all(self.job, self._params()["dpi"], show_mask=False)
+        pdf_export.export_pdf(pages, self.job.sheet, out_path)
+        self.save_last_job(out_dir=str(Path(out_path).parent))
+        return Path(out_path)
+
+    def _on_export(self):
+        suggested = str(Path(self._start_dir()) / "photoprint.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, "导出 PDF", suggested,
+                                             "PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            got = self.export_to(path)
+        except Exception as exc:      # 无权限/磁盘满/img2pdf 异常
+            self._set_status(f"导出失败：{exc}", error=True)
+            QMessageBox.warning(self, "导出失败", str(exc))
+            return
+        self._set_status(f"已导出 {got.name}（打印时请选“实际大小/100%”）")
+
+    # ---------- 上次设置 ----------
+
+    def save_last_job(self, out_dir=None):
+        p = self._params()
+        self.st.set_last_job({
+            "sheet_key": p["sheet_key"], "cell_key": p["cell_key"],
+            # 存下拉索引而不是 mode 内部值：“自动”是 None，反序列化时要判空，
+            # 索引没有这个歧义
+            "mode_index": self.mode_box.currentIndex(),
+            "gap_mm": p["gap_mm"], "bleed_mm": p["bleed_mm"], "dpi": p["dpi"],
+            "offset_pct": [self.h_slider.value(), self.v_slider.value()],
+            "out_dir": out_dir or self._last_out_dir(),
+            "photo_paths": list(self.photo_paths)})
+        if not self.st.save():
+            self._set_status("本次设置未持久化（写入失败）", error=True)
+
+    def _restore_last_job(self):
+        job = self.st.get_last_job()
+        if not job:
+            return
+        for key, box in (("sheet_key", self.sheet_box), ("cell_key", self.cell_box)):
+            idx = box.findData(job.get(key))
+            if idx >= 0:
+                box.setCurrentIndex(idx)
+        mode_index = job.get("mode_index")
+        if isinstance(mode_index, int) and 0 <= mode_index < self.mode_box.count():
+            self.mode_box.setCurrentIndex(mode_index)
+        for key, box in (("gap_mm", self.gap_box), ("bleed_mm", self.bleed_box)):
+            if isinstance(job.get(key), (int, float)):
+                box.setValue(float(job[key]))
+        if isinstance(job.get("dpi"), (int, float)):
+            idx = self.dpi_box.findData(float(job["dpi"]))
+            if idx >= 0:
+                self.dpi_box.setCurrentIndex(idx)
+        pct = job.get("offset_pct")
+        if isinstance(pct, (list, tuple)) and len(pct) == 2:
+            self.h_slider.setValue(int(pct[0]))
+            self.v_slider.setValue(int(pct[1]))
+        for p in job.get("photo_paths") or []:
+            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
+
+    def _last_out_dir(self):
+        d = self.st.get_last_job().get("out_dir")
+        return d if d and Path(d).is_dir() else ""
+
+    def _start_dir(self):
+        return self._last_out_dir() or str(Path.home())
+
+    def closeEvent(self, event):
+        self.save_last_job()
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(2000)
+        super().closeEvent(event)

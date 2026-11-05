@@ -3,6 +3,8 @@ import sys
 import threading
 import types
 
+import pytest
+
 from photoprint.app import crashlog
 
 
@@ -54,6 +56,21 @@ def test_write_appends_instead_of_overwriting(tmp_path):
 def test_write_failure_returns_none(tmp_path):
     """日志路径是个目录时不得抛：日志不能反过来拖垮进程。"""
     assert crashlog.write((ValueError, ValueError("x"), None), tmp_path) is None
+
+
+@pytest.mark.parametrize("bad_exc_info,bad_path", [
+    ("oops", None),                        # 解包不成三元组 → TypeError
+    ((ValueError,), None),                 # value 缺 → TypeError
+    ((ValueError, "x"), None),             # tb 缺 → ValueError
+    ((str, "not-exc", None), None),        # 非异常类 → AttributeError
+    ((ValueError, ValueError("x"), None), 5),   # path=5 → Path(5) TypeError（原在 try 外）
+])
+def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path):
+    """“异常一律收敛”契约：任何畸形入参都只能返 None，不得穿出（窗口化 exe
+    无控制台，外抛即静默闪退）。只捕 OSError 的写法会让前四条仍外抛。畸形
+    exc_info 在 format_exception 阶段就报错、path=5 在 Path() 就报错，都进不了
+    真正写盘那步，故不会污染真 %APPDATA%。"""
+    assert crashlog.write(bad_exc_info, bad_path) is None
 
 
 def test_install_replaces_both_hooks(tmp_path):

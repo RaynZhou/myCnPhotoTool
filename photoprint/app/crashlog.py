@@ -20,13 +20,19 @@ def log_path() -> Path:
 
 
 def write(exc_info, path=None):
-    """把 traceback 追加写入日志，返回日志路径；写失败返回 None。"""
-    target = Path(path) if path else log_path()
+    """把 traceback 追加写入日志，返回日志路径；写失败返回 None。
+
+    异常一律收敛、无逃逸路径：路径构造、建目录、格式化、编码全部纳入 try。
+    兜底 except Exception 而非只 OSError——本模块的契约是“诊断不得拖垮主流程”，
+    畸形 exc_info（TypeError/ValueError）与孤立代理项编码错（UnicodeEncodeError）
+    都得收敛成 None。不捕 BaseException：放行 KeyboardInterrupt/SystemExit。
+    """
     try:
+        target = Path(path) if path else log_path()
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as fh:
+        with target.open("a", encoding="utf-8", errors="replace") as fh:
             fh.write("".join(traceback.format_exception(*exc_info)) + "\n")
-    except OSError:
+    except Exception:
         return None
     return target
 

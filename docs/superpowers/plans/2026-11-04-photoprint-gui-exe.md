@@ -2078,6 +2078,8 @@ import sys
 import threading
 import types
 
+import pytest
+
 from photoprint.app import crashlog
 
 
@@ -2129,6 +2131,21 @@ def test_write_appends_instead_of_overwriting(tmp_path):
 def test_write_failure_returns_none(tmp_path):
     """日志路径是个目录时不得抛：日志不能反过来拖垮进程。"""
     assert crashlog.write((ValueError, ValueError("x"), None), tmp_path) is None
+
+
+@pytest.mark.parametrize("bad_exc_info,bad_path", [
+    ("oops", None),                        # 解包不成三元组 → TypeError
+    ((ValueError,), None),                 # value 缺 → TypeError
+    ((ValueError, "x"), None),             # tb 缺 → ValueError
+    ((str, "not-exc", None), None),        # 非异常类 → AttributeError
+    ((ValueError, ValueError("x"), None), 5),   # path=5 → Path(5) TypeError（原在 try 外）
+])
+def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path):
+    """“异常一律收敛”契约：任何畸形入参都只能返 None，不得穿出（窗口化 exe
+    无控制台，外抛即静默闪退）。只捕 OSError 的写法会让前四条仍外抛。畸形
+    exc_info 在 format_exception 阶段就报错、path=5 在 Path() 就报错，都进不了
+    真正写盘那步，故不会污染真 %APPDATA%。"""
+    assert crashlog.write(bad_exc_info, bad_path) is None
 
 
 def test_install_replaces_both_hooks(tmp_path):
@@ -2186,13 +2203,19 @@ def log_path() -> Path:
 
 
 def write(exc_info, path=None):
-    """把 traceback 追加写入日志，返回日志路径；写失败返回 None。"""
-    target = Path(path) if path else log_path()
+    """把 traceback 追加写入日志，返回日志路径；写失败返回 None。
+
+    异常一律收敛、无逃逸路径：路径构造、建目录、格式化、编码全部纳入 try。
+    兜底 except Exception 而非只 OSError——本模块的契约是“诊断不得拖垮主流程”，
+    畸形 exc_info（TypeError/ValueError）与孤立代理项编码错（UnicodeEncodeError）
+    都得收敛成 None。不捕 BaseException：放行 KeyboardInterrupt/SystemExit。
+    """
     try:
+        target = Path(path) if path else log_path()
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as fh:
+        with target.open("a", encoding="utf-8", errors="replace") as fh:
             fh.write("".join(traceback.format_exception(*exc_info)) + "\n")
-    except OSError:
+    except Exception:
         return None
     return target
 
@@ -2652,6 +2675,24 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   FakeThread 加 quit_calls 计数（S1，证 _retire_threads 先 quit 再 wait）。变异表重写并扩到 18 点
   全杀（I4 锚点改指 _safe 包裹、I5c 缩进改到 _safe 的 except、新增 W1a/S1）。修后 T7 21 passed、
   全量 215 passed RC=0、逐字校对 0 缺失。_retire_threads 的超时留引用（I6b）仍靠 keep.append。
+- **T8 实现期与 round-1 复审的修正（⑳）**：
+  （实现期两处）① 计划自带 `test_write_appends_instead_of_overwriting` 的
+  `count("KeyError")==2` 恒不成立——`format_exception` 每条把 KeyError 输出两遍（源码行 +
+  异常头），两次追加实得 4；改数 `"Traceback (most recent call last)"` 与 `"KeyError: 'sheet_key'"`
+  各 == 2（直读“追加两条”意图、不受排版影响）。② 计划两个真缺口：`install` 用例名叫
+  both_hooks 却只驱动 sys.excepthook（删 threading 钩子行仍绿）、`write` 的 `mkdir(parents=True)`
+  无测试触达（去 mkdir 仍绿）；各补承重分支（`types.SimpleNamespace` 驱 threading.excepthook、
+  `test_write_creates_missing_parent_dir`）。
+  （round-1 I-1）CodeReview 实测确认全局约束“异常一律收敛不外抛”在 `write` 上未穷尽：
+  `target = Path(path) if path else log_path()` 在 try 外（`write(exc_info, 5)` → Path(5) TypeError 外抛）、
+  `except OSError` 偏窄（畸形 exc_info 如 `"oops"`/`(ValueError,)`/`(ValueError,"x")` 的
+  TypeError/ValueError 穿透）。修法与 T7 W1 同构：路径构造/建目录/格式化/编码全纳入 try，
+  兜底 `except Exception`（不捕 BaseException 以放行 KeyboardInterrupt/SystemExit）+ `errors="replace"`
+  挡 UnicodeEncodeError。补 `test_write_never_raises_on_malformed_input` 参数化 5 类畸形入参只返 None。
+  变异表扩到 10 点（C6 改测 except 缩回 OSError、新增 C9 测 Path 移出 try）。修后 T8 11 passed、
+  全量 226 passed RC=0、逐字校对 0。round-1 Minor（`run` 的 `sys.argv[:1]` 丢 Qt 参数、install 返回值与
+  每异常重评 log_path 的对偶、write 无 `-> Path | None` 注解）：前者 plan-mandated（GUI exe 故意不透传
+  CLI 参数）、后两项计划 Interfaces 与参考代码自身不一，非实现偏差，登台账交终审。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

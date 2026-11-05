@@ -2150,6 +2150,8 @@ def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path, tmp_path,
     monkeypatch.setattr(crashlog.store, "default_path",
                         lambda: tmp_path / "PhotoPrint" / "papers.json")
     assert crashlog.write(bad_exc_info, bad_path) is None
+    if bad_path is None:   # 钉住隔离本身：删掉上面 monkeypatch 就会回退成污染真目录
+        assert (tmp_path / "PhotoPrint" / "error.log").exists()
 
 
 def test_write_survives_lone_surrogate(tmp_path):
@@ -2720,6 +2722,12 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   `?`、非 `�`——UTF-8 replace 的真实行为）。变异表加 C10（去 errors=replace）共 11 点全杀。
   round-2 判定 install line42 `Path(path)` 为 plan-mandated、不在“日志写失败不反抛”射程（主语是
   write、且唯一调用点 `install()` 不传 path），维持 Minor 不阻塞。修后 T8 12 passed、全量回归 RC=0。
+- **T8 round-3 复审（Approved）与 M-2 加固（㉒）**：round-3 实测确认 I-1/I-A/M-1 均闭合、
+  无新 Critical/Important，Spec与质量皆 Approved。唯 M-2（评审标 CONSIDER 不阻塞）：
+  I-A 的两行 monkeypatch 本身不承重——删掉它们测试仍全绿、却默默把污染改回来（变异表
+  盖不到，属测试侧属性）。采纳一行断言守卫：`if bad_path is None: assert (tmp_path/…/error.log).exists()`，
+  既钉住隔离不被动回退、又坐实 path=None 分支真走到了 tmp_path。实测删 patch 后该用例转 RC=1。
+  产品代码 crashlog.py 本轮未改。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

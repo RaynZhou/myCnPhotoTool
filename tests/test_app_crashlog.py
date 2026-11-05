@@ -75,6 +75,8 @@ def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path, tmp_path,
     monkeypatch.setattr(crashlog.store, "default_path",
                         lambda: tmp_path / "PhotoPrint" / "papers.json")
     assert crashlog.write(bad_exc_info, bad_path) is None
+    if bad_path is None:   # 钉住隔离本身：删掉上面 monkeypatch 就会回退成污染真目录
+        assert (tmp_path / "PhotoPrint" / "error.log").exists()
 
 
 def test_write_survives_lone_surrogate(tmp_path):

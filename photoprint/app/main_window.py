@@ -10,10 +10,10 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QPushButton, QSlider,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
+                               QFormLayout, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+                               QSlider, QVBoxLayout, QWidget)
 
 from photoprint import jobs
 from photoprint.app import view, worker
@@ -63,8 +63,12 @@ def _connect_param_changed(widget, handler):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, st=None):
+    def __init__(self, st=None, printer_api=None):
         super().__init__()
+        if printer_api is None:
+            from photoprint.win.api import RealWinApi
+            printer_api = RealWinApi()
+        self.api = printer_api
         self.st = st if st is not None else store.Store()
         self.st.load()
         self.photos = []        # PIL 图；读取失败的占位 None 会被渲染当空格
@@ -78,6 +82,7 @@ class MainWindow(QMainWindow):
         self._stale = []        # wait 超时没停干净的旧线程，留住引用防其在跑时被回收
         self.setWindowTitle("相片打印助手")
         self._build_ui()
+        self._load_printers()
         # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -174,6 +179,13 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.prev_btn)
         nav.addWidget(self.next_btn)
         nav.addStretch(1)
+        self.printer_box = QComboBox()
+        self.printer_box.setObjectName("printer_box")
+        nav.addWidget(self.printer_box)
+        self.print_btn = QPushButton("打印…")
+        self.print_btn.setObjectName("print_btn")
+        self.print_btn.clicked.connect(self._on_print)
+        nav.addWidget(self.print_btn)
         self.export_btn = QPushButton("导出 PDF…")
         self.export_btn.clicked.connect(self._on_export)
         nav.addWidget(self.export_btn)
@@ -362,6 +374,55 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导出失败", str(exc))
             return
         self._set_status(f"已导出 {got.name}（打印时请选“实际大小/100%”）")
+
+    # ---------- 打印 ----------
+
+    def _load_printers(self):
+        """填充打印机下拉。win32 异常（无后台打印程序/未装 pywin32）→ 留空、
+        禁用、不崩——窗口化 exe 无控制台，抛出去即静默闪退。"""
+        self.printer_box.clear()
+        try:
+            names = list(self.api.enum_printers())
+        except Exception:
+            names = []
+        for n in names:
+            self.printer_box.addItem(n)
+        self.printer_box.setEnabled(bool(names))
+
+    def _on_print(self):
+        """直打全部页：先同步落最新 job（含旋转/偏移），渲染交 render_all（关遮罩，
+        I-2），走 gdi_print.print_pages(prompt=True) 弹驱动页选介质。异常全兜成
+        状态栏，不外抛。"""
+        from photoprint.win import gdi_print
+
+        self._debounce.stop()
+        try:
+            self._rebuild_job()
+        except Exception as exc:
+            self._set_status(f"排版失败：{exc}", error=True)
+            return
+        if self.job is None or not any(ph is not None for ph in self.photos):
+            self._set_status("没有可打印的照片", error=True)
+            return
+        printer = self.printer_box.currentText()
+        if not printer:
+            self._set_status("未检测到可用打印机", error=True)
+            return
+        dpi = self._params()["dpi"]
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            images = jobs.render_all(self.job, dpi, show_mask=False)   # I-2
+            res = gdi_print.print_pages(self.api, printer, images,
+                                        self.job.sheet, dpi, prompt=True)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            self._set_status(f"打印失败：{exc}", error=True)
+            return
+        QApplication.restoreOverrideCursor()
+        if res["ok"]:
+            self._set_status(f"已发送 {res['pages']} 页到 {printer}")
+        else:
+            self._set_status(f"未打印：{res['message']}", error=True)
 
     # ---------- 上次设置 ----------
 

@@ -2140,12 +2140,27 @@ def test_write_failure_returns_none(tmp_path):
     ((str, "not-exc", None), None),        # 非异常类 → AttributeError
     ((ValueError, ValueError("x"), None), 5),   # path=5 → Path(5) TypeError（原在 try 外）
 ])
-def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path):
+def test_write_never_raises_on_malformed_input(bad_exc_info, bad_path, tmp_path,
+                                                monkeypatch):
     """“异常一律收敛”契约：任何畸形入参都只能返 None，不得穿出（窗口化 exe
-    无控制台，外抛即静默闪退）。只捕 OSError 的写法会让前四条仍外抛。畸形
-    exc_info 在 format_exception 阶段就报错、path=5 在 Path() 就报错，都进不了
-    真正写盘那步，故不会污染真 %APPDATA%。"""
+    无控制台，外抛即静默闪退）。只捕 OSError 的写法会让前四条仍外抛。前四条走
+    path=None→log_path()：畸形 exc_info 要到 format_exception 才报错，晚于 mkdir+
+    open(append) 建盘，不隔离就会在真 %APPDATA%\\PhotoPrint 落一个空 error.log（实测
+    复现）。故把 store.default_path 打到 tmp_path，既覆盖 path=None 分支又不污染真目录。"""
+    monkeypatch.setattr(crashlog.store, "default_path",
+                        lambda: tmp_path / "PhotoPrint" / "papers.json")
     assert crashlog.write(bad_exc_info, bad_path) is None
+
+
+def test_write_survives_lone_surrogate(tmp_path):
+    """errors="replace" 保日志落地：孤立代理项在 strict 编码下会触发
+    UnicodeEncodeError，若被收敛成 None 就等于崩溃日志静默丢失（窗口化 exe 无从
+    得知）。断言 write 仍返回路径、traceback 行真的落下来——删掉 errors="replace"
+    本用例会因 write 返 None 而红（畸形字符被替成 '?'、不追求逐字保真）。"""
+    p = tmp_path / "error.log"
+    got = crashlog.write((ValueError, ValueError("\ud800"), None), p)
+    assert got == p and p.exists()
+    assert "ValueError" in p.read_text(encoding="utf-8")   # 日志没丢，只是畸形字符被替掉
 
 
 def test_install_replaces_both_hooks(tmp_path):
@@ -2693,6 +2708,18 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   全量 226 passed RC=0、逐字校对 0。round-1 Minor（`run` 的 `sys.argv[:1]` 丢 Qt 参数、install 返回值与
   每异常重评 log_path 的对偶、write 无 `-> Path | None` 注解）：前者 plan-mandated（GUI exe 故意不透传
   CLI 参数）、后两项计划 Interfaces 与参考代码自身不一，非实现偏差，登台账交终审。
+- **T8 round-2 复审的修正（㉑）**：round-2 确认 I-1 已穷尽闭合（write 无逃逸路径，逐条
+  枚举 Path/mkdir/format/编码/close 及 RecursionError 均收敛；`return target` 无未绑定风险；
+  不捕 BaseException 与文档串一致），但发现 round-1 我新加的 `test_write_never_raises_on_malformed_input`
+  自身污染真目录（I-A，实测复现）：前四条传 `bad_path=None` 走 `log_path()` → 真
+  `store.default_path()`，`mkdir`+`open(append)` 在 `format_exception` 报错前已建出真
+  `%APPDATA%\PhotoPrint\error.log`（与用例文档串“不污染”声明相反）。修法：`monkeypatch`
+  把 `store.default_path` 打到 `tmp_path`，既保留 path=None 分支收敛覆盖又不落真目录。顺手
+  补 round-2 Minor M-1 的空档：`errors="replace"` 无测试守（删该行仍全绿），新增
+  `test_write_survives_lone_surrogate` 喂孤立代理项、断言 write 返路径且 traceback 行落地（替成
+  `?`、非 `�`——UTF-8 replace 的真实行为）。变异表加 C10（去 errors=replace）共 11 点全杀。
+  round-2 判定 install line42 `Path(path)` 为 plan-mandated、不在“日志写失败不反抛”射程（主语是
+  write、且唯一调用点 `install()` 不传 path），维持 Minor 不阻塞。修后 T8 12 passed、全量回归 RC=0。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

@@ -2306,7 +2306,7 @@ git commit -m "feat(app): 入口与双异常钩子崩溃日志"
 ### Task 9: 单文件 exe 打包
 
 **Files:**
-- Create: `requirements-build.txt`、`build_exe.ps1`、`_lab/check_exe.ps1`
+- Create: `requirements-build.txt`、`build_exe.ps1`、`_lab/check_exe.ps1`、`tests/test_build_scripts_encoding.py`
 - Modify: `.gitignore`
 
 **Interfaces:**
@@ -2368,8 +2368,11 @@ if ($LASTEXITCODE -ne 0) { throw "装构建期依赖失败 rc=$LASTEXITCODE" }
 
 # 入口是真实 .py 文件；--windowed 等于 --noconsole
 # 原生命令非零退出不会被 ErrorActionPreference=Stop 拦下（那是 7.3+ 才有的），必须手查 $LASTEXITCODE
+# 显式钉死输出路径到 $root（不依赖 CWD），否则从别处按绝对路径调用时 PyInstaller 会往 CWD 写 dist、
+# 而下面的产物检查与 -Clean 都锚在 $root，会错报“未产出”或删错位置。
 $buildStart = Get-Date
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name PhotoPrint `
+    --distpath (Join-Path $root "dist") --workpath (Join-Path $root "build") --specpath $root `
     --paths $root (Join-Path $root "photoprint\app\__main__.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败 rc=$LASTEXITCODE" }
 
@@ -2404,43 +2407,51 @@ if (-not (Test-Path $exe)) { throw "未找到 $exe，先跑 build_exe.ps1" }
 
 $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
-# onefile 下真实窗口属子进程，父(引导)进程 MainWindowTitle 恒空——故按映像名轮询，
-# 不看 Start-Process 返回的父 PID；起跑前先清残留 PhotoPrint，避免上轮孤儿被本轮秒匹配假阳性。
-Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
+# onefile 下真实窗口属子进程（引导父进程无窗口）→ 必须按映像名而非父 PID 取标题。
+# 但 PhotoPrint 就是产品 exe 名，绝不能按名全机强杀（会打掉用户自己开着的实例、丢 last_job）。
+# 归属边界：先快照已有 PhotoPrint PID，匹配与清理只认"本轮新增"的进程，别处/既存实例一律不碰。
+$before = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 Start-Process -FilePath $exe | Out-Null
+
+function Get-OwnPhotoPrint {
+    Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
+        Where-Object { $before -notcontains $_.Id }
+}
 
 $found = $null
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
-    $found = Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowTitle -like "*相片打印助手*" } | Select-Object -First 1
+    $own = @(Get-OwnPhotoPrint)
+    $found = $own | Where-Object { $_.MainWindowTitle -like "*相片打印助手*" } | Select-Object -First 1
     if ($found) { break }
+    if ($own.Count -eq 0) { break }   # 本轮进程全没了（崩/退），别再空等 30s
 }
 $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-$alive = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue)
+$alive = @(Get-OwnPhotoPrint)
 
 if ($null -eq $found) {
-    # 区分“进程已崩/退”与“进程活着但本会话无可枚举窗口”（无交互桌面）
-    $state = if ($alive.Count -gt 0) { "进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
-             else { "进程已退出（崩溃或未能启动）" }
+    # 区分"本轮进程已崩/退"与"进程活着但本会话无可枚举窗口"（无交互桌面）
+    $state = if ($alive.Count -gt 0) { "本轮进程存活 $($alive.Count) 个但无窗口（本会话无交互桌面？）" }
+             else { "本轮进程已退出（崩溃或未能启动）" }
     Write-Host "FAIL 窗口未出现（体积 $sizeMb MB，等待 $elapsed s）：$state"
-    Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
+    $alive | Stop-Process -Force -ErrorAction SilentlyContinue
     exit 1
 }
 Write-Host "OK 窗口标题：$($found.MainWindowTitle)（体积 $sizeMb MB，启动 $elapsed s，PID $($found.Id)）"
-Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-OwnPhotoPrint | Stop-Process -Force -ErrorAction SilentlyContinue
 exit 0
 ```
 
 - [ ] **Step 6: 跑验收脚本**
 
 Run: `powershell -ExecutionPolicy Bypass -File .\_lab\check_exe.ps1`
-Expected: `OK 窗口标题：相片打印助手（… MB，启动 … s）`，exit 0。
+Expected: `OK 窗口标题：相片打印助手（… MB，启动 … s，PID …）`，exit 0。
+需带交互桌面的机器；headless 会话下 `MainWindowTitle` 枚举间歇（有时命中、有时恒空而 FAIL），属环境非脚本（见 ㉕）。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add requirements-build.txt build_exe.ps1 _lab/check_exe.ps1 .gitignore
+git add requirements-build.txt build_exe.ps1 _lab/check_exe.ps1 tests/test_build_scripts_encoding.py .gitignore
 git commit -m "build: PyInstaller 单文件 exe 构建与启动验收脚本"
 ```
 
@@ -2769,6 +2780,18 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   消息带存活/退出态以区分“崩/退”与“无窗口”（M-B3）。同时 `build_exe.ps1` 补 `$LASTEXITCODE` 检查与产物新鲜度
   判定（原生命令非零退出不被 Stop 拦下、且默认不删 dist 会对着旧 exe 假报 OK，评审 I-B3）——重建实测产 63.3MB、
   验收真 OK。Step 3/4/5 计划正文与脚本已同步回写，逐字校对仍 0 缺失。
+- **T9 round-2 修复波（㉕）**：round-1 的“验收真 OK”后经反复实测发现本会话窗口枚举**间歇可用**（同一 headless 会话
+  曾连跑 3 次 5–7s 真 OK，稍后又 5 次全 FAIL、直接采样活子进程 20s `MainWindowTitle` 恒为 `''`/`Handle=0`）——
+  说明按名修脚本是真修复（否则永不可 OK），但本环境无稳定交互桌面，Step 6 **不能在本会话稳定复现**，
+  带桌面的真机 OK 仍归 Task 10/终审验证项。本轮采纳 round-2 评审两条新 Important：
+  ① **I-2（round-1 把窄杀改成了宽杀）**：`check_exe.ps1` 改为“先快照已有 PhotoPrint PID、匹配与清理只认本轮新增”，
+  不再按名全机 `Stop-Process`（`PhotoPrint` 即产品 exe 名，宽杀会掉用户自己实例、丢 `last_job` 落盘）——实测
+  预开一个“外部”实例后跑 check_exe，外部实例全部存活、仅 check_exe 自己那批被清；归属边界真立住。补回
+  “本轮进程全没即早退”（Minor-4，真崩不再白等 30s）。② **I-1（`$PSScriptRoot`↔CWD 两基准）**：`build_exe.ps1`
+  给 PyInstaller 显式传 `--distpath/--workpath/--specpath` 锈定到 $root，免得从别处按绝对路径调用时产物落到 CWD
+  dist 、而产物检查与 `-Clean` 锚 $root 导致错报。另采 M-B2 新加了 `tests/test_build_scripts_encoding.py`
+  （.ps1 BOM 字节守卫，剥 BOM→RC=1）；已把它补进 Task 9 Files/Step 7 git add。回写 Step 3/5 块与 Step 6 预期（含 PID）。
+  回归 228 passed（系统解释器 RC=0）；注：**勿用 `.venv-build` 解释器跑回归**（Qt 退出 fastfail 会 RC≠0 但用例全过）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

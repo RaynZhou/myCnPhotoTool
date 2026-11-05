@@ -31,8 +31,11 @@ if ($LASTEXITCODE -ne 0) { throw "装构建期依赖失败 rc=$LASTEXITCODE" }
 
 # 入口是真实 .py 文件；--windowed 等于 --noconsole
 # 原生命令非零退出不会被 ErrorActionPreference=Stop 拦下（那是 7.3+ 才有的），必须手查 $LASTEXITCODE
+# 显式钉死输出路径到 $root（不依赖 CWD），否则从别处按绝对路径调用时 PyInstaller 会往 CWD 写 dist、
+# 而下面的产物检查与 -Clean 都锚在 $root，会错报“未产出”或删错位置。
 $buildStart = Get-Date
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name PhotoPrint `
+    --distpath (Join-Path $root "dist") --workpath (Join-Path $root "build") --specpath $root `
     --paths $root (Join-Path $root "photoprint\app\__main__.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败 rc=$LASTEXITCODE" }
 

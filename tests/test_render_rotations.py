@@ -95,9 +95,10 @@ def test_cw90_quadrant_lands_top_right():
     assert turned.getpixel((int(ix + iw / 2 - 5), int(iy + ih - 4))) == (255, 255, 255)  # 左下白
 
 
-@pytest.mark.parametrize("bad", [45, 120, None, "abc", []])
+@pytest.mark.parametrize("bad", [45, 120, None, "abc", [], float("inf")])
 def test_illegal_angles_degrade_to_zero_without_raising(bad):
-    """归一后仍非法 / 转不了 int：按 0 渲染，不抛错，与不转逐像素相同。"""
+    """归一后仍非法 / 转不了 int（含 Infinity 溢出）：按 0 渲染，不抛错，
+    与不转逐像素相同（与恢复层同收 TypeError/ValueError/OverflowError 口径）。"""
     a4, plan = _a4_id1()
     photo = _landscape()
     got = _render(a4, plan, [photo] * plan.count, rotations=[bad])

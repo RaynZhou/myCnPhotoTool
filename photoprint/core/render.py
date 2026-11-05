@@ -27,7 +27,7 @@ def _apply_rotation(photo, angle):
     归一必须是 90 的整数倍，45° 一类残余不得借 `% 360` 混进映射表。"""
     try:
         op = _ANGLE_TRANSPOSE.get(int(angle) % 360)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return photo
     return photo if op is None else photo.transpose(op)
 

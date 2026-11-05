@@ -15,6 +15,22 @@ CUT_LINE_MM = 0.35
 MASK_RGB = (150, 150, 150)
 _MASK_ALPHA = 110
 
+# 逐图旋转（M3-GUI 增量）：顺时针角度 → PIL transpose 操作。
+# PIL 的 ROTATE_270 是顺时针 90°，与旋转格既有用法同口径。
+_ANGLE_TRANSPOSE = {90: Image.ROTATE_270, 180: Image.ROTATE_180,
+                    270: Image.ROTATE_90}
+
+
+def _apply_rotation(photo, angle):
+    """按顺时针 angle° 转照片。非法角度一律按 0（不转）降级：旋转是增强项，
+    一次坏数据不得把整页渲染打死（与 store 的"任何损坏降级成没有"同口径）。
+    归一必须是 90 的整数倍，45° 一类残余不得借 `% 360` 混进映射表。"""
+    try:
+        op = _ANGLE_TRANSPOSE.get(int(angle) % 360)
+    except (TypeError, ValueError):
+        return photo
+    return photo if op is None else photo.transpose(op)
+
 
 def intersect_mm(a, b):
     """两个 (x, y, w, h) 矩形求交，不相交返回 None。"""
@@ -61,8 +77,11 @@ def _mask_bands(sheet, rect):
 
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
-                offset_pct=(0.0, 0.0)):
-    """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。"""
+                offset_pct=(0.0, 0.0), rotations=()):
+    """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。
+
+    rotations 是逐图顺时针角度（短于 photos 缺位按 0）：生效照片在取尺寸之前
+    换好，其余几何一条规则不改——"渲染时转"与"读图时预转好"逐像素等价。"""
     px_w = units.mm_to_px(sheet.w_mm, dpi)
     px_h = units.mm_to_px(sheet.h_mm, dpi)
     page = Image.new("RGB", (px_w, px_h), (255, 255, 255))
@@ -75,6 +94,8 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         photo = photos[idx] if idx < len(photos) else None
         if photo is None:
             continue
+        # 逐图旋转必须早于任何 photo.width/height 取值：转完的才是生效照片
+        photo = _apply_rotation(photo, rotations[idx] if idx < len(rotations) else 0)
         # BLEED 用外框（出血就故意外伸到纸边，裁掉后正好得到成品尺寸）；
         # 其余用内框并与可打印矩形求交，处理“整纸只放一格”的退化情形
         if mode == modes.BLEED_TRIM:

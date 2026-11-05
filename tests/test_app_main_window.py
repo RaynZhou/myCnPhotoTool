@@ -452,10 +452,12 @@ def test_rotations_roundtrip_through_two_windows(qapp, tmp_path):
     assert "↻90°" in again.photo_list.item(1).text()
 
 
-@pytest.mark.parametrize("bad", ["[90]", [90, "x"], [90, None]])
+@pytest.mark.parametrize("bad", ["[90]", "90", [90, "x"], [90, None]])
 def test_bad_rotations_config_degrades_to_all_zero(qapp, tmp_path, bad):
     """形状坏 / 含不可转 int 的条目：整体不恢复（全 0），其余字段照常——
-    逐项降级会让角度错位到别的照片上，比全不恢复更糟（规格第 5 节）。"""
+    逐项降级会让角度错位到别的照片上，比全不恢复更糟（规格第 5 节）。
+    "90" 与 "[90]" 同档：删掉 isinstance 形状闸后逐字符转会错位出 [9, 0]，
+    纯坏串只有数字形才能杀闸（T4 评审 M-建议）。"""
     s = _store(tmp_path)
     s.set_last_job({"sheet_key": "A4", "cell_key": "ID1",
                     "photo_paths": _make_photos(tmp_path, 2),
@@ -474,6 +476,18 @@ def test_rotations_length_mismatch_truncates_or_pads(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     assert w.photo_rotations == [90, 180]
     # 45 不在 {0,90,180,270}，core 归一按 0 渲染；界面原样保留，不在此层换算
+
+
+def test_rotations_short_list_pads_to_equal_length(qapp, tmp_path):
+    """不足补 0 是承重钉：删补 0 则启动刷新循环 IndexError 直出 __init__
+    （窗口化 exe 静默闪退），且落盘 rotations 短于 photo_paths（T4 评审 I-1）。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "ID1",
+                    "photo_paths": _make_photos(tmp_path, 3),
+                    "rotations": [90]})                # 不足：补 0 到等长
+    s.save()
+    w = MainWindow(st=_store(tmp_path))                 # 删补 0 则此处 IndexError
+    assert w.photo_rotations == [90, 0, 0]
 
 
 def test_rotations_out_of_range_still_renderable(qapp, tmp_path):

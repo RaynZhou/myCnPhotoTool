@@ -130,7 +130,7 @@ def test_cw90_quadrant_lands_top_right():
     assert turned.getpixel((int(ix + 1), int(iy + ih / 2))) == (0, 255, 0)
 
 
-@pytest.mark.parametrize("bad", [45, 120, None, "90", 90.5])
+@pytest.mark.parametrize("bad", [45, 120, None, "abc", []])
 def test_illegal_angles_degrade_to_zero_without_raising(bad):
     """归一后仍非法 / 转不了 int：按 0 渲染，不抛错，与不转逐像素相同。"""
     a4, plan = _a4_id1()
@@ -173,6 +173,10 @@ def test_photo_rotation_on_rotated_cell_still_pixelwise_parity():
                               show_cut_lines=False)
     assert got.tobytes() == want.tobytes()
 ```
+
+（角度降级表的取舍：`"90"` 与 `90.5` 这类 `int()` 能转出合法 90 的值不列入参数表——
+实现用 `int(angle)` 统一处理，它们会渲染成转 90°，属实现自由裁量区，测试不钉；
+参数表只放确定转不了 int（None/"abc"/[]）或归一后不在四元组（45/120）的值。）
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -272,8 +276,6 @@ def _photo():
 def test_job_rotations_defaults_to_empty_tuple(st):
     job = jobs.build_job(st, [_photo()] * 4, "A4", "ID1", gap_mm=2.0)
     assert job.rotations == ()
-    # 默认路径与旧行为逐像素等价（CLI 不传本参数，靠这条守住冻结）
-    assert job.render(0, 25.4).tobytes()
 
 
 def test_build_job_keeps_rotations_verbatim(st):

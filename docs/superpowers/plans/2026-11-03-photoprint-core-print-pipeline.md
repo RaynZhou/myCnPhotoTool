@@ -23,7 +23,11 @@
 - DEVMODE 四条不可变语义：按驱动回报的 size 分配 buffer、继承驱动私有扩展区、不改 `cbSize`、只改纸张相关字段。禁止 new 空 DEVMODE。
 - GDI 回读物理尺寸与请求值的容差为 **0.5mm**，超限即判定驱动忽略自定义尺寸并中止直打。
 - 用户可见文案禁则：`borderless=False` 时不得出现"无边距"；`fill_printable` 时不得出现"铺满整张纸"；未校准时不得给出 0.1mm 级白边承诺。
-- 装箱基准为硬断言，数值取自规格 5.3：`A4+3R=4`、`A4+4R=3`、`A4+5R=2`、`4R+3R=1`、`A4+3R(bleed3)=4`、`A4+ID1(gap2)=56`、`A4+ID2(gap2)=25`、`A4 去边距后+3R=4`。
+- 装箱基准为硬断言，数值取自规格 5.3：`A4+3R=4`、`A4+4R=3`、`A4+5R=2`、`4R+3R=1`、`A4+3R(bleed3)=4`、`A4+ID1(gap2, 禁旋转)=56`、`A4+ID2(gap2, 禁旋转)=25`、`A4 去边距后+3R=4`。
+- 证件照（`role=cell`）拼版必须传 `allow_rotate=False`：旋转会把格子横放，贴出来的证件照是躺倒的；允许旋转只会让张数虚高，不作为基准值。
+- `pack.pack` 的默认装箱区域是**整张纸**（与规格 5.3 手算基准同口径）；任何要真送打的排版必须显式传 `printable=specs.printable_rect(...)`（无边距生效时它返回整张纸）——T9 渲染与 T14 CLI 都属此列，不自愿传就会把照片切进物理边距。
+- 旋转格落位：`crop.cell_crop_box` 返回的 `dest_mm` 是**旋转前**坐标系；照片 `ROTATE_270` 后必须同轴交换（`dx, dy, dw, dh = dy, dx, dh, dw`），否则尺寸补偿与贴图都落错轴、画面撑出格子压进邻格。该交换是「转置」，仅与居中落位等价；将来支持非居中偏移须改成 `x' = H-(y+h), y' = x`。
+- pywin32 真实契约（T10–T12 必须照此实现，已在本机 PyDEVMODEW 上实测）：`win32print` 没有 `DM_INQUIRE`/`DM_GETMODE`/`CreateDC`；改 DEVMODE 用 `win32con.DM_IN_BUFFER|DM_OUT_BUFFER` 且输入输出必须是 `GetPrinter(h,2)["pDevMode"]` 取回的现有结构；建 DC 用 `win32gui.CreateDC("WIN32", printer, devmode)`；字段名是 `Fields/PaperSize/PaperWidth/PaperLength/Scale/DefaultSource`（无 `dm` 前缀）。`GetDeviceCaps` 只认 DC，把打印机句柄当 HDC 会一路回 0 并被误判成无边距生效。
 
 ## 文件结构（本计划范围内）
 
@@ -55,7 +59,7 @@
 | `photoprint/win/probe.py` | 驱动能力探测与比对报告 | T10 |
 | `tests/test_probe.py` | monkeypatch 断言 mm 换算与冲突报告 | T10 |
 | `photoprint/win/devmode.py` | DEVMODE 继承与改写 | T11 |
-| `tests/test_devmode.py` | buffer 不截断、dmFields 位、0.1mm 单位 | T11 |
+| `tests/test_devmode.py` | buffer 不截断、Fields 位、0.1mm 单位 | T11 |
 | `photoprint/win/gdi_print.py` | CreateDC/StretchBlt 送页 + 0.5mm 回读校验 | T12 |
 | `tests/test_gdi_verify.py` | 纯函数容差判定 | T12 |
 | `photoprint/win/pdf_export.py` | 等尺寸 PDF 导出 | T13 |
@@ -117,9 +121,12 @@ def test_ppmm_300dpi():
 
 
 def test_mm_to_px_rounds_half_up():
-    # 89mm @300dpi = 1050.0 像素；0.35mm 线宽 @300dpi = 4.13 → 4
-    assert units.mm_to_px(89, 300) == 1050
+    # 89mm @300dpi = 1051.181 像素 → 1051；0.35mm 线宽 @300dpi = 4.134 → 4
+    assert units.mm_to_px(89, 300) == 1051
     assert units.mm_to_px(0.35, 300) == 4
+    # 恰好 .5 时必须向上：round() 是银行家舍入（round(2.5)==2），
+    # 用它会让“dpi=25.4 下 1mm=1px”的像素断言反直觉，Task 9 的几何测试依赖这点
+    assert units.mm_to_px(2.5, 25.4) == 3
 
 
 def test_mm_to_px_at_one_pixel_per_mm():
@@ -143,6 +150,14 @@ def test_win_mm_uses_tenth_of_mm():
 def test_mm_to_scene_is_tenth_mm():
     assert units.mm_to_scene(89.0) == 890
     assert units.mm_to_scene(3.4) == 34
+    assert units.mm_to_scene(0.25) == 3  # 2.5 个 0.1mm 单位，同样 .5 向上
+
+
+def test_round_px_is_half_up():
+    # 全项目取整口径的公共入口（T7 评审 I-1：crop 层也必须走它）
+    assert units.round_px(2.5) == 3
+    assert units.round_px(20.5) == 21
+    assert units.round_px(-0.5) == 0  # floor(v+0.5)，负半同样向大数一侧
 ```
 
 - [ ] **Step 3: 运行确认失败**
@@ -180,7 +195,19 @@ Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint'`
 """mm 与像素的唯一换算入口。"""
 from __future__ import annotations
 
+import math
+
 MM_PER_INCH = 25.4
+
+
+def round_px(value: float) -> int:
+    """就近取整，.5 一律向上。全项目取整口径，渲染/裁切层都用它。
+
+    不用内置 round()：它是银行家舍入，round(2.5) == 2、round(20.5) == 20，
+    而本项目的几何断言（尤其 dpi=25.4 时 1 像素 = 1 毫米那批）需要的是
+    直觉上的四舍五入，否则半像素落点会以一种看不出规律的方式偏移。
+    """
+    return int(math.floor(value + 0.5))
 
 
 def ppmm(dpi: float) -> float:
@@ -189,8 +216,8 @@ def ppmm(dpi: float) -> float:
 
 
 def mm_to_px(mm: float, dpi: float) -> int:
-    """mm 转像素，四舍五入。"""
-    return int(round(mm * ppmm(dpi)))
+    """mm 转像素，就近取整（.5 向上）。"""
+    return round_px(mm * ppmm(dpi))
 
 
 def px_to_mm(px: float, dpi: float) -> float:
@@ -208,13 +235,13 @@ def win_mm(value_mm: float) -> int:
 
 def mm_to_scene(mm: float) -> int:
     """场景坐标：1 单位 = 0.1mm，整数以免累积误差。"""
-    return int(round(mm * 10))
+    return round_px(mm * 10)
 ```
 
 - [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest tests/test_units.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（7 passed）
 
 - [ ] **Step 6: 提交**
 
@@ -235,7 +262,7 @@ git commit -m "feat: 项目骨架与 mm/像素唯一换算入口"
 - Consumes: `units.ppmm`
 - Produces:
   - `specs.Margins(top: float, bottom: float, left: float, right: float)`
-  - `specs.SizeSpec(key, label, w_mm, h_mm, role, origin, borderless, margins, margin_source, driver_paper_code, driver_paper_name)`
+  - `specs.SizeSpec(key, label, w_mm, h_mm, role, origin, borderless, margins, margin_source, driver_paper_name, driver_paper_code)`（字段顺序以此为准，数据类定义与 T3 的位置构造均按此序）
   - `specs.RectMM(x_mm, y_mm, w_mm, h_mm)`
   - `specs.PAPER_PRESETS: list[SizeSpec]`、`specs.CELL_PRESETS: list[SizeSpec]`、`specs.ALL_PRESETS: list[SizeSpec]`
   - `specs.find_spec(key: str) -> SizeSpec`
@@ -282,13 +309,26 @@ def test_a4_borderless_active_zeroes_margins():
     assert (on.x_mm, on.y_mm) == (0.0, 0.0)
 
 
+def test_borderless_active_rejected_on_non_borderless_sheet():
+    """规格第 2 节硬事实：自定义尺寸（含 3R）不支持无边距。
+
+    守卫放在这里而不是每个调用点：printable_rect 是唯一能同时看到
+    `spec.borderless` 与 `borderless_active` 的地方，调用侧把关意味着
+    T8/T9/T12/T14 都要各自记住这条。
+    """
+    s = specs.find_spec("3R")
+    assert s.borderless is False
+    with pytest.raises(ValueError, match="无边距"):
+        specs.printable_rect(s, borderless_active=True)
+
+
 def test_source_spec_never_assumes_zero_margins():
     """margin_source=spec 时，即使尺寸有边框能力也必须按规格边距处理。"""
     s = specs.find_spec("4R")
     assert s.borderless is True
     assert s.margin_source == "spec"
     r = specs.printable_rect(s)  # 未声明 borderless_active
-    assert r.w_mm < s.w_mm
+    assert r.w_mm == pytest.approx(95.2)  # 102 - 3.4 - 3.4，钉死而非只判“小于”
 
 
 def test_ltr_uses_exception_margins():
@@ -321,13 +361,18 @@ def test_custom_illegal_12inch_is_blocked():
     """12寸 254×305：宽 254 > 215.9，两向都不合法 —— 必须阻断。"""
     ok, msg = specs.custom_size_is_legal(254.0, 305.0)
     assert ok is False
-    assert "215.9" in msg
+    assert "305.0mm > 215.9mm" in msg  # 必须点出越界的具体数值与边界
 
 
 def test_custom_illegal_below_length_floor():
-    ok, msg = specs.custom_size_is_legal(100.0, 80.0)
+    """80×70：两个方向当宽度都 ∈ 55–215.9，但当长度都 < 89 ⇒ 只违反长度下限。
+
+    不得用 100×80 做这个用例：允许横竖交换后 80 当宽、100 当长完全合法，
+    而卡片 91×55 结构同形（只能靠交换才合法），任何“让 100×80 不合法”的改法都会误判死卡片。
+    """
+    ok, msg = specs.custom_size_is_legal(80.0, 70.0)
     assert ok is False
-    assert "89" in msg
+    assert "70.0mm < 89.0mm" in msg  # 精确到违反的那条边界
 
 
 def test_12inch_is_not_a_preset():
@@ -389,7 +434,7 @@ class SizeSpec:
     w_mm: float
     h_mm: float
     role: str  # paper=可当纸张 / cell=只能当拼版格子
-    origin: str  # preset / custom / user
+    origin: str  # preset / custom / user / spec（spec = 只能当拼版格子，不对应任何驱动纸张）
     borderless: bool
     margins: Margins
     margin_source: str  # spec=依规格推定 / probed=驱动实测 / calibrated=真机校准
@@ -409,6 +454,11 @@ def _paper(key, label, w, h, origin, borderless, driver_name=None, code=None):
                     "spec", driver_name, code)
 
 
+# 注：LTR/LGL 的例外边距（左 6.4 / 右 6.3）绑在预设 key 上。用户自建尺寸即使用
+# 同样的数值也不会自动拿到例外值，store 必须让调用方显式传 Margins（规格 4.5）。
+# w_mm / h_mm 就是驱动里的宽/长，不约定大小关系（卡片 91×55 是宽大于高）。
+
+
 PAPER_PRESETS = [
     # 驱动内置且官方无边距列表内有 ⇒ borderless=True
     _paper("A4", "A4", 210.0, 297.0, "preset", True, "A4", 9),
@@ -424,6 +474,7 @@ PAPER_PRESETS = [
     _paper("B5", "B5", 176.0, 250.0, "preset", False, "B5", 13),
     _paper("LGL", "Legal", 215.9, 355.6, "preset", False, "Legal", 5),
     _paper("ENV_DL", "信封 DL", 110.0, 220.0, "preset", False, "DL", 27),
+    _paper("ENV_10", "信封 COM10", 105.0, 241.0, "preset", False, "COM10", 20),
     # 只能走自定义尺寸 ⇒ 强制无边距不可用
     _paper("3R", "3R 5寸", 89.0, 127.0, "custom", False),
     _paper("6R", "6R 8寸", 152.0, 203.0, "custom", False),
@@ -454,7 +505,12 @@ def printable_rect(spec: SizeSpec, borderless_active: bool = False) -> RectMM:
 
     borderless_active 只有在驱动探测或真机校准实测到无边距已生效时才可为 True；
     margin_source == "spec" 时调用方不得凭空传 True（规格 7.4）。
+
+    守卫：官方无边距清单之外的纸张（含一切自定义尺寸）传 True 直接报错。
+    宁可当场报错也不能静默按整纸排版——后者就是规格 7.3 禁止的谎报。
     """
+    if borderless_active and not spec.borderless:
+        raise ValueError(f"{spec.key} 不支持无边距，borderless_active 不得为 True")
     if borderless_active:
         return RectMM(0.0, 0.0, spec.w_mm, spec.h_mm)
     m = spec.margins
@@ -466,20 +522,33 @@ def custom_size_is_legal(w_mm: float, h_mm: float) -> tuple[bool, str]:
     """自定义尺寸范围校验，允许横竖交换判定。
 
     89×127 横放时长度恰为下限 89，因此必须两向都试。
+
+    不合法时必须点出越界的那个具体数值与边界：只笼统报两个区间的话，
+    调用方与测试都无法区分“宽超限”和“长不够”，断言会退化成永真。
     """
     for feed_w, feed_l in ((w_mm, h_mm), (h_mm, w_mm)):
         if (MIN_FEED_W_MM <= feed_w <= MAX_FEED_W_MM
                 and MIN_FEED_L_MM <= feed_l <= MAX_FEED_L_MM):
             return True, ""
-    return False, (f"G3800 自定义尺寸要求宽 {MIN_FEED_W_MM}–{MAX_FEED_W_MM}mm、"
-                   f"长 {MIN_FEED_L_MM}–{MAX_FEED_L_MM}mm；"
-                   f"{w_mm}×{h_mm}mm 两向都不满足")
+    limits = (f"宽 {MIN_FEED_W_MM}–{MAX_FEED_W_MM}mm、"
+              f"长 {MIN_FEED_L_MM}–{MAX_FEED_L_MM}mm")
+    long_side, short_side = max(w_mm, h_mm), min(w_mm, h_mm)
+    if long_side > MAX_FEED_W_MM:
+        why = f"{long_side}mm > {MAX_FEED_W_MM}mm（进纸宽度上限）"
+    elif short_side < MIN_FEED_L_MM:
+        why = f"{short_side}mm < {MIN_FEED_L_MM}mm（走纸长度下限）"
+    elif short_side < MIN_FEED_W_MM:
+        why = f"{short_side}mm < {MIN_FEED_W_MM}mm（进纸宽度下限）"
+    else:
+        why = f"{long_side}mm > {MAX_FEED_L_MM}mm（走纸长度上限）"
+    return False, (f"G3800 自定义尺寸要求{limits}；"
+                   f"{w_mm}×{h_mm}mm 两向都不满足：{why}")
 ```
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_specs.py -v`
-Expected: PASS（11 passed）
+Expected: PASS（12 passed）
 
 - [ ] **Step 5: 提交**
 
@@ -506,6 +575,10 @@ git commit -m "feat: G3800 相纸与证件照尺寸规格表及可打印矩形"
   - `Store.resolve(key: str) -> SizeSpec`（预设 + 覆盖 + 自建，返回生效规格）
   - `Store.save() -> bool`（写盘失败返回 False，但内存修改仍生效）
   - `Store.raw: dict`（`overrides` / `user_sizes` / `last_job` 三段）
+  - `store.DEFAULT_PATH: Path`（依 `%APPDATA%` 推导）
+- 真相源规则（M3 界面与后续任务都依此行事）：`resolve` 对自建 key 只看 `_users`，
+  `raw["user_sizes"]` 每次变更后由 `_users` 重新序列化；自建 key 的边距更新写它
+  自己的记录，不写 `overrides`。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -573,6 +646,31 @@ def test_user_size_forces_borderless_false(tmp_store):
     got = tmp_store.resolve("user-4d")
     assert got.origin == "user"
     assert got.borderless is False  # 自定义尺寸不可能无边距，用户意愿不予采纳
+    assert s.borderless is True     # 不得就地改调用方交进来的对象
+
+    # 自建尺寸必须走完 save → load → resolve 的往返。只测内存里那条断言，
+    # 磁盘少写一个字段也照样是绿的。
+    assert tmp_store.save() is True
+    again = store.Store(tmp_store.path)
+    again.load()
+    back = again.resolve("user-4d")
+    assert (back.key, back.label) == ("user-4d", "4D 自建")
+    assert (back.w_mm, back.h_mm) == (100.0, 148.0)
+    assert back.origin == "user"
+    assert back.role == "paper"
+    assert back.borderless is False
+    assert back.margins.bottom == 5.0
+
+    # 磁盘上谎称无边距 / 当格子用也不采信：这条边界由代码守，不由文件守
+    disk = json.loads(Path(tmp_store.path).read_text(encoding="utf-8"))
+    disk["user_sizes"][0]["borderless"] = True
+    disk["user_sizes"][0]["role"] = "cell"
+    Path(tmp_store.path).write_text(json.dumps(disk, ensure_ascii=False),
+                                    encoding="utf-8")
+    liar = store.Store(tmp_store.path)
+    liar.load()
+    assert liar.resolve("user-4d").borderless is False
+    assert liar.resolve("user-4d").role == "paper"
 
 
 def test_save_failure_keeps_memory_effect(tmp_path):
@@ -589,6 +687,88 @@ def test_corrupt_file_falls_back_to_empty(tmp_store):
     Path(tmp_store.path).write_text("{ not json", encoding="utf-8")
     tmp_store.load()
     assert tmp_store.resolve("3R").margin_source == "spec"
+
+
+def test_override_with_bad_margin_value_is_dropped(tmp_store):
+    """终审 Minor：边距值不可转 float 的整条覆盖必须丢弃。
+
+    docstring 承诺“任何损坏都降级成没有，结对不抛”：值留在内存里会在
+    渲染时炸成 ValueError，比丢掉一条标定严重得多。
+    """
+    Path(tmp_store.path).write_text(json.dumps({"overrides": {
+        "3R": {"margins_mm": {"top": "bad"}, "margin_source": "calibrated"},
+    }}), encoding="utf-8")
+    tmp_store.load()  # 不得抛
+    assert "3R" not in tmp_store.raw["overrides"]
+    s = tmp_store.resolve("3R")
+    assert s.margin_source == "spec"
+    assert s.margins.top == 3.0
+
+
+def test_override_margins_on_user_size_reaches_back(tmp_store):
+    """自建尺寸的边距只能落在它自己的记录上。
+
+    resolve() 里 `_users` 短路在前，`overrides[key]` 对自建 key 是死数据：
+    标定值看着存下了，实际每次都被磁盘上的旧记录盖掉。
+    """
+    tmp_store.load()
+    tmp_store.add_user_size(specs.SizeSpec(
+        "user-4d", "4D 自建", 100.0, 148.0, "paper", "user",
+        False, specs.Margins(), "spec"))
+    tmp_store.override_margins("user-4d", specs.Margins(1.5, 2.5, 3.5, 4.5),
+                               "calibrated")
+    assert tmp_store.resolve("user-4d").margins.left == 3.5
+    assert "user-4d" not in tmp_store.raw["overrides"]
+    assert tmp_store.save() is True
+    again = store.Store(tmp_store.path)
+    again.load()
+    back = again.resolve("user-4d")
+    assert back.margin_source == "calibrated"
+    assert (back.margins.top, back.margins.bottom, back.margins.right) == (
+        1.5, 2.5, 4.5)
+
+
+@pytest.mark.parametrize("text", [
+    "null",
+    "[1, 2]",
+    '{"user_sizes": ["abc"]}',
+    '{"user_sizes": [{"key": "u1"}]}',
+    '{"overrides": 3, "user_sizes": {"key": "u1"}}',
+])
+def test_structured_json_corruption_is_contained(tmp_store, text):
+    """语法能过但形状错：不能抛，也不能带出半条记录。
+
+    这些是用户手工编辑 papers.json 或旧版本写坏文件后最常见的形状。load()
+    抛异常会让程序卡在启动，比丢掉这份配置更糟。
+    """
+    Path(tmp_store.path).write_text(text, encoding="utf-8")
+    tmp_store.load()  # 不得抛
+    assert isinstance(tmp_store.raw["overrides"], dict)
+    assert isinstance(tmp_store.raw["user_sizes"], list)
+    with pytest.raises(KeyError):
+        tmp_store.resolve("u1")
+    assert tmp_store.resolve("3R").margin_source == "spec"
+
+
+def test_good_user_sizes_survive_a_bad_sibling(tmp_store):
+    Path(tmp_store.path).write_text(json.dumps({"user_sizes": [
+        {"key": "u-ok", "label": "ok", "w_mm": 100.0, "h_mm": 148.0},
+        {"key": "u-bad"},
+    ]}), encoding="utf-8")
+    tmp_store.load()
+    assert tmp_store.resolve("u-ok").label == "ok"
+    # 坏条目已被剔除，下次存盘就写不回磁盘了
+    assert [d["key"] for d in tmp_store.raw["user_sizes"]] == ["u-ok"]
+
+
+def test_user_size_rejects_bad_key(tmp_store):
+    """空 key 或与预设重名：重名会让 `_users` 静默遮蔽预设。"""
+    tmp_store.load()
+    for bad_key in ("", "A4"):
+        s = specs.SizeSpec(bad_key, "x", 100.0, 148.0, "paper", "user",
+                           False, specs.Margins(), "spec")
+        with pytest.raises(ValueError, match="key"):
+            tmp_store.add_user_size(s)
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -603,6 +783,12 @@ Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.core.store'`
 ```python
 """用户配置读写：预设 + 覆盖差异 + 自建尺寸三者的合成。
 
+真相源规则（后续任务与 M3 界面都依此行事）：
+- 预设：specs.PAPER_PRESETS，papers.json 只存覆盖差异 overrides[key]；
+- 自建尺寸：self._users 是唯一定本，raw["user_sizes"] 每次变更后由它重新序列化；
+- 自建 key 的边距走 _users 记录本身，不写 overrides —— overrides 对自建 key
+  永不生效（resolve 里 _users 短路在前），写进去就是死数据。
+
 写盘失败（权限、被占用）时内存修改依然生效并返回 False，
 调用方必须在状态栏提示"本次设置未持久化"，不得静默丢弃。
 """
@@ -610,32 +796,100 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from datetime import date
 from pathlib import Path
 from typing import Optional
 
 from photoprint.core import specs
 
-DEFAULT_PATH = Path.home() / "AppData" / "Roaming" / "PhotoPrint" / "papers.json"
+# 自建尺寸不得用这些 key：_users 在 resolve 里短路在前，重名会静默遮蔽预设
+PRESET_KEYS = frozenset(s.key for s in specs.PAPER_PRESETS + specs.CELL_PRESETS)
+
+
+def default_path() -> Path:
+    """`%APPDATA%\\PhotoPrint\\papers.json`。
+
+    用环境变量而不是 `Path.home() / "AppData" / "Roaming"`：前者尊重重定向与
+    非系统盘部署，后者只在系统盘就是 C: 时才对；取不到 APPDATA 才退回家目录推算。
+    """
+    base = os.environ.get("APPDATA")
+    root = Path(base) if base else Path.home() / "AppData" / "Roaming"
+    return root / "PhotoPrint" / "papers.json"
+
+
+DEFAULT_PATH = default_path()
+
+
+def _empty_raw() -> dict:
+    return {"overrides": {}, "user_sizes": [], "last_job": {}}
+
+
+def _norm_margins(m: specs.Margins) -> specs.Margins:
+    """归一为 float：SpinBox 常交来 int，混进去会让同一份配置里出现 3 与 3.0 两种形状。"""
+    return specs.Margins(float(m.top), float(m.bottom), float(m.left), float(m.right))
+
+
+def _margins_from_dict(m: dict) -> specs.Margins:
+    """缺字段按规格默认补齐，与 _from_dict 走同一条路径。"""
+    return specs.Margins(float(m.get("top", 3.0)), float(m.get("bottom", 5.0)),
+                         float(m.get("left", 3.4)), float(m.get("right", 3.4)))
+
+
+def _margins_ok(m) -> bool:
+    """margins_mm 的每个值都必须能转 float。
+
+    手改过的 papers.json 常见形状是语法正确、值是字符串（"top": "bad"），
+    这类条目留在内存里只会在 resolve 时抛 ValueError，把启动流程卡死。
+    """
+    if not isinstance(m, dict):
+        return False
+    for value in m.values():
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 class Store:
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else DEFAULT_PATH
-        self.raw: dict = {"overrides": {}, "user_sizes": [], "last_job": {}}
+        self.raw: dict = _empty_raw()
         self._users: dict[str, specs.SizeSpec] = {}
 
     def load(self) -> None:
+        """读盘。任何损坏都降级成"这份没有"，结对不抛。
+
+        只挡语法错不够：用户手改过的 papers.json 多半是语法对、形状错
+        （顶层是 list、user_sizes 里混进字符串、条目缺 label），那些必须在
+        这里一次性围住，否则坏配置会把启动流程整个卡死。
+        """
         try:
-            self.raw = json.loads(self.path.read_text(encoding="utf-8"))
+            disk = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            self.raw = {"overrides": {}, "user_sizes": [], "last_job": {}}
-        self.raw.setdefault("overrides", {})
-        self.raw.setdefault("user_sizes", [])
-        self.raw.setdefault("last_job", {})
+            disk = None
+        if not isinstance(disk, dict):
+            disk = {}
+        self.raw = _empty_raw()
+        overrides = disk.get("overrides")
+        if isinstance(overrides, dict):
+            # 逐条也要形状对，否则 resolve 会在后面某次调用里招
+            # 边距值也要能转 float：整条覆盖作废，才符合“任何损坏都降级成没有”
+            self.raw["overrides"] = {
+                k: v for k, v in overrides.items()
+                if isinstance(v, dict) and _margins_ok(v.get("margins_mm"))}
+        last_job = disk.get("last_job")
+        self.raw["last_job"] = last_job if isinstance(last_job, dict) else {}
+        items = disk.get("user_sizes")
         self._users = {}
-        for item in self.raw["user_sizes"]:
-            self._users[item["key"]] = _from_dict(item)
+        for item in items if isinstance(items, list) else []:
+            try:
+                spec = _from_dict(item)
+            except (KeyError, TypeError, ValueError):
+                continue  # 单条坏记录不牵连其余
+            self._users[spec.key] = spec
+        self._sync_user_sizes()
 
     def resolve(self, key: str) -> specs.SizeSpec:
         if key in self._users:
@@ -644,47 +898,72 @@ class Store:
         ov = self.raw["overrides"].get(key)
         if not ov:
             return copy.deepcopy(base)
-        m = ov["margins_mm"]
         return specs.SizeSpec(
             base.key, base.label, base.w_mm, base.h_mm, base.role, base.origin,
             base.borderless,
-            specs.Margins(m["top"], m["bottom"], m["left"], m["right"]),
+            _margins_from_dict(ov["margins_mm"]),
             ov.get("margin_source", "spec"),
             base.driver_paper_name, base.driver_paper_code,
         )
 
     def override_margins(self, key: str, margins: specs.Margins, source: str) -> None:
+        m = _norm_margins(margins)
+        user = self._users.get(key)
+        if user is not None:
+            # 自建尺寸的真相源只有一份：直接改它自己的记录
+            user.margins = m
+            user.margin_source = source
+            self._sync_user_sizes()
+            return
         self.resolve(key)  # 未知 key 在这里抛错，避免写入无效覆盖
         self.raw["overrides"][key] = {
-            "margins_mm": {"top": margins.top, "bottom": margins.bottom,
-                           "left": margins.left, "right": margins.right},
+            "margins_mm": {"top": m.top, "bottom": m.bottom,
+                           "left": m.left, "right": m.right},
             "margin_source": source,
             "updated_at": date.today().isoformat(),
         }
 
     def add_user_size(self, spec: specs.SizeSpec) -> None:
+        if not spec.key or spec.key in PRESET_KEYS:
+            raise ValueError(f"自建尺寸 key 非法：{spec.key!r}（不得为空，不得与预设重名）")
         ok, msg = specs.custom_size_is_legal(spec.w_mm, spec.h_mm)
         if not ok:
             raise ValueError(msg)
+        # 存副本而不是改入参：就地改 spec 会让调用方手里的对象和 _users 里的
+        # 副本各自演化（双真相源），下一次 save() 写的是谁的看见都不一定
+        stored = copy.deepcopy(spec)
+        stored.w_mm, stored.h_mm = float(spec.w_mm), float(spec.h_mm)
+        stored.margins = _norm_margins(spec.margins)
         # 自建尺寸一律走自定义送纸，无边距能力强制关闭
-        spec.origin = "user"
-        spec.borderless = False
-        spec.role = "paper"
-        spec.margin_source = "spec"
-        self._users[spec.key] = spec
+        stored.origin = "user"
+        stored.borderless = False
+        stored.role = "paper"
+        stored.margin_source = "spec"
+        self._users[stored.key] = stored
+        self._sync_user_sizes()
+
+    def _sync_user_sizes(self) -> None:
         self.raw["user_sizes"] = [_to_dict(s) for s in self._users.values()]
 
     def save(self) -> bool:
+        """先写同目录 .tmp 再 os.replace：不让写入中途被杀留下一半 papers.json。
+
+        TypeError/ValueError 也归入失败：不序列化得了的值（NaN 以外的对象、
+        手滑传进来的路径对象）归调用方错，但对用户而言现象与写盘失败相同。
+        """
+        tmp = self.path.with_name(self.path.name + ".tmp")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
+            tmp.write_text(
                 json.dumps(self.raw, ensure_ascii=False, indent=2), encoding="utf-8")
-        except OSError:
+            os.replace(tmp, self.path)
+        except (OSError, TypeError, ValueError):
             return False
         return True
 
 
 def _to_dict(s: specs.SizeSpec) -> dict:
+    # driver_paper_* 不落盘：自建尺寸没有驱动纸张名，那个字段只对预设有意义
     return {
         "key": s.key, "label": s.label, "w_mm": s.w_mm, "h_mm": s.h_mm,
         "role": s.role, "origin": s.origin, "borderless": s.borderless,
@@ -695,13 +974,15 @@ def _to_dict(s: specs.SizeSpec) -> dict:
 
 
 def _from_dict(d: dict) -> specs.SizeSpec:
-    m = d.get("margins_mm", {})
+    """磁盘记录 → 规格。缺字段补默认，类型错就抛（由 load() 逐条兜住）。
+
+    role / origin / borderless 三个字段不采信磁盘值：本项目里自建尺寸只能当
+    纸，且自定义送纸必然留白边（规格第 2 节硬事实）。
+    """
     return specs.SizeSpec(
         d["key"], d["label"], float(d["w_mm"]), float(d["h_mm"]),
-        d.get("role", "paper"), d.get("origin", "user"),
-        bool(d.get("borderless", False)),
-        specs.Margins(m.get("top", 3.0), m.get("bottom", 5.0),
-                      m.get("left", 3.4), m.get("right", 3.4)),
+        "paper", "user", False,
+        _margins_from_dict(d.get("margins_mm") or {}),
         d.get("margin_source", "spec"),
     )
 ```
@@ -709,7 +990,10 @@ def _from_dict(d: dict) -> specs.SizeSpec:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_store.py -v`
-Expected: PASS（7 passed）
+Expected: PASS（16 passed：原 15 + 坏边距值整条丢弃）
+
+Run: `python -m pytest -q`
+Expected: PASS（33 passed，无 warning）
 
 - [ ] **Step 5: 提交**
 
@@ -755,10 +1039,18 @@ def test_counts_with_gap_uses_plus_gap_formula():
     assert pack.grid_counts(210.0, 297.0, 25.0, 32.0, 2.0) == (7, 8)
     # 2寸 35×49 gap=2：floor(212/37)=5、floor(299/51)=5 ⇒ 25
     assert pack.grid_counts(210.0, 297.0, 35.0, 49.0, 2.0) == (5, 5)
+    # 上面两例的尾量（21、25、25、42mm）都大于 gap，去掉分子的 +gap 也不改变
+    # 结果，杀不掉变异；只有尾量不足 gap 的临界排版能区分两种公式。180 与 256
+    # 恰好等于两张加一个间隔（89×2+2、127×2+2），间隔不计外圈 ⇒ 两维都必须是 2。
+    assert pack.grid_counts(180.0, 256.0, 89.0, 127.0, 2.0) == (2, 2)
 
 
 def test_counts_zero_when_cell_bigger_than_region():
-    assert pack.grid_counts(102.0, 152.0, 127.0, 89.0, 0.0) == (0, 0)
+    # 两个方向都放不下：127×200 的格子对 102×152 的区域两向都超
+    assert pack.grid_counts(102.0, 152.0, 127.0, 200.0, 0.0) == (0, 0)
+    # 列与行各自独立算：宽放不下不代表高也放不下（89 在 152 里能竖下一张）。
+    # 总数为零靠的是 place_uniform“任一维为 0 就不放”，不是靠 grid_counts 返回 (0, 0)。
+    assert pack.grid_counts(102.0, 152.0, 127.0, 89.0, 0.0) == (0, 1)
 
 
 def test_bleed_enlarges_cell_effectively():
@@ -875,10 +1167,10 @@ Expected: PASS（7 passed）
 
 - [ ] **Step 5: 变异测试（证明断言有效）**
 
-临时把 `grid_counts` 的 `+ gap` 去掉（改成 `region_w / (cw + gap)`），运行：
+临时把 `grid_counts` 分子的 `+ gap` 去掉（改成 `region_w / (cw + gap)`），运行：
 
 Run: `python -m pytest tests/test_pack_grid.py -v`
-Expected: FAIL —`test_counts_with_gap_uses_plus_gap_formula` 断言失败（7×8 变 6×8）。改回原实现后再跑必须全绿。若仍全绿说明断言没管事，需补强测试。
+Expected: FAIL —`test_counts_with_gap_uses_plus_gap_formula` 的临界断言失败（`(2, 2)` 变 `(1, 1)`）。注意 210×297 那两条删掉 `+ gap` 后仍是 `(7, 8)` 与 `(5, 5)`（`210//27=7`、`297//34=8`），单靠它们杀不掉变异，必须有 180×256 这条。改回原实现后再跑必须全绿。若仍全绿说明断言没管事，需补强测试。
 
 - [ ] **Step 6: 提交**
 
@@ -903,6 +1195,7 @@ git commit -m "feat: 拼版均匀网格装箱与格子放置计算"
   - `pack.best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate) -> list[Cell]`
   - `pack.solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate, depth, memo) -> tuple[list[Cell], str]`
   - `pack.pack(sheet, cell, gap_mm=0.0, bleed_mm=0.0, allow_rotate=True, printable=None) -> LayoutPlan`
+    （`printable=None` 时按整张纸装箱，与规格 5.3 基准同口径）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -915,10 +1208,11 @@ import pytest
 from photoprint.core import pack, specs
 
 
-def _p(sheet_key, cell_key, gap=0.0, bleed=0.0, printable=None):
+def _p(sheet_key, cell_key, gap=0.0, bleed=0.0, printable=None, allow_rotate=True):
     sheet = specs.find_spec(sheet_key)
     cell = specs.find_spec(cell_key)
-    return pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed, printable=printable)
+    return pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed,
+                     allow_rotate=allow_rotate, printable=printable)
 
 
 def test_a4_holds_four_3r():
@@ -955,8 +1249,15 @@ def test_a4_with_bleed_still_four_3r():
 
 
 def test_id_photo_counts_on_a4_with_gap():
-    assert _p("A4", "ID1", gap=2.0).count == 56
-    assert _p("A4", "ID2", gap=2.0).count == 25
+    """证件照格子不得旋转：一寸 7×8=56、二寸 5×5=25（规格 5.3）。
+
+    允许旋转时网格会取两种朝向的较大者，寸照张数只会虚高（一寸虚高到 66+），
+    但横放的格子会让贴出来的证件照躺倒，所以界面层对 role=cell 必须传
+    allow_rotate=False。这里同时断言“旋转不减反增”，把两种行为都钉住。
+    """
+    assert _p("A4", "ID1", gap=2.0, allow_rotate=False).count == 56
+    assert _p("A4", "ID2", gap=2.0, allow_rotate=False).count == 25
+    assert _p("A4", "ID1", gap=2.0).count > 56
 
 
 def test_printable_area_shrink_keeps_four_3r():
@@ -983,12 +1284,23 @@ def test_waste_is_reported():
     assert plan.waste_mm2 == pytest.approx(210 * 297 - 4 * 89 * 127)
 
 
-def test_tie_break_prefers_less_waste_then_square_then_uniform():
-    """A4+3R 的 4 张竖放外接框 178×254；若存在 4 张但更浪费的解不得胜出。"""
+def test_tie_break_prefers_uniform_over_edge_flush_bands():
+    """张数与浪费全同时，贴边的双带解不得赢过居中的均匀网格。
+
+    均匀网格解的外接框是 178×254（更方正），左带贴边、格子间距 89+0 的一刀双带解
+    外接框 194×254（更接近正方形）。若决胜序里“策略简单”不排在“外接框方”
+    之前，贴边解会靠更方正的外接框胜出，而它既不居中、列间隙也不均匀。
+    规格 5.2 的决胜②就为了这条而存在。
+    """
     plan = _p("A4", "3R")
-    xs = [c.x_mm for c in plan.cells]
+    assert plan.strategy == "uniform"
     assert all(not c.rotated for c in plan.cells)  # 同向优先
+    xs = [c.x_mm for c in plan.cells]
     assert min(xs) == pytest.approx((210.0 - 178.0) / 2)
+    assert max(xs) == pytest.approx((210.0 - 178.0) / 2 + 89.0)
+    # 列间隙全等（而不是 0mm 与 16mm 交替）：先取去重后的列坐标再比相邻差
+    cols = sorted(set(xs))
+    assert sorted({round(b - a, 6) for a, b in zip(cols, cols[1:])}) == [89.0]
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -998,7 +1310,9 @@ Expected: FAIL —`AttributeError: module 'photoprint.core.pack' has no attribut
 
 - [ ] **Step 3: 追加第 2、3 级与 pack 入口**
 
-在 `photoprint/core/pack.py` 末尾追加：
+在 `photoprint/core/pack.py` 末尾追加（并在文件顶部已有的 import 区补上
+`from photoprint.core import specs`：`_sheet_rect` 要用 `specs.RectMM`，specs 不
+反向依赖 pack，不构成循环导入）：
 
 ```python
 @dataclass
@@ -1030,23 +1344,32 @@ def best_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
         cells = place_uniform(region_w, region_h, cell_w, cell_h, gap, bleed, rot)
         if not cells:
             continue
-        key = _score(cells, region_w * region_h)
+        key = _score(cells, region_w, region_h, 0)
         if best_key is None or key < best_key:
             best, best_key = cells, key
     return best
 
 
-def _score(cells, region_area):
-    """越小越优：张数多 → 浪费小 → 外接框方 → 朝向统一。"""
+def _score(cells, region_w, region_h, strategy_rank):
+    """决胜排序，越小越优：张数多 → 浪费小 → 策略简单 → 外接框方 → 居中 → 朝向统一。
+
+    对应规格 5.2 的并列决胜①–⑤（首项是张数，它不算决胜而是前提）。
+    “策略简单”必须排在外接框与居中之前：外接框只量跨度，量不出贴边解的不好看——
+    A4+3R 的一刀双带解（左带宽恰好 89mm）外接框 194×254，比均匀网格的 178×254
+    更接近正方形，张数与浪费全同，却不居中、列间隙一边 0mm 一边 16mm。把“简单”放
+    在浪费之后、美观之前，混合带就只能在张数或浪费上真赢时才胜出（如 A4+4R 的 3 比 2）。
+    """
     used = sum(c.w_mm * c.h_mm for c in cells)
-    waste = region_area - used
+    waste = region_w * region_h - used
     x1 = min(c.x_mm for c in cells)
     x2 = max(c.x_mm + c.w_mm for c in cells)
     y1 = min(c.y_mm for c in cells)
     y2 = max(c.y_mm + c.h_mm for c in cells)
     aspect = abs((x2 - x1) - (y2 - y1))
+    # 外接框中心与区域中心的偏离（×2，免去除法）：居中为 0，越大越偏
+    offcenter = abs((x1 + x2) - region_w) + abs((y1 + y2) - region_h)
     mixed = len({c.rotated for c in cells})
-    return (-len(cells), waste, aspect, mixed)
+    return (-len(cells), waste, strategy_rank, aspect, offcenter, mixed)
 
 
 def _cut_candidates(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate):
@@ -1080,10 +1403,10 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
                            allow_rotate)
     best_cells, best_strategy = uniform, "uniform"
     if uniform:
-        best_key = _score(uniform, region_w * region_h)
+        best_key = _score(uniform, region_w, region_h, 0)
     else:
         # 空解的分值必须劣于任何非空解（首项 0 大于任何 -len）
-        best_key = (0, region_w * region_h, 0.0, 0)
+        best_key = (0, region_w * region_h, 9, 0.0, 0.0, 9)
 
     if depth > 0:
         for axis, pos in _cut_candidates(region_w, region_h, cell_w, cell_h,
@@ -1103,7 +1426,7 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
                      c.rotated, c.bleed_mm) for c in cb]
             if not merged:
                 continue
-            key = _score(merged, region_w * region_h)
+            key = _score(merged, region_w, region_h, 1)
             if key < best_key:
                 best_cells, best_strategy, best_key = merged, "bands", key
 
@@ -1114,7 +1437,7 @@ def solve_region(region_w, region_h, cell_w, cell_h, gap, bleed, allow_rotate,
 def pack(sheet, cell, gap_mm: float = 0.0, bleed_mm: float = 0.0,
          allow_rotate: bool = True, printable=None) -> LayoutPlan:
     """装箱入口。sheet/cell 均为 specs.SizeSpec；printable 给定时按其尺寸装箱。"""
-    rect = printable if printable is not None else specs_printable_default(sheet)
+    rect = printable if printable is not None else _sheet_rect(sheet)
     cells, strategy = solve_region(rect.w_mm, rect.h_mm, cell.w_mm, cell.h_mm,
                                    gap_mm, bleed_mm, allow_rotate, depth=2,
                                    memo={})
@@ -1128,16 +1451,23 @@ def pack(sheet, cell, gap_mm: float = 0.0, bleed_mm: float = 0.0,
                       strategy=strategy, printable=rect)
 ```
 
-`specs_printable_default` 与 `build_cuts` 在下一个 Task 定义；为让本 Task 测试可跑，先加最小实现：
+`_sheet_rect` 与 `build_cuts` 是本任务需要的两个辅助函数（后者在下一个 Task
+被真实现替换）：
 
 ```python
-def specs_printable_default(sheet):
-    """默认按物理边距扣除后的可打印区。"""
-    from photoprint.core import specs
-    return specs.printable_rect(sheet)
+def _sheet_rect(sheet):
+    """装箱默认区域 = 整张纸。
+
+    规格 5.3 的手算基准全按整张纸算（`floor(210/89)` 而不是 `floor(203.2/89)`），
+    默认值必须与基准同口径：A4+4R 在 210mm 宽里放得下两张 102mm（204 ≤ 210），
+    扣掉物理边距后只剩 203.2mm，会因 0.8mm 之差让硬断言从 3 张掉到 2 张。
+    代价就是打印路径必须显式传 printable，否则照片会吃进边距。
+    """
+    return specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
 
 
 def build_cuts(cells, rect):
+    """占位：T6 用贯通切缝的真实现替换它。本任务的测试不断言 cuts 内容。"""
     return []
 ```
 
@@ -1165,7 +1495,7 @@ git commit -m "feat: 拼版混合带三级搜索与决胜排序"
 ### Task 6: 裁切参考线生成与分页计算
 
 **Files:**
-- Modify: `photoprint/core/pack.py`（用真实现替换 `build_cuts`，追加 `needed_sheets`）
+- Modify: `photoprint/core/pack.py`（用真实现替换 `build_cuts`，追加 `needed_sheets`，收紧 `LayoutPlan` 字段类型）
 - Test: `tests/test_pack_cuts.py`
 
 **Interfaces:**
@@ -1180,25 +1510,42 @@ git commit -m "feat: 拼版混合带三级搜索与决胜排序"
 `tests/test_pack_cuts.py`：
 
 ```python
-"""裁切线只在内部缝上生成，且贯通整条缝；外圈不画（纸边即基准）。"""
+"""裁切线只在区域内部的格子边界上生成，且贯通整条缝；与纸边重合的不画。"""
 import pytest
 
 from photoprint.core import pack, specs
 
 
 def _a4_3r():
-    return pack.pack(specs.find_spec("A4"), specs.find_spec("3R"))
+    # 整纸装箱，坐标可手算：x0=16、y0=21.5，与断言里的值直接对得上
+    return pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
 
 
-def test_a4_3r_has_four_internal_seams():
+def test_a4_3r_grid_draws_two_side_borders_and_the_middle_seam():
+    """居中 2×2：每轴 3 条（左边界 + 中间缝 + 右边界）。
+
+    只画中间缝与一侧边界的话，切完左列仍是 105mm 宽带白边，
+    得不到 89×127 的成品；成功判据 1.4 要的是“量得出 89×127”。
+    """
     plan = _a4_3r()
     assert plan.count == 4
     v = sorted(round(c.at_mm, 3) for c in plan.cuts if c.axis == "v")
     h = sorted(round(c.at_mm, 3) for c in plan.cuts if c.axis == "h")
     x0 = (210.0 - 178.0) / 2
     y0 = (297.0 - 254.0) / 2
-    assert v == [round(x0 + 89.0, 3), round(x0 + 178.0, 3)]
-    assert h == [round(y0 + 127.0, 3), round(y0 + 254.0, 3)]
+    assert v == [round(x0 + d, 3) for d in (0.0, 89.0, 178.0)]
+    assert h == [round(y0 + d, 3) for d in (0.0, 127.0, 254.0)]
+    assert len(plan.cuts) == 6
+
+
+def test_cells_filling_region_leave_only_the_shared_seam():
+    """格子恰好铺满区域时，与区域边界重合的边界不画：178×127 里两张 3R 只有一条竖缝。"""
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 178.0, 127.0))
+    assert plan.count == 2
+    assert [(c.axis, c.at_mm, c.from_mm, c.to_mm) for c in plan.cuts] == [
+        ("v", 89.0, 0.0, 127.0)]
 
 
 def test_cut_spans_full_used_extent():
@@ -1227,11 +1574,49 @@ def test_merge_spans_joins_touching_intervals():
     assert got == [(0.0, 20.0), (30.0, 40.0)]
 
 
+def test_no_cell_overlaps_and_stays_inside_region():
+    """不变量：任何预设组合下格子不得越出装箱矩形，也不得互相重叠。
+
+    T5 只校了 `used <= w*h`，那个断言既排除不了越界也排除不了重叠（两者
+    的面积可以完全合法）。切缝的正确性建立在“格子不重叠”这个前提上，故与切缝
+    测试同文件。已真跑 756 组（预设对 × (gap, bleed) 三种）确认 0 违规。
+    """
+    for sheet in specs.PAPER_PRESETS:
+        for cell in specs.CELL_PRESETS + specs.PAPER_PRESETS:
+            if cell.key == sheet.key and cell.role == "paper":
+                continue
+            for gap, bleed in ((0.0, 0.0), (2.0, 0.0), (0.0, 3.0)):
+                plan = pack.pack(sheet, cell, gap_mm=gap, bleed_mm=bleed)
+                rect = plan.printable
+                tag = (sheet.key, cell.key, gap, bleed)
+                for c in plan.cells:
+                    assert c.x_mm >= rect.x_mm - 1e-6, tag
+                    assert c.y_mm >= rect.y_mm - 1e-6, tag
+                    assert c.x_mm + c.w_mm <= rect.x_mm + rect.w_mm + 1e-6, tag
+                    assert c.y_mm + c.h_mm <= rect.y_mm + rect.h_mm + 1e-6, tag
+                for i, a in enumerate(plan.cells):
+                    for b in plan.cells[i + 1:]:
+                        ox = min(a.x_mm + a.w_mm, b.x_mm + b.w_mm) - max(a.x_mm, b.x_mm)
+                        oy = min(a.y_mm + a.h_mm, b.y_mm + b.h_mm) - max(a.y_mm, b.y_mm)
+                        assert not (ox > 1e-6 and oy > 1e-6), (tag, a, b)
+
+
 def test_needed_sheets():
     assert pack.needed_sheets(4, 4) == 1
     assert pack.needed_sheets(4, 5) == 2
     assert pack.needed_sheets(4, 8) == 2
     assert pack.needed_sheets(0, 3) == 0  # 无格子可打属异常，交由调用方提示
+
+
+def test_bleed_seams_sit_on_the_outer_box_and_need_a_second_trim():
+    """出血模式的切缝按格子外框（块=成品+2*bleed）出：沿缝切出 95×133 的块，
+    裁到 89×127 是二道精裁，精裁线由渲染层按 inner_mm() 叠加（规格 5.2）。"""
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     bleed_mm=3.0, printable=specs.RectMM(0.0, 0.0, 190.0, 133.0))
+    assert plan.count == 2
+    assert [(c.axis, c.at_mm, c.from_mm, c.to_mm) for c in plan.cuts] == [
+        ("v", 95.0, 0.0, 133.0)]
+    assert plan.cells[0].inner_mm() == (3.0, 3.0, 89.0, 127.0)
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1256,59 +1641,47 @@ def merge_spans(spans):
 
 
 def build_cuts(cells, rect):
-    """由格子外框推导内部裁切缝。
+    """由格子外框推导裁切缝（规格 5.2 的切缝取舍规则）。
 
-    规则：缝取在每个格子的左/右（或上/下）边界，但必须落在区域内部；
-    线段取该缝两侧相邻格子 y（或 x）范围的并集，贯通整条切缝，
-    以便切纸刀有连续引导（规格 5.2 与 6.4）。
+    画：严格落在区域内的格子边界（左/右或上/下）；居中留白时两侧都要画，
+    只画一侧会切不出成品尺寸。
+    不画：与区域边界重合的边界（纸边就是基准，切了也无从下手）。
+    线段取紧贴该缝的格子在另一轴上的范围之并集，让切纸刀有连续引导（见 6.4）。
     """
     if len(cells) < 2:
         return []
     cuts = []
     tol = 1e-3
 
-    def seams(axis_pos_attr, span_attr):
+    # 轴、属性名、区域都显式传参：不靠外层循环变量绑定闭包，
+    # 那样写抽出一个函数就得连带重写调用点
+    def seams(axis, pos_attrs, span_attrs, base, extent):
+        lo_attr, len_attr = pos_attrs
         positions = set()
         for c in cells:
-            lo = getattr(c, axis_pos_attr[0])
-            hi = lo + getattr(c, axis_pos_attr[1])
+            lo = getattr(c, lo_attr)
             positions.add(round(lo, 6))
-            positions.add(round(hi, 6))
+            positions.add(round(lo + getattr(c, len_attr), 6))
         for p in sorted(positions):
-            if not (rect.x_mm + tol < p < rect.x_mm + rect.w_mm - tol) and axis == "v":
-                continue
-            if not (rect.y_mm + tol < p < rect.y_mm + rect.h_mm - tol) and axis == "h":
+            if not (base + tol < p < base + extent - tol):
                 continue
             spans = []
             for c in cells:
-                lo = getattr(c, axis_pos_attr[0])
-                hi = lo + getattr(c, axis_pos_attr[1])
-                if abs(lo - p) > tol and abs(hi - p) > tol:
-                    continue
-                s0 = getattr(c, span_attr[0])
-                s1 = s0 + getattr(c, span_attr[1])
-                # 只统计紧邻该缝的格子，避免把远处的行并进来
-                spans.append((s0, s1))
-            if not spans:
-                continue
+                lo = getattr(c, lo_attr)
+                if abs(lo - p) > tol and abs(lo + getattr(c, len_attr) - p) > tol:
+                    continue  # 不与该缝紧邻的格子不得拉长线段
+                s0 = getattr(c, span_attrs[0])
+                spans.append((s0, s0 + getattr(c, span_attrs[1])))
             for a, b in merge_spans(spans):
                 cuts.append(CutLine(axis, p, a, b))
 
-    for axis in ("v", "h"):
-        if axis == "v":
-            seams(("x_mm", "w_mm"), ("y_mm", "h_mm"))
-        else:
-            seams(("y_mm", "h_mm"), ("x_mm", "w_mm"))
+    seams("v", ("x_mm", "w_mm"), ("y_mm", "h_mm"), rect.x_mm, rect.w_mm)
+    seams("h", ("y_mm", "h_mm"), ("x_mm", "w_mm"), rect.y_mm, rect.h_mm)
 
-    # 同一条缝上相邻线段合并，去掉重合项
-    merged = {}
-    for c in cuts:
-        merged.setdefault((c.axis, c.at_mm), []).append((c.from_mm, c.to_mm))
-    out = []
-    for (axis, at), spans in merged.items():
-        for a, b in merge_spans(spans):
-            out.append(CutLine(axis, at, a, b))
-    return sorted(out, key=lambda c: (c.axis, c.at_mm, c.from_mm))
+    # 每条缝 (axis, at_mm) 在 seams 内只生成一次，线段已按缝合并过，
+    # 这里只需总排序（评审 Important #2：曾有第二趟 merged 再合并，
+    # 作 756 组/4245 个缝桶验证全部为恒等操作，属死代码，已删）
+    return sorted(cuts, key=lambda c: (c.axis, c.at_mm, c.from_mm))
 
 
 def needed_sheets(plan_count: int, photo_count: int) -> int:
@@ -1318,57 +1691,47 @@ def needed_sheets(plan_count: int, photo_count: int) -> int:
     return -(-photo_count // plan_count)
 ```
 
-注意 `seams()` 内对 `axis` 的闭包引用来自外层循环变量，实现时必须保证 `axis` 在调用前已绑定：把 `for axis in ("v", "h")` 循环体写成显式传参 `seams(axis, ("x_mm", "w_mm"), ("y_mm", "h_mm"))`，避免闭包陷阱。正确写法：
+两个轴的坐标属性名不同（竖缝的位置读 `x_mm`，线段的范围读 `y_mm`），用
+元组传名字而不是写四份 `if axis == "v"` 的分支，是为了让两轴共用同一段
+推导代码；分支写到一起会漏改其中一轴。
+
+- [ ] **Step 4: 顺带订正 T5 评审留下的三处（不改行为）**
+
+T5 复审 Approved，但留了三条 Minor，都是只碰 `pack.py` / T5 测试文件的极小改动，归入本任务一并清：
+
+1. 收紧 `LayoutPlan` 的字段类型（现在 `cells: list` / `cuts: list` / `printable: object` 丢了类型信号，T6 开始 `cuts` 真产 `CutLine`、T9 要消费 `printable`）：
 
 ```python
-def seams(axis, pos_attrs, span_attrs):
-    positions = set()
-    for c in cells:
-        lo = getattr(c, pos_attrs[0])
-        hi = lo + getattr(c, pos_attrs[1])
-        positions.add(round(lo, 6))
-        positions.add(round(hi, 6))
-    for p in sorted(positions):
-        if axis == "v":
-            if not (rect.x_mm + 1e-3 < p < rect.x_mm + rect.w_mm - 1e-3):
-                continue
-        else:
-            if not (rect.y_mm + 1e-3 < p < rect.y_mm + rect.h_mm - 1e-3):
-                continue
-        spans = []
-        for c in cells:
-            lo = getattr(c, pos_attrs[0])
-            hi = lo + getattr(c, pos_attrs[1])
-            if abs(lo - p) > 1e-3 and abs(hi - p) > 1e-3:
-                continue
-            s0 = getattr(c, span_attrs[0])
-            s1 = s0 + getattr(c, span_attrs[1])
-            spans.append((s0, s1))
-        for a, b in merge_spans(spans):
-            cuts.append(CutLine(axis, p, a, b))
-
-
-for axis in ("v", "h"):
-    if axis == "v":
-        seams(axis, ("x_mm", "w_mm"), ("y_mm", "h_mm"))
-    else:
-        seams(axis, ("y_mm", "h_mm"), ("x_mm", "w_mm"))
+@dataclass
+class LayoutPlan:
+    cells: list[Cell]
+    cuts: list[CutLine]
+    count: int
+    waste_mm2: float
+    strategy: str
+    printable: specs.RectMM
 ```
 
-- [ ] **Step 4: 运行确认通过**
+`from __future__ import annotations` 已在文件顶部，这些注解不会在运行期求值，`specs` 也已真实 import，不构成循环。
+
+2. `best_uniform` 的 docstring 只写了“外接框更接近正方形者优先”，但 `_score` 的元组里还有居中偏差与朝向两项生效。补成：“两种朝向各自均匀排布，取张数多者；并列时外接框更接近正方形且更居中者优先。”
+
+3. `tests/test_pack_bands.py::test_a4_holds_three_4r_only_via_band_split` 的 docstring 写“切位 y=152 分两带”，而实现报出的是同分的对称解 y=102（两支 `_score` 元组逐位相等，`_cut_candidates` 排序后取前者）。把这句话改成：“单网格最多 2；横切一刀分两带（一支为切位 y=152：上 2 竖 + 下 1 横，另一支 y=102 与之对称）得 3。两支同分，实际报出哪支取决于候选切位的排序，本测试只钉张数与混合朝向。”不得动断言本身。
+
+- [ ] **Step 5: 运行确认通过**
 
 Run: `python -m pytest tests/test_pack_cuts.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（9 passed）
 
-- [ ] **Step 5: 全量回归**
+- [ ] **Step 6: 全量回归**
 
 Run: `python -m pytest -v`
-Expected: 全绿（units/specs/store/pack 三组）
+Expected: 全绿（59 passed：units 6 + specs 12 + store 15 + pack 三组 26）
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add photoprint/core/pack.py tests/test_pack_cuts.py
+git add photoprint/core/pack.py tests/test_pack_cuts.py tests/test_pack_bands.py
 git commit -m "feat: 裁切参考线推导与分页计算"
 ```
 
@@ -1381,7 +1744,7 @@ git commit -m "feat: 裁切参考线推导与分页计算"
 - Test: `tests/test_crop.py`
 
 **Interfaces:**
-- Consumes: `units.ppmm`
+- Consumes: `units.ppmm`、`units.round_px`
 - Produces:
   - `crop.Placement(crop_px: tuple[int, int, int, int], dest_mm: tuple[float, float, float, float])`
   - `crop.cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode, zoom=1.0, dx_mm=0.0, dy_mm=0.0, ppmm=None) -> Placement`
@@ -1396,7 +1759,7 @@ git commit -m "feat: 裁切参考线推导与分页计算"
 """裁放置：用 dpi=25.4 让 1 像素 = 1 毫米，便于逐位核对。"""
 import pytest
 
-from photoprint.core import crop
+from photoprint.core import crop, units
 
 PPMM = 1.0  # dpi 25.4
 
@@ -1460,7 +1823,10 @@ def test_zoom_bounds_are_enforced():
         crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=1.5, ppmm=PPMM)
 
 
-def test_default_ppmm_is_300dpi():
+def test_default_ppmm_accepted():
+    """解析结果对 ppmm 不变（分子分母同现被约掉），本条钉不住「默认=300dpi」；
+    它钉的是默认值不为 None 也能算完、不触守卫（评审 I-3，原名
+    test_default_ppmm_is_300dpi 名不副实）。"""
     p = crop.cell_crop_box(200, 100, 100, 100, crop.FILL)
     assert p.crop_px == (50, 0, 150, 100)
 
@@ -1468,6 +1834,63 @@ def test_default_ppmm_is_300dpi():
 def test_unknown_mode_rejected():
     with pytest.raises(ValueError, match="mode"):
         crop.cell_crop_box(200, 100, 100, 100, "stretch", ppmm=PPMM)
+
+
+def test_fill_zoom_upper_bound_enforced():
+    # 评审 I-2：原 test_zoom_bounds_are_enforced 只钉了 FILL 下界与 FIT 上界
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FILL, zoom=4.5, ppmm=PPMM)
+
+
+def test_fit_zoom_lower_bound_enforced():
+    with pytest.raises(ValueError, match="zoom"):
+        crop.cell_crop_box(200, 100, 100, 100, crop.FIT, zoom=0.1, ppmm=PPMM)
+
+
+def test_fit_aspect_ratio_preserved_on_non_square_target():
+    """评审 I-2：正方形目标下 min() 两支数值相等，钉不住退化为只按宽缩放。"""
+    p = crop.cell_crop_box(200, 100, 400, 50, crop.FIT, ppmm=PPMM)
+    x, y, w, h = p.dest_mm
+    assert (w, h) == pytest.approx((100.0, 50.0))  # 按宽缩放会得 400×200 越格
+    assert (x, y) == pytest.approx((150.0, 0.0))
+
+
+def test_fill_crop_box_uses_half_up_rounding():
+    """评审 I-1：未取整的 l 恰为 36.5，必须按全项目 round_px 口径得 37，
+    而非银行家舍入的 36。"""
+    p = crop.cell_crop_box(100, 80, 100, 152, crop.FILL, zoom=2,
+                           dx_mm=-1.3, ppmm=units.ppmm(300))
+    assert p.crop_px == (37, 20, 63, 60)
+
+
+def test_zero_area_crop_box_keeps_at_least_one_pixel():
+    """终审 Minor：极端长宽比会让裁框取整成零宽/零高（r == l），
+
+    那会 crop 出一张空图、整格留白。4000x1 的照片塞进 25x32mm 的格子，
+    未加守卫时 round_px(l) == round_px(r) == 2000。
+    """
+    p = crop.cell_crop_box(4000, 1, 25.0, 32.0, crop.FILL,
+                           ppmm=units.ppmm(25.4))
+    x0, y0, x1, y1 = p.crop_px
+    assert x1 > x0 and y1 > y0
+    assert (x0, x1) == (2000, 2001)
+
+
+def test_zero_area_crop_box_stays_inside_photo():
+    """终审复审 Minor：零面积守卫的「起点 +1」会把裁框推出图外。
+
+    若取整后 cl 已贴住图右边界（== photo_w_px），旧写法只做 cr = cl + 1，
+    得到越界框；PIL crop 对越界区域填 (0, 0, 0) 纯黑，比留白更糟。
+    """
+    for p in (
+        crop.cell_crop_box(4000, 1, 1.0, 32.0, crop.FILL, dx_mm=1e6,
+                           ppmm=PPMM),
+        crop.cell_crop_box(1, 4000, 32.0, 1.0, crop.FILL, dy_mm=1e6,
+                           ppmm=PPMM),
+    ):
+        cl, ct, cr, cb = p.crop_px
+        assert 0 <= cl < cr <= 4000
+        assert 0 <= ct < cb <= 4000
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1503,8 +1926,8 @@ _VALID_MODES = (FILL, FIT)
 class Placement:
     """crop_px 为原图像素裁框，dest_mm 为相对目标区左上角的落位。"""
 
-    crop_px: tuple
-    dest_mm: tuple
+    crop_px: tuple[int, int, int, int]
+    dest_mm: tuple[float, float, float, float]
 
 
 def _clamp(value, lo, hi):
@@ -1535,8 +1958,21 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
         l = _clamp(cx - crop_w / 2.0, 0.0, photo_w_px - crop_w)
         t = _clamp(cy - crop_h / 2.0, 0.0, photo_h_px - crop_h)
         r, b = l + crop_w, t + crop_h
-        return Placement((int(round(l)), int(round(t)),
-                          int(round(r)), int(round(b))),
+        # 取整走 units.round_px（全项目口径，.5 向上）：内置 round 是银行家
+        # 舍入，300dpi 下约 4.8% 的裁框边会恰落 .5，偏移方向不可预测（T7 评审 I-1）
+        cl, ct, cr, cb = (units.round_px(l), units.round_px(t),
+                          units.round_px(r), units.round_px(b))
+        # 极端长宽比下裁框会被取整压成零宽/零高（r == l）：那会 crop 出
+        # 一张空图、整格留白，故至少保留 1 像素
+        if cr == cl:
+            # 先夹进图内再加 1：cl 可能已被钳到 photo_w_px，直接 +1 会越界，
+            # PIL crop 越界部分填 (0,0,0) 纯黑，比留白更糟（终审复审 Minor）
+            cl = min(cl, photo_w_px - 1)
+            cr = cl + 1
+        if cb == ct:
+            ct = min(ct, photo_h_px - 1)
+            cb = ct + 1
+        return Placement((cl, ct, cr, cb),
                          (0.0, 0.0, float(target_w_mm), float(target_h_mm)))
 
     if not 0.2 <= zoom <= 1.0:
@@ -1553,7 +1989,7 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_crop.py -v`
-Expected: PASS（10 passed）
+Expected: PASS（16 passed：原 14 + 零面积至少 1px + 零面积不越界）
 
 - [ ] **Step 5: 提交**
 
@@ -1751,7 +2187,7 @@ import pytest
 Image = pytest.importorskip("PIL.Image", reason="需要 Pillow")
 from PIL import Image as PILImage  # noqa: E402
 
-from photoprint.core import modes, pack, render, specs  # noqa: E402
+from photoprint.core import modes, pack, render, specs, units  # noqa: E402
 
 DPI = 25.4  # 1px == 1mm
 
@@ -1760,11 +2196,15 @@ def _photos(n, color):
     return [PILImage.new("RGB", (200, 100), color) for _ in range(n)]
 
 
-def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None):
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"), bleed_mm=bleed)
+def _a4_3r(mode=modes.FILL_PRINTABLE, bleed=0.0, photos=None, cut_lines=True):
+    # 固定用整张纸作为装箱矩形，坐标可手算：x0=(210-178)/2=16、y0=(297-254)/2=21.5
+    # （默认的可打印内缩矩形由 T5 的测试覆盖，本文件只验裁切线几何）
+    full = specs.RectMM(0.0, 0.0, 210.0, 297.0)
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"), bleed_mm=bleed,
+                     printable=full)
     imgs = photos or _photos(plan.count, (255, 0, 0))
     return plan, render.render_page(plan, imgs, specs.find_spec("A4"), DPI, mode,
-                                   show_cut_lines=True)
+                                   show_cut_lines=cut_lines)
 
 
 def test_page_size_matches_sheet_in_pixels():
@@ -1775,21 +2215,44 @@ def test_page_size_matches_sheet_in_pixels():
 def test_photo_pixels_present_and_bounded():
     plan, img = _a4_3r(photos=_photos(4, (255, 0, 0)))
     c = plan.cells[0]
-    x0 = int(round(c.x_mm))
-    y0 = int(round(c.y_mm))
+    x0 = units.round_px(c.x_mm)
+    y0 = units.round_px(c.y_mm)
     assert img.getpixel((x0 + 40, y0 + 60)) == (255, 0, 0)
     # 纸外角落必须是白（A4 无边距未启用时角落在遮罩内，仍非照片色）
     assert img.getpixel((0, 0)) != (255, 0, 0)
 
 
 def test_fill_mode_crops_to_cell_exactly():
-    """横向 200×100 的照片铺满 89×127 的格：宽被裁，高铺满。"""
-    plan, img = _a4_3r(photos=_photos(4, (0, 255, 0)))
+    """横向 200×100 的照片铺满 89×127 的格：宽被裁，高铺满。
+    只放一张照片（其余格留白），否则同行邻格的同色绿会连进扫描区间；
+    关切缝叠加：居中装箱的缝在 x=16/105 的格子边界上（T6 裁决两侧都画），
+    会盖掉照片首列——那是画线预期行为，与本条的几何断言无关，
+    缝自身的像素位置由后面的裁切线测试钉住。"""
+    green = PILImage.new("RGB", (200, 100), (0, 255, 0))
+    plan, img = _a4_3r(photos=[green], cut_lines=False)
     c = plan.cells[0]
-    x0, y0 = int(round(c.x_mm)), int(round(c.y_mm))
+    x0, y0 = units.round_px(c.x_mm), units.round_px(c.y_mm)
     col = [x for x in range(210) if img.getpixel((x, y0 + 60)) == (0, 255, 0)]
     assert min(col) == x0
     assert max(col) - min(col) + 1 == 89
+
+
+def test_bleed_mode_overlays_inner_trim_guides():
+    """BLEED_TRIM 的两道切线：外框缝（粗切）由 build_cuts 给出并被切缝测试钉住，
+    本条钉第二道：按 inner_mm() 画的精裁线（T6 裁决，规格 5.2）。
+    内框比块边内缩 3px（dpi=25.4），线压在照片出血区上，精裁后正好消失。"""
+    green = PILImage.new("RGB", (200, 100), (0, 255, 0))
+    plan, img = _a4_3r(mode=modes.BLEED_TRIM, bleed=3.0, photos=[green])
+    c = plan.cells[0]
+    ix, iy = c.x_mm + c.bleed_mm, c.y_mm + c.bleed_mm   # 内框左上 (13.0, 18.5)
+    # 竖精裁线：x=13 像素列非绿，右移一列回绿
+    assert img.getpixel((int(ix), int(iy) + 40)) != (0, 255, 0)
+    assert img.getpixel((int(ix) + 1, int(iy) + 40)) == (0, 255, 0)
+    # 横精裁线：y=18.5 经 round_px 落像素 19，上方出血带仍是绿
+    x_mid = int(c.x_mm + c.w_mm / 2.0)                  # 57
+    assert img.getpixel((x_mid, int(iy + 0.5))) != (0, 255, 0)
+    assert img.getpixel((x_mid, int(iy + 0.5) + 1)) == (0, 255, 0)
+    assert img.getpixel((x_mid, int(iy) - 1)) == (0, 255, 0)
 
 
 def test_mask_covers_physical_margin_band():
@@ -1803,10 +2266,12 @@ def test_mask_covers_physical_margin_band():
 
 def test_cut_lines_are_drawn_and_light_gray():
     plan, img = _a4_3r(photos=_photos(4, (255, 0, 0)))
-    seam = plan.cuts[0]
-    at = int(round(seam.at_mm))
-    y = int(round((seam.from_mm + seam.to_mm) / 2))
-    px = img.getpixel((at, y))
+    # 取竖缝：它的 x 落在 at_mm 上，线段沿 y 走（取 cuts[0] 会拿成横缝，
+    # 坐标当像素用时会把 x/y 写反，采样点落在照片上而不是线上）
+    seam = next(c for c in plan.cuts if c.axis == "v")
+    x = units.round_px(seam.at_mm)
+    y = units.round_px(seam.from_mm) + 30  # 沿线段方向取一点，避开横缝
+    px = img.getpixel((x, y))
     assert abs(px[0] - render.CUT_LINE_GRAY) <= 3
     assert abs(px[1] - render.CUT_LINE_GRAY) <= 3
 
@@ -1824,35 +2289,55 @@ def test_cut_lines_can_be_hidden():
     hidden = render.render_page(plan, _photos(4, (255, 0, 0)),
                                 specs.find_spec("A4"), DPI, modes.FILL_PRINTABLE,
                                 show_cut_lines=False)
-    at = int(round(plan.cuts[0].at_mm))
-    y = int(round((plan.cuts[0].from_mm + plan.cuts[0].to_mm) / 2))
-    assert hidden.getpixel((at, y)) != shown.getpixel((at, y))
+    # 同一个采样点：画时是灰线，关掉后必须变回照片色（1px=1mm）
+    seam = next(c for c in plan.cuts if c.axis == "v")
+    x = units.round_px(seam.at_mm)
+    y = units.round_px(seam.from_mm) + 30
+    assert shown.getpixel((x, y)) != (255, 0, 0)
+    assert hidden.getpixel((x, y)) == (255, 0, 0)
 
 
 def test_bleed_cells_extend_beyond_inner_photo():
     plan, img = _a4_3r(mode=modes.BLEED_TRIM, bleed=3.0, photos=_photos(4, (9, 9, 9)))
     c = plan.cells[0]
     # 出血格的外框 95×133，内缩 3mm 后才是 89×127 成品；画面应铺到外框
-    assert img.getpixel((int(round(c.x_mm)) + 1, int(round(c.y_mm)) + 1)) == (9, 9, 9)
+    assert img.getpixel((units.round_px(c.x_mm) + 1, units.round_px(c.y_mm) + 1)) == (9, 9, 9)
 
 
-def test_photo_count_mismatch_pads_with_white_cells():
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"))
+def test_photo_count_mismatch_leaves_remaining_cells_white():
+    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
     assert plan.count == 4
     img = render.render_page(plan, _photos(2, (255, 0, 0)), specs.find_spec("A4"),
                              DPI, modes.FILL_PRINTABLE)
     assert img.size == (210, 297)
-    assert img.getpixel((50, 50)) != (255, 0, 0) or True  # 不抛异常即通过
+    # 第 4 格没有照片，必须保持纸白，不能被上一张残留内容污染
+    c3 = plan.cells[3]
+    assert img.getpixel((units.round_px(c3.x_mm) + 40, units.round_px(c3.y_mm) + 60)) == (255, 255, 255)
 
 
 def test_rotated_cell_places_rotated_photo():
-    """A4 打 5R 需要横放：外框 w>h 时照片必须转 90° 后落入。"""
-    plan = pack.pack(specs.find_spec("A4"), specs.find_spec("5R"))
-    cell = next(c for c in plan.cells if c.rotated)
-    img = render.render_page(plan, [None] * plan.count, specs.find_spec("A4"), DPI,
-                             modes.FILL_PRINTABLE)
-    assert cell.w_mm == 178.0 and cell.h_mm == 127.0
+    """A4 打 4R 需要横放：照片转 90° 后必须正好落在格内（C1 回归）。
+
+    旧版用 [None] * count 渲染——整页全白也能通过，等于什么都没测。
+    旋转格的 dest_mm 是旋转前的 (w, h)，若不交换轴就按 (102, 152) 缩放，
+    实际宽度会被撑到 152mm 冲进邻格并越过纸边（终审 C1 实测）。
+    """
+    a4 = specs.find_spec("A4")
+    plan = pack.pack(a4, specs.find_spec("4R"), printable=specs.printable_rect(a4))
+    assert plan.count == 2 and all(c.rotated for c in plan.cells)
+    img = render.render_page(plan, _photos(plan.count, (255, 0, 0)), a4, DPI,
+                             modes.FILL_PRINTABLE, show_cut_lines=False,
+                             show_mask=False)
     assert img.size == (210, 297)
+    for c in plan.cells:
+        x0, y0 = units.round_px(c.x_mm), units.round_px(c.y_mm)
+        w, h = units.round_px(c.w_mm), units.round_px(c.h_mm)
+        for pt in ((x0 + 1, y0 + 1), (x0 + w - 2, y0 + 1),
+                   (x0 + 1, y0 + h - 2), (x0 + w - 2, y0 + h - 2)):
+            assert img.getpixel(pt) == (255, 0, 0), (c, pt)
+    # 溢出的画面会越过格子边界：格间留白必须仍是纸白
+    assert img.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_single_cell_on_same_size_paper_stays_inside_printable():
@@ -1958,15 +2443,22 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         pl = crop.cell_crop_box(photo.width, photo.height, target_w, target_h,
                                cm, ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
+        # dest_mm 是旋转前的目标矩形（宽高按未旋转的格子算）：照片转 90° 后
+        # 宽高互换，落位偏移也须互换，否则尺寸检查拿错轴、缩放补偿到错误的
+        # (w, h)，画面会撑出格子并压到邻格（终审 C1 实测）
+        dx, dy, dw, dh = pl.dest_mm
         if cell.rotated:
             piece = piece.transpose(Image.ROTATE_270)
-        if pl.dest_mm[2] != 0 and (abs(pl.dest_mm[2] - piece.width / units.ppmm(dpi)) > 0.6
-                                   or abs(pl.dest_mm[3] - piece.height / units.ppmm(dpi)) > 0.6):
-            piece = piece.resize((max(1, int(round(pl.dest_mm[2] * units.ppmm(dpi)))),
-                                  max(1, int(round(pl.dest_mm[3] * units.ppmm(dpi))))),
+            # 这是「转置」而非通用 90° 旋转映射：仅在落位居中时与 90° 旋转
+            # 等价，若将来支持非居中偏移须改为 x' = H-(y+h), y' = x
+            dx, dy, dw, dh = dy, dx, dh, dw
+        if dw and (abs(dw - piece.width / units.ppmm(dpi)) > 0.6
+                   or abs(dh - piece.height / units.ppmm(dpi)) > 0.6):
+            piece = piece.resize((max(1, units.round_px(dw * units.ppmm(dpi))),
+                                  max(1, units.round_px(dh * units.ppmm(dpi)))),
                                  Image.LANCZOS)
-        paste_x = units.mm_to_px(ox + pl.dest_mm[0], dpi)
-        paste_y = units.mm_to_px(oy + pl.dest_mm[1], dpi)
+        paste_x = units.mm_to_px(ox + dx, dpi)
+        paste_y = units.mm_to_px(oy + dy, dpi)
         page.paste(piece, (paste_x, paste_y))
 
     # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；
@@ -1991,20 +2483,38 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 draw.line([(units.mm_to_px(cut.from_mm, dpi), y),
                            (units.mm_to_px(cut.to_mm, dpi), y)],
                           fill=(CUT_LINE_GRAY, CUT_LINE_GRAY, CUT_LINE_GRAY), width=lw)
+
+    # 出血模式的切缝是两道（T6 裁决，规格 5.2）：build_cuts 给的是外框缝
+    # = 粗切落刀位；精裁的第二道线由内框 inner_mm() 推出，在这里压在照片
+    # 出血区上，精裁后正好随成品边缘消失。单格也要画精裁线（外框缝没有，
+    # 出血仍需精裁）
+    if show_cut_lines and mode == modes.BLEED_TRIM:
+        lw = max(1, units.mm_to_px(CUT_LINE_MM, dpi))
+        for cell in plan.cells:
+            ix, iy, iw, ih = cell.inner_mm()
+            x2, y2 = ix + iw, iy + ih
+            for x0, y0, x1, y1 in ((ix, iy, ix, y2), (x2, iy, x2, y2),
+                                   (ix, iy, x2, iy), (ix, y2, x2, y2)):
+                draw.line([(units.mm_to_px(x0, dpi), units.mm_to_px(y0, dpi)),
+                           (units.mm_to_px(x1, dpi), units.mm_to_px(y1, dpi))],
+                          fill=(CUT_LINE_GRAY, CUT_LINE_GRAY, CUT_LINE_GRAY),
+                          width=lw)
     return page
 ```
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_render_geometry.py -v`
-Expected: PASS（12 passed）
+Expected: PASS（13 passed）
 
 - [ ] **Step 5: 变异测试**
 
 把 `units.mm_to_px(cell 坐标)` 改成 int 截断（`int(...)`）：
 
 Run: `python -m pytest tests/test_render_geometry.py -v`
-Expected: `test_fill_mode_crops_to_cell_exactly` 失败（宽度得 88 而非 89）。改回后全绿。
+Expected: `test_bleed_mode_overlays_inner_trim_guides` 失败（横精裁线 `iy = 18.5` 被截成 18 而非 round_px 的 19）。改回后全绿。
+
+（T9 实现期实测订正：原预期写的“`test_fill_mode_crops_to_cell_exactly` 宽度得 88 而非 89”不成立——dpi=25.4 时 `ppmm==1.0` 且 `x_mm==16.0`、内框宽恰为 `89.0`，整条链上的值全是整数，截断与就近取整同值。若要杀 fill 那条宽度断言，变异点应改 resize 补偿阈值 `0.6 → 1000.0`（得 70）。两处变异各杀一条，套件对取整口径与物理尺寸补偿都不是盲区。）
 
 - [ ] **Step 6: 提交**
 
@@ -2092,8 +2602,9 @@ def test_probe_reads_paper_table_in_tenth_mm_and_device_in_px():
     assert r.paper_sizes_mm[0] == (210.0, 297.0)
     assert r.paper_sizes_mm[1] == (102.0, 152.0)
     assert r.paper_codes == [1, 2]
-    # 设备物理尺寸是像素 ⇒ 2480 / 300 * 25.4 = 210.13mm
-    assert r.physical_w_mm == pytest.approx(210.13, abs=0.05)
+    # 设备物理尺寸是像素 ⇒ 2480 / 300 × 25.4 = 209.97mm（A4 在 300dpi 下是
+    # 2480px 而非整 210mm，驱动本就留了 0.03mm 量化余量）
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
     assert r.dpi_x == 300
 
 
@@ -2104,7 +2615,7 @@ def test_probe_unit_conventions_are_isolated():
                            probe.HORZRES: 2412, probe.VERTRES: 3448,
                            probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
     r = probe.probe(api, "P")
-    assert r.physical_w_mm == pytest.approx(210.13, abs=0.05)
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
     assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)   # 34/300*25.4
     assert r.offset_y_mm == pytest.approx(2.54, abs=0.01)   # 30/300*25.4
     assert r.res_w_px == 2412
@@ -2174,6 +2685,15 @@ Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.api'`
 from __future__ import annotations
 
 
+def as_hdc(hdc):
+    """int HDC 与 PyCDC 都接受。
+
+    PyCDC 传给 int() 会 TypeError（`CreateDCFromHandle(PyCDC)` 也因此失败），
+    必须先走 GetSafeHdc()；反之 int 没有任何属性，直接返回。
+    """
+    return hdc.GetSafeHdc() if hasattr(hdc, "GetSafeHdc") else int(hdc)
+
+
 class RealWinApi:
     def enum_printers(self):
         import win32print
@@ -2181,8 +2701,10 @@ class RealWinApi:
             win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
 
     def device_caps(self, printer, field):
+        # 端口必须是字符串：pywin32 会做 "None is not a valid string" 检查，
+        # 传 None 直接 TypeError（本机实测，空串等价于用驱动默认端口）
         import win32print
-        return win32print.DeviceCapabilities(printer, None, field, None)
+        return win32print.DeviceCapabilities(printer, "", field, None)
 
     def open_printer(self, name):
         import win32print
@@ -2192,21 +2714,34 @@ class RealWinApi:
         import win32print
         win32print.ClosePrinter(handle)
 
-    def document_properties(self, handle, printer, mode="get"):
+    def get_devmode(self, handle):
+        """驱动当前 DEVMODE（含私有扩展区）。改结构必须基于它，不能新建空的。"""
         import win32print
-        return win32print.DocumentProperties(0, handle, printer, None, None,
-                                             _mode_flag(mode))
+        return win32print.GetPrinter(handle, 2)["pDevMode"]
+
+    def document_properties(self, handle, printer, mode="size", dm=None):
+        """mode="size" 只问结构总长；mode="update" 让驱动校验/回填修改后的 dm。"""
+        import win32con
+        import win32print
+        if mode == "size":
+            return win32print.DocumentProperties(0, handle, printer, None, None, 0)
+        flag = win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER
+        return win32print.DocumentProperties(0, handle, printer, dm, dm, flag)
+
+    def create_dc(self, printer, devmode=None):
+        import win32gui
+        return win32gui.CreateDC("WIN32", printer, devmode)
+
+    def delete_dc(self, hdc):
+        import win32gui
+        win32gui.DeleteDC(as_hdc(hdc))
 
     def get_device_caps(self, hdc, field):
-        import win32con
-        import win32ui
-        return win32ui.CreateDCFromHandle(int(hdc)).GetDeviceCaps(field)
-
-
-def _mode_flag(mode):
-    import win32print
-    return {"get": win32print.DM_GETMODE, "set": win32print.DM_SETMODE}[mode]
+        import win32print
+        return win32print.GetDeviceCaps(as_hdc(hdc), field)
 ```
+
+注：以上是终审 C2 订正后的真实契约（本机 pywin32 对 "Microsoft Print to PDF" 实测，见 `.superpowers/sdd/spike_win32.py`）：`win32print` 既无 `DM_INQUIRE`/`DM_GETMODE`，也没有 `CreateDC`；`win32gui` 无 `GetDeviceCaps`；改 DEVMODE 的 fMode 非 0 时必须把 `GetPrinter(2)["pDevMode"]` 作输入+输出，传 None 得 `pywintypes.error 87`。
 
 `photoprint/win/probe.py`：
 
@@ -2257,38 +2792,60 @@ class ProbeResult:
 
 
 def _px_to_mm(px, dpi):
+    # 换算本体走 units.px_to_mm（全项目唯一入口，T10 派前核查：不得在 win
+    # 层开第二套公式）；这里的 dpi=0 守卫是脱机回读缺省值时的真实需求，
+    # 否则 units 会抛 ZeroDivisionError（T1 评审已裁决防御放调用侧）。
     if not dpi:
         return 0.0
-    return px / dpi * 25.4
+    return units.px_to_mm(px, dpi)
+
+
+def _paper_sizes_mm(sizes):
+    """DC_PAPERSIZE → [(w_mm, h_mm)]。
+
+    返回形状随 pywin32/驱动而异：多数是 ((w,h),...) 的 0.1mm 对，本机对
+    "Microsoft Print to PDF" 实测只回一个 int（张数），直接解包会 TypeError。
+    拿不到成对数据就回空表——纸张名与物理尺寸仍在，探测不该因此崩。
+    """
+    if not isinstance(sizes, (list, tuple)):
+        return []
+    out = []
+    for item in sizes:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append((item[0] / 10.0, item[1] / 10.0))
+    return out
 
 
 def probe(api, printer, paper_code=None, dc=None):
-    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc）。"""
-    target = dc if dc is not None else api.open_printer(printer)
-    own_handle = dc is None
+    """探测一台打印机。dc 给定时用该设备上下文回读（直打时复用同一 hdc）。
+
+    dc 缺省时自己 create_dc/delete_dc：拿打印机句柄当 hdc 用只会得到 0，
+    borderless_active 会把“没读到”误判成“无边距生效”（终审 C2）。
+    """
+    own_dc = dc is None
+    target = api.create_dc(printer) if own_dc else dc
     try:
-        dpi_x = api.get_device_caps(target, LOGPIXELSX) if own_handle else 0
-        dpi_y = api.get_device_caps(target, LOGPIXELSY) if own_handle else 0
+        dpi_x = api.get_device_caps(target, LOGPIXELSX)
+        dpi_y = api.get_device_caps(target, LOGPIXELSY)
         names = api.device_caps(printer, DC_PAPERNAMES) or []
         codes = api.device_caps(printer, DC_PAPERS) or []
         sizes = api.device_caps(printer, DC_PAPERSIZE) or []
         # 真机上 hdc 才是当前纸张的物理参数来源；脱机时用设备默认
-        phys_w = api.get_device_caps(target, PHYSICALWIDTH) if own_handle else 0
-        phys_h = api.get_device_caps(target, PHYSICALHEIGHT) if own_handle else 0
-        off_x = api.get_device_caps(target, PHYSICALOFFSETX) if own_handle else 0
-        off_y = api.get_device_caps(target, PHYSICALOFFSETY) if own_handle else 0
-        hr = api.get_device_caps(target, HORZRES) if own_handle else 0
-        vr = api.get_device_caps(target, VERTRES) if own_handle else 0
-        if own_handle:
-            dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
+        phys_w = api.get_device_caps(target, PHYSICALWIDTH)
+        phys_h = api.get_device_caps(target, PHYSICALHEIGHT)
+        off_x = api.get_device_caps(target, PHYSICALOFFSETX)
+        off_y = api.get_device_caps(target, PHYSICALOFFSETY)
+        hr = api.get_device_caps(target, HORZRES)
+        vr = api.get_device_caps(target, VERTRES)
+        dpi_x, dpi_y = dpi_x or 300, dpi_y or 300
     finally:
-        if own_handle:
-            api.close_printer(target)
+        if own_dc:
+            api.delete_dc(target)
     return ProbeResult(
         printer=printer,
         paper_names=list(names),
         paper_codes=list(codes),
-        paper_sizes_mm=[(w / 10.0, h / 10.0) for w, h in sizes] if sizes else [],
+        paper_sizes_mm=_paper_sizes_mm(sizes),
         physical_w_mm=_px_to_mm(phys_w, dpi_x),
         physical_h_mm=_px_to_mm(phys_h, dpi_y),
         offset_x_mm=_px_to_mm(off_x, dpi_x),
@@ -2318,7 +2875,11 @@ def borderless_active(result: ProbeResult) -> bool:
     """无边距是否生效：以驱动回报的物理偏移为零为唯一证据。
 
     绝不按"规格说支持无边距"就当成已生效——那是谎报的源头。
+    physical_w_mm == 0 说明探测本身失败（没拿到设备上下文），此时偏移也是 0，
+    若照旧判定就会把"没读到"包装成"无边距生效"，故必须先判失败。
     """
+    if not result.physical_w_mm:
+        return False
     return abs(result.offset_x_mm) <= 0.05 and abs(result.offset_y_mm) <= 0.05
 
 
@@ -2341,7 +2902,7 @@ def diff_report(spec, result: ProbeResult) -> list:
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_probe.py -v`
-Expected: PASS（7 passed）
+Expected: PASS（10 passed：原 7 条 + DC 自建/释放、borderless 失败不推定、纸张表形状容错）
 
 - [ ] **Step 5: 提交**
 
@@ -2371,7 +2932,13 @@ git commit -m "feat: 驱动能力探测与规格冲突报告"
 `tests/test_devmode.py`：
 
 ```python
-"""DEVMODE 铁律：继承驱动私有扩展区，只改纸张相关字段。"""
+"""DEVMODE 铁律：继承驱动私有扩展区，只改纸张相关字段。
+
+FakeDM 必须用 PyDEVMODEW 的真实字段名（Fields / PaperSize / PaperWidth /
+PaperLength / DefaultSource / Scale / Size）：旧 fake 用 dmFields、dmPaperSize
+那套名字，于是 `dm.dmFields = ...` 在真机上 AttributeError，测试却全绿——
+这正是终审 C2 判定的“契约性错误”。
+"""
 import pytest
 
 from photoprint.win import devmode
@@ -2379,15 +2946,15 @@ from photoprint.win import devmode
 
 class FakeDM:
     def __init__(self):
-        self.cbSize = 220
-        self.dmFields = 0
-        self.dmPaperSize = 9
-        self.dmPaperLength = 2970
-        self.dmPaperWidth = 2100
-        self.dmDefaultSource = 1
-        self.dmScale = 100
-        self.duplex = 300  # 驱动私有区被建模为一个不得改动的字段
-        self.mediaType = 700
+        self.Size = 220           # 真机里结构长度叫 Size，不是 cbSize
+        self.Fields = 0
+        self.PaperSize = 9
+        self.PaperLength = 2970
+        self.PaperWidth = 2100
+        self.DefaultSource = 1
+        self.Scale = 100
+        self.Duplex = 300         # 驱动私有区被建模为一个不得改动的字段
+        self.MediaType = 700
 
 
 class FakeApi:
@@ -2396,61 +2963,87 @@ class FakeApi:
         self.mode_log = []
         self.dm = FakeDM()
 
-    def document_properties(self, handle, printer, mode="get"):
+    def open_printer(self, name):
+        return f"hnd:{name}"
+
+    def close_printer(self, handle):
+        pass
+
+    def get_devmode(self, handle):
+        """驱动当前 DEVMODE：真机走 GetPrinter(2)["pDevMode"]。"""
+        self.mode_log.append("devmode")
+        return self.dm
+
+    def document_properties(self, handle, printer, mode, dm=None):
+        """mode="size" 只问长度；mode="update" 交回 dm 让驱动校验/回填。"""
         self.mode_log.append(mode)
-        return self.size
+        if mode == "size":
+            return self.size
+        assert dm is self.dm, "update 必须交回驱动取到的那份结构，不能新建"
+        return 1
 
 
 def test_modify_sets_custom_size_in_tenth_mm():
     dm = FakeDM()
     devmode.modify(dm, 520, 89.0, 127.0)
-    assert dm.dmPaperSize == devmode.DMPAPER_USER
-    assert dm.dmPaperWidth == 890    # 0.1mm 单位：89mm × 10
-    assert dm.dmPaperLength == 1270  # 127mm × 10
+    assert dm.PaperSize == devmode.DMPAPER_USER
+    assert dm.PaperWidth == 890    # 0.1mm 单位：89mm × 10
+    assert dm.PaperLength == 1270  # 127mm × 10
 
 
 def test_modify_uses_preset_code_when_given():
     """preset 尺寸必须走驱动预设码，才可能继承无边距标志。"""
     dm = FakeDM()
     devmode.modify(dm, 520, 102.0, 152.0, paper_code=259 + 1)
-    assert dm.dmPaperSize != devmode.DMPAPER_USER
-    assert dm.dmPaperWidth == 1020  # 单位是 0.1mm：102mm → 1020
+    assert dm.PaperSize != devmode.DMPAPER_USER
+    assert dm.PaperWidth == 1020  # 单位是 0.1mm：102mm → 1020
 
 
 def test_preset_code_path_does_not_need_user_dims():
     dm = FakeDM()
     devmode.modify(dm, 520, 210.0, 297.0, paper_code=9)
-    assert dm.dmPaperSize == 9
+    assert dm.PaperSize == 9
 
 
-def test_dmfields_bits_are_set():
+def test_fields_bits_are_set():
     dm = FakeDM()
     devmode.modify(dm, 520, 89.0, 127.0)
     for bit in (devmode.DM_PAPERSIZE, devmode.DM_PAPERLENGTH,
                 devmode.DM_PAPERWIDTH, devmode.DM_DEFAULTSOURCE,
                 devmode.DM_SCALE):
-        assert dm.dmFields & bit, f"缺少位 {bit}"
+        assert dm.Fields & bit, f"缺少位 {bit}"
 
 
 def test_scale_is_forced_to_100():
     dm = FakeDM()
-    dm.dmScale = 85  # 驱动被设成 85% 缩放，必须被纠回 1:1
+    dm.Scale = 85  # 驱动被设成 85% 缩放，必须被纠回 1:1
     devmode.modify(dm, 520, 89.0, 127.0)
-    assert dm.dmScale == 100
+    assert dm.Scale == 100
 
 
-def test_cbsize_and_private_area_untouched():
+def test_modify_returns_size_unchanged():
+    """modify 的返回值是 size：build 里若把它的返回当 dm 用就会出错。"""
     dm = FakeDM()
-    before = (dm.cbSize, dm.duplex, dm.mediaType)
+    assert devmode.modify(dm, 5428, 89.0, 127.0) == 5428
+
+
+def test_size_and_private_area_untouched():
+    dm = FakeDM()
+    before = (dm.Size, dm.Duplex, dm.MediaType)
     devmode.modify(dm, 520, 89.0, 127.0)
-    assert (dm.cbSize, dm.duplex, dm.mediaType) == before, "私有区被改动会丢失无边距设置"
+    assert (dm.Size, dm.Duplex, dm.MediaType) == before, "私有区被改动会丢失无边距设置"
 
 
-def test_returns_size_from_driver_not_struct_only():
+def test_build_asks_size_then_gets_filled_struct():
     api = FakeApi(size=520)
     dm, size = devmode.build(api, "Canon G3800 series", 89.0, 127.0)
     assert size == 520
-    assert api.mode_log == ["get"], "必须先取驱动默认 devmode，不能新建空结构"
+    # T11 评审 Important：必须钉住第一元素是已填好的 dm 本体——
+    # 曾写 `return modify(...), size` 而 modify 返回 size，元组实为 (520, 520)
+    assert dm.PaperWidth == 890 and dm.PaperSize == devmode.DMPAPER_USER
+    # 真实契约：先问长度 → 取驱动当前结构 → 改完交回驱动校验
+    assert api.mode_log == ["size", "devmode", "update"], \
+        "顺序必须是 size → pDevMode → DM_IN_BUFFER|DM_OUT_BUFFER"
 
 
 def test_build_rejects_zero_size():
@@ -2474,8 +3067,12 @@ Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.devmode'
 四条不可变语义：
   1. buffer 按驱动回报的 size 分配（含私有扩展区），不得按 sizeof(DEVMODE) 截断
   2. 必须先向驱动取回当前默认设置再改，以继承无边距/介质类型等私有开关
-  3. 不得改 cbSize
-  4. 只写纸张相关字段与 dmScale
+  3. 不得改结构长度字段（PyDEVMODEW 里叫 Size，不是 cbSize）
+  4. 只写纸张相关字段与 Scale
+
+字段名是 pywin32 的真实契约（本机 PyDEVMODEW 实测）：Fields / PaperSize /
+PaperWidth / PaperLength / DefaultSource / Scale / Size；写 dmFields /
+dmPaperSize 只会 AttributeError（终审 C2）。
 常量在此自持，避免测试期强绑 win32；真机调用由 api.RealWinApi 提供。
 """
 from __future__ import annotations
@@ -2495,50 +3092,53 @@ def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):
     """就地改 DEVMODE 的纸张字段，返回驱动给的 size（含私有区）。"""
     from photoprint.core import units
 
-    dm.dmFields = getattr(dm, "dmFields", 0) | DM_PAPERSIZE | DM_PAPERLENGTH | DM_PAPERWIDTH | DM_SCALE
+    dm.Fields = getattr(dm, "Fields", 0) | DM_PAPERSIZE | DM_PAPERLENGTH | DM_PAPERWIDTH | DM_SCALE
     if paper_code and paper_code != DMPAPER_USER:
-        dm.dmPaperSize = int(paper_code)
+        dm.PaperSize = int(paper_code)
     else:
-        dm.dmPaperSize = DMPAPER_USER
+        dm.PaperSize = DMPAPER_USER
     # 0.1mm 单位；preset 路径同样写入，避免驱动沿用旧的表单尺寸
-    dm.dmPaperWidth = units.win_mm(w_mm)
-    dm.dmPaperLength = units.win_mm(h_mm)
+    dm.PaperWidth = units.win_mm(w_mm)
+    dm.PaperLength = units.win_mm(h_mm)
     if default_source:
-        dm.dmFields |= DM_DEFAULTSOURCE
-        dm.dmDefaultSource = DMBIN_USER
-    dm.dmScale = 100
+        dm.Fields |= DM_DEFAULTSOURCE
+        dm.DefaultSource = DMBIN_USER
+    dm.Scale = 100
     return size
 
 
 def build(api, printer, w_mm, h_mm, paper_code=None):
-    """取驱动默认 devmode 后改纸张字段。返回 (dm, size)。"""
+    """取驱动默认 devmode 后改纸张字段。返回 (dm, size)。
+
+    三步不可合并（真实契约）：
+      1. DocumentProperties(fMode=0, None, None) 问出含私有区的总长；
+      2. GetPrinter(2)["pDevMode"] 取回驱动当前设置——把 None 当输入去 "get"
+         在本机直接 pywintypes.error 87；
+      3. 改完再用 DM_IN_BUFFER|DM_OUT_BUFFER 交回驱动校验/回填。
+    注意：驱动可能把越界尺寸回写改回默认值，所以返回值以驱动为准，
+    打印前必须靠 T12 的 0.5mm 回读校验把关。
+    """
     handle = api.open_printer(printer)
     try:
-        size = api.document_properties(handle, printer, "get")
+        size = api.document_properties(handle, printer, "size")
+        if not size:
+            raise RuntimeError("DocumentProperties 返回 0，无法取得 DEVMODE")
+        dm = api.get_devmode(handle)
+        # 先就地改再返回 dm 本体：写成 `return modify(...), size` 会把
+        # modify 的返回值（size）当成 dm，下游 T12 拿到的第一元素是 int（T11 评审 I-1）
+        modify(dm, size, w_mm, h_mm, paper_code)
+        api.document_properties(handle, printer, "update", dm)
     finally:
         api.close_printer(handle)
-    if not size:
-        raise RuntimeError("DocumentProperties 返回 0，无法取得 DEVMODE")
-    dm = _alloc(api, printer, size)
-    return modify(dm, size, w_mm, h_mm, paper_code), size
-
-
-def _alloc(api, printer, size):
-    """向驱动要一份填满私有区的 DEVMODE。"""
-    handle = api.open_printer(printer)
-    try:
-        dm = api.document_properties(handle, printer, "get")
-    finally:
-        api.close_printer(handle)
-    return dm
+    return dm, size
 ```
 
-注：`_alloc` 在真机上需按 `size` 分配 buffer 后再次调用 `DocumentProperties(..., DM_GETMODE)` 取回填充好的结构；`RealWinApi.document_properties` 负责把 buffer 与 `PyDEVMODE` 的绑定关系处理好并返回可改对象。`tests/test_devmode.py` 用 `FakeApi` 只验证语义，真机行为在 M5 由用户回读校验把关。
+注：`mode="size"` 对应真机上的 `DocumentProperties(fMode=0, None, None)` 只拿长度；`mode="update"` 对应 `win32con.DM_IN_BUFFER|DM_OUT_BUFFER` 把 `GetPrinter(2)["pDevMode"]` 作输入+输出交回驱动。`win32print` **没有** `DM_INQUIRE`/`DM_GETMODE`，也没有 `CreateDC`（终审 C2 本机实测）；旧写法会直接 AttributeError。测试用 `FakeApi` 只验证语义（三步顺序、只改纸张字段、保留私有区），真机回读由 T12 的 0.5mm 校验把关。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_devmode.py -v`
-Expected: PASS（8 passed）
+Expected: PASS（9 passed：真实字段名 +1 条 update 交回断言）
 
 - [ ] **Step 5: 提交**
 
@@ -2553,7 +3153,9 @@ git commit -m "feat: DEVMODE 纸张字段改写与私有区继承"
 
 **Files:**
 - Create: `photoprint/win/gdi_print.py`
+- Modify: `photoprint/win/probe.py`（dc 回读路径填实，T10 留的占位零值）
 - Test: `tests/test_gdi_verify.py`
+- Test: `tests/test_probe.py`（追加 dc 路径钉住测试）
 
 **Interfaces:**
 - Consumes: `devmode.build`、`probe.probe`、`units.mm_to_px`、`PIL.ImageWin.Dib`
@@ -2602,12 +3204,40 @@ def test_pick_dpi_respects_user_cap():
     assert gdi_print.pick_dpi(1200, cap=300) == 300
 ```
 
+注：本任务的 gdi 失败测试先于前置修复落地；Step 3 会再向 `tests/test_probe.py` 追加一条须先见 RED 的失败测试。
+
 - [ ] **Step 2: 运行确认失败**
 
 Run: `python -m pytest tests/test_gdi_verify.py -v`
-Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.gdi_print'`
+Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.gdi_print'`（实测可能形如 ImportError，同属缺失类失败）
 
-- [ ] **Step 3: 实现 gdi_print**
+- [ ] **Step 3: 前置修复——probe 的 dc 回读路径填实（T12 派前拦截①）**
+
+T10 实现里 `probe(api, printer, dc=...)` 把所有 `get_device_caps` 短路成了 0（当时记为占位，归本任务消费时填实）。不填实则 `print_job` 的回读校验拿 0×0mm 比对请求尺寸，每单必判“驱动忽略了自定义尺寸”。先写失败测试追加到 `tests/test_probe.py` 末尾：
+
+```python
+def test_probe_with_dc_reads_device_values():
+    """dc 复用路径与自开句柄路径回读一致（T12 的 0.5mm 校验依赖这条）。"""
+    api = FakeApi(dc_caps={probe.PHYSICALWIDTH: 2480, probe.PHYSICALHEIGHT: 3508,
+                           probe.PHYSICALOFFSETX: 34, probe.PHYSICALOFFSETY: 30,
+                           probe.HORZRES: 2412, probe.VERTRES: 3448,
+                           probe.LOGPIXELSX: 300, probe.LOGPIXELSY: 300})
+    r = probe.probe(api, "P", dc="hdc:X")
+    assert r.physical_w_mm == pytest.approx(209.97, abs=0.05)
+    assert r.offset_x_mm == pytest.approx(2.88, abs=0.01)
+    # dc 模式不得开关打印机句柄
+    assert not any(k in ("open", "close") for k, _ in api.calls)
+```
+
+Run: `python -m pytest tests/test_probe.py::test_probe_with_dc_reads_device_values -v`
+Expected: FAIL —`physical_w_mm` 得 0.0（占位短路未填实）
+
+然后把 `photoprint/win/probe.py` 的 `probe()` 改为 Task 10 Step 3 修订块同款（文档已同步）：删掉每行末尾的 `if own_handle else 0` 短路，`target` 无论自开还是复用都统一走 `api.get_device_caps(target, FIELD)`；`dpi_x, dpi_y = dpi_x or 300, dpi_y or 300` 不再分分支；`finally` 里仍只在 `own_handle` 时 `close_printer`。
+
+Run: `python -m pytest tests/test_probe.py -v`
+Expected: PASS（8 passed：原 7 条不受影响 + 新 1 条）
+
+- [ ] **Step 4: 实现 gdi_print**
 
 `photoprint/win/gdi_print.py`：
 
@@ -2647,11 +3277,14 @@ def pick_dpi(driver_dpi, cap=600):
 
 
 def print_job(api, printer, port, images, sheet, dpi, dm=None):
-    """打印多页。返回 {'ok': bool, 'pages': int, 'message': str}。"""
+    """打印多页。返回 {'ok': bool, 'pages': int, 'message': str}。
+
+    port 仅为兼容旧调用保留：它不参与建 DC（_create_dc 只收 printer 与
+    devmode），现代驱动走默认端口。
+    """
     from PIL import ImageWin
 
     import win32con
-    import win32print
     import win32ui
 
     from photoprint.core import units
@@ -2663,9 +3296,12 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
 
     hprinter = api.open_printer(printer)
     try:
-        size = api.document_properties(hprinter, printer, "get")
-        dm_obj, size = _take_devmode(api, printer, size, sheet)
-        hdc = win32ui.CreateDCFromHandle(_create_dc(api, printer, port, dm_obj))
+        # T12 派前拦截②：原写法把 _take_devmode 的整条返回（即 build 的
+        # (dm, size) 元组）赋给了 dm_obj，真机 CreateDC 拿到 tuple 必错；
+        # build 内部已含“先问长度再取回”两步，这里直接解包它的返回
+        dm_obj, _size = dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
+                                     sheet.driver_paper_code)
+        hdc = win32ui.CreateDCFromHandle(_as_dc_ref(_create_dc(printer, dm_obj)))
         try:
             result = probe.probe(api, printer, dc=_as_dc_ref(hdc))
             ok, msg = verify_physical_size(result.physical_w_mm,
@@ -2696,34 +3332,34 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
         api.close_printer(hprinter)
 
 
-def _take_devmode(api, printer, size, sheet):
-    from photoprint.win import devmode as dm_mod
+def _create_dc(printer, dm_obj):
+    """建打印机 DC。port 不参与：win32gui.CreateDC 用驱动默认端口。"""
+    import win32gui
 
-    return dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
-                        sheet.driver_paper_code)
-
-
-def _create_dc(api, printer, port, dm_obj):
-    import win32print
-
-    return win32print.CreateDC("Win32", printer, port, dm_obj)
+    return win32gui.CreateDC("WIN32", printer, dm_obj)
 
 
 def _as_dc_ref(hdc):
-    return hdc
+    """统一成 int HDC：PyCDC 走 GetSafeHdc()，int(PyCDC) 会 TypeError。"""
+    from photoprint.win.api import as_hdc
+
+    return as_hdc(hdc)
 ```
 
-注：`_as_dc_ref` 把 `PyCDC` 适配成 `probe.probe` 可回读的句柄对象；真机对接时若 `GetDeviceCaps` 走 `api.get_device_caps` 失败，改用 `hdc.GetDeviceCaps(field)`——两条路径都保留，验证以回读结果为准，任一失败即触发 PDF 兜底。
+注：建 DC 必须走 `win32gui.CreateDC("WIN32", printer, devmode)`——`win32print` 没有 `CreateDC`（终审 C2 本机实测）。`_as_dc_ref` 把 `PyCDC` 统一成 int HDC（`GetSafeHdc()`），因为 `CreateDCFromHandle(PyCDC)` 与 `int(PyCDC)` 都会 TypeError。`print_job` 顶层 `except Exception` 会把 `StartDoc` 后的异常在 DeleteDC/EndDoc 展开后统一转消息；本任务的脱机测试盖 `verify_physical_size`/`pick_dpi` 两条纯函数、空图早退与“源码不得回退到 win32print.CreateDC”的契约断言，送打链路由 M5 真机验收。
 
-- [ ] **Step 4: 运行确认通过**
+- [ ] **Step 5: 运行确认通过 + 全量回归**
 
 Run: `python -m pytest tests/test_gdi_verify.py -v`
-Expected: PASS（5 passed）
+Expected: PASS（7 passed：纯函数 5 + DC 路由/句柄适配 2）
 
-- [ ] **Step 5: 提交**
+Run: `python -m pytest`
+Expected: 全绿（终审修复后全量 145 passed）
+
+- [ ] **Step 6: 提交**
 
 ```bash
-git add photoprint/win/gdi_print.py tests/test_gdi_verify.py
+git add photoprint/win/gdi_print.py tests/test_gdi_verify.py photoprint/win/probe.py tests/test_probe.py
 git commit -m "feat: GDI 送页流程与 0.5mm 回读校验"
 ```
 
@@ -2733,12 +3369,14 @@ git commit -m "feat: GDI 送页流程与 0.5mm 回读校验"
 
 **Files:**
 - Create: `photoprint/win/pdf_export.py`
+- Modify: `photoprint/core/units.py`（新增 `mm_to_pt`：换算唯一入口约束，T13 评审 I-1 裁决）
 - Test: `tests/test_pdf_export.py`
 
 **Interfaces:**
-- Consumes: `PIL.Image`、`img2pdf`
+- Consumes: `PIL.Image`、`img2pdf`、`units.mm_to_pt`
 - Produces:
-  - `pdf_export.mm_to_pt(mm: float) -> float`
+  - `units.mm_to_pt(mm: float) -> float`（全项目 mm→pt 唯一定义）
+  - `pdf_export.mm_to_pt`（从 units re-export，保住既有测试入口）
   - `pdf_export.export_pdf(images: list[Image], sheet, out_path) -> Path`
 
 - [ ] **Step 1: 写失败测试**
@@ -2756,12 +3394,14 @@ Image = pytest.importorskip("PIL.Image")
 img2pdf = pytest.importorskip("img2pdf")
 from PIL import Image as PILImage  # noqa: E402
 
-from photoprint.core import specs  # noqa: E402
+from photoprint.core import specs
+from photoprint.core import units
 from photoprint.win import pdf_export  # noqa: E402
 
 
 def test_mm_to_pt():
-    assert pdf_export.mm_to_pt(25.4) == pytest.approx(72.0)
+    # 唯一入口在 units；pdf_export 只做 re-export（换算归口约束）
+    assert units.mm_to_pt(25.4) == pytest.approx(72.0)
     assert pdf_export.mm_to_pt(89.0) == pytest.approx(252.283, abs=0.01)
     assert pdf_export.mm_to_pt(127.0) == pytest.approx(360.0, abs=0.01)
 
@@ -2805,9 +3445,22 @@ def test_empty_input_rejected(tmp_path):
 - [ ] **Step 2: 运行确认失败**
 
 Run: `python -m pytest tests/test_pdf_export.py -v`
-Expected: FAIL —`ModuleNotFoundError: No module named 'photoprint.win.pdf_export'`（若 `img2pdf` 未装则先 `pip install img2pdf`，并确认已写进 `requirements.txt`）
+Expected: FAIL —收集期 `ImportError: cannot import name 'mm_to_pt' from 'photoprint.core.units'`（units 先行形态）或 `ModuleNotFoundError: No module named 'photoprint.win.pdf_export'`（若 img2pdf 未装则先 `pip install img2pdf`，并确认已写进 `requirements.txt`）
 
-- [ ] **Step 3: 实现 pdf_export**
+- [ ] **Step 3a: units 新增 mm_to_pt**
+
+在 `photoprint/core/units.py` 的 `px_to_mm` 之后追加：
+
+```python
+MM_TO_PT = 72.0 / 25.4  # PostScript 点/毫米换算因子
+
+
+def mm_to_pt(mm: float) -> float:
+    """毫米 → PostScript 点（1pt == 1/72 英寸），PDF 页面尺寸专用。"""
+    return mm * MM_TO_PT
+```
+
+- [ ] **Step 3b: 实现 pdf_export**
 
 `photoprint/win/pdf_export.py`：
 
@@ -2823,13 +3476,11 @@ import io
 from pathlib import Path
 
 import img2pdf
-from PIL import Image
+from PIL import Image  # noqa: F401  接口文档性导入：images 元素即 PIL.Image
 
-MM_TO_PT = 72.0 / 25.4
-
-
-def mm_to_pt(mm: float) -> float:
-    return mm * MM_TO_PT
+# 换算唯一入口在 units（T13 评审 I-1：不得在消费模块自带第二套 mm→pt 公式）；
+# re-export 保住 pdf_export.mm_to_pt 的既有测试入口
+from photoprint.core.units import MM_TO_PT, mm_to_pt  # noqa: F401
 
 
 def export_pdf(images, sheet, out_path):
@@ -2856,8 +3507,8 @@ Expected: PASS（5 passed）（若 `img2pdf` 未装则先 `pip install img2pdf`�
 - [ ] **Step 5: 提交**
 
 ```bash
-git add photoprint/win/pdf_export.py tests/test_pdf_export.py
-git commit -m "feat: 等尺寸 PDF 兜底导出"
+git add photoprint/win/pdf_export.py photoprint/core/units.py tests/test_pdf_export.py
+git commit -m "feat: 等尺寸 PDF 兜底导出（mm_to_pt 归口 units）"
 ```
 
 ---
@@ -2955,6 +3606,54 @@ def test_main_writes_pdf_with_3r_box(tmp_path):
     vals = [float(x) for x in m.group(1).split()]
     assert vals[2] == pytest.approx(252.283, abs=1.0)
     assert vals[3] == pytest.approx(360.0, abs=1.0)
+
+
+def test_main_creates_out_parent_dirs(tmp_path):
+    """README 首个示例直写 _lab/out/（git 不存空目录）：--out 必须自建父目录。"""
+    from PIL import Image
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (1, 2, 3)).save(p)
+    out = tmp_path / "deep" / "dir" / "page.png"
+    code = cli.main(["--photos", str(p), "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert out.exists()
+
+
+def test_main_marks_first_page_only_for_multipage_out(tmp_path, capsys):
+    """5 张在 A4+3R 下出 2 页：--out 只落第一页，必须明说，不得谎报全套已输出。"""
+    from PIL import Image
+
+    photos = []
+    for i in range(5):
+        p = tmp_path / f"{i}.jpg"
+        Image.new("RGB", (400, 200), (i, 9, 9)).save(p)
+        photos.append(str(p))
+    out = tmp_path / "page.png"
+    code = cli.main(["--photos", *photos, "--sheet", "A4", "--cell", "3R",
+                     "--dpi", "25.4", "--out", str(out)])
+    assert code == 0
+    assert "仅第一页" in capsys.readouterr().out
+
+
+def test_id_photos_are_not_rotated(st):
+    """证件照是 cell：拼版必须禁旋转（全局约束 allow_rotate=False）。
+
+    旧写法三个 pack 调用都吃默认 allow_rotate=True，A4+ID1 gap2 被装成
+    63 格、其中 42 张横放，既不是 56 也不是证件照该有的朝向（终审 I1）。
+    """
+    plan, _mode = cli.build_plan_jobs(st, "A4", "ID1", 2.0,
+                                      modes.DEFAULT_BLEED_MM, None, False)
+    assert plan.count == 56
+    assert not any(c.rotated for c in plan.cells)
+
+
+def test_paper_role_cells_still_rotate(st):
+    """纸类拼版（4R）不受影响：旋转仍是合法策略，不得被上式一起禁掉。"""
+    plan, _mode = cli.build_plan_jobs(st, "A4", "4R", 0.0,
+                                      modes.DEFAULT_BLEED_MM, None, False)
+    assert any(c.rotated for c in plan.cells)
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -2975,6 +3674,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from PIL import Image
 
@@ -2994,8 +3694,11 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)
     printable = specs.printable_rect(sheet, borderless_active=borderless_active)
+    # 全局约束：证件照这类"格"（role="cell"）拼版不得旋转——横放会把
+    # 一寸/二寸照排成横的；纸类（3R/4R）是照片本身，旋转是合法装箱策略（终审 I1）
+    allow_rotate = cell.role != "cell"
     probe_plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
-                           printable=printable)
+                           allow_rotate=allow_rotate, printable=printable)
     if mode is None:
         mode = modes.default_mode(sheet, cell, probe_plan.count, borderless_active)
     modes.assert_mode_legal(sheet, mode)
@@ -3003,13 +3706,15 @@ def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     # 裁切模式在整张纸上装箱（无边距才容得下出血），其余在可打印区内装箱
     rect = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm) \
         if mode == modes.BLEED_TRIM else printable
-    plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=bleed, printable=rect)
+    plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=bleed,
+                     allow_rotate=allow_rotate, printable=rect)
     if plan.count == 0 and mode != modes.BLEED_TRIM:
         # 退化情形：格子与纸张同尺寸（如 3R 纸打 3R 照片）。
         # 按可打印矩形装箱必然得 0 格，改为整纸装一格，
         # 画面收回可打印区由 render 层的交集负责。
         full = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
-        plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0, printable=full)
+        plan = pack.pack(sheet, cell, gap_mm=gap_mm, bleed_mm=0.0,
+                         allow_rotate=allow_rotate, printable=full)
     if plan.count == 0:
         raise ValueError(f"{sheet.label} 放不下 {cell.label}，请换大纸或改小格子")
     return plan, mode
@@ -3072,8 +3777,13 @@ def main(argv=None):
     print(f"纸张 {sheet.label}，每页 {plan.count} 格，共 {len(pages)} 页。{note}")
 
     if args.out:
-        pages[0].save(args.out)
-        print(f"已输出 {args.out}")
+        # README 示例写 _lab/out/，而 git 不存空目录：父目录必须自建；
+        # 多页时 --out 只落第一页（全部页面请用 --pdf），消息不得谎报全套（T14 评审 I-1）
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        pages[0].save(out_path)
+        extra = "（多页时仅第一页，全部页面请用 --pdf）" if len(pages) > 1 else ""
+        print(f"已输出 {out_path}{extra}")
     if args.pdf:
         from photoprint.win import pdf_export
 
@@ -3100,7 +3810,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 运行确认通过**
 
 Run: `python -m pytest tests/test_cli.py -v`
-Expected: PASS（6 passed）
+Expected: PASS（10 passed：原 6 + --out 父目录/首页明示 + 证件照禁旋转/纸类仍旋转）
 
 - [ ] **Step 5: 全量回归 + 未使用导入清理**
 
@@ -3164,7 +3874,7 @@ def main():
     plan = pack.pack(a4, r3, bleed_mm=modes.DEFAULT_BLEED_MM,
                      printable=specs.RectMM(0, 0, a4.w_mm, a4.h_mm))
     allok &= check("A4+3R(bleed3) 格数", plan.count, 4)
-    allok &= check("裁切线数", len(plan.cuts), 4)
+    allok &= check("裁切线数", len(plan.cuts), 6)  # 居中 2×2：每轴 3 条（两侧边界 + 中间缝）
     page = render.render_page(plan, [synth(4, i) for i in range(4)], a4, DPI,
                               modes.BLEED_TRIM)
     allok &= check("页面宽 mm=px", page.width, 210)
@@ -3177,10 +3887,12 @@ def main():
     p2 = pack.pack(a4, specs.find_spec("4R"))
     allok &= check("A4+4R 格数", p2.count, 3)
 
-    # 3) 3R 直打：可打印区 82.2×119.0
+    # 3) 3R 直打：可打印区 82.2×119.0（换算唯一入口 specs.printable_rect；
+    # pack 默认装箱区是整张纸，plan.printable 拿到的是 89×127，不能当可打印区断言）
+    pr = specs.printable_rect(r3)
+    allok &= check("3R 可打印宽", pr.w_mm, 82.2, 1e-3)
+    allok &= check("3R 可打印高", pr.h_mm, 119.0, 1e-3)
     p3 = pack.pack(r3, r3)
-    allok &= check("3R 可打印宽", p3.printable.w_mm, 82.2, 1e-3)
-    allok &= check("3R 可打印高", p3.printable.h_mm, 119.0, 1e-3)
     page3 = render.render_page(p3, [synth(1, 0)], r3, DPI, modes.FILL_PRINTABLE)
     allok &= check("3R 页面宽", page3.width, 89)
 
@@ -3221,6 +3933,7 @@ Expected: 全部 `OK`，末行输出"结论： 全部通过"，退出码 0
 - 12寸（254×305mm）超出 G3800 能力，已被阻断。
 
 ## 安装与运行
+依赖：Pillow（读图/渲染）、pywin32（GDI 直打）、img2pdf（等尺寸 PDF）、pytest（测试）、PySide6（后续界面）
 pip install -r requirements.txt
 python -m photoprint.cli --photos 1.jpg 2.jpg 3.jpg 4.jpg --sheet A4 --cell 3R --out _lab/out/page.png
 python -m photoprint.cli --photos *.jpg --sheet A4 --cell 3R --print --printer "Canon G3800 series"
@@ -3261,7 +3974,7 @@ git commit -m "feat: CLI 编排与 M1/M2 验收证据脚本"
 | 14 测试策略与变异测试 | T4 Step5、T5 Step5、T9 Step5 |
 | 8 交互设计、11 校准页 | **不在本计划**，属第二份（M3+M4）——本计划是其依赖 |
 
-**2. 占位符与自纠错误扫描**：无 TBD/TODO/“类似上一个任务”；每个代码步骤均给出可运行代码。各任务的 Expected 通过数已逐个重数并纠正（T1 6、T2 11、T3 7、T4 7、T5 10、T6 6、T7 10、T8 9、T9 12、T10 7、T11 8、T12 5、T13 5、T14 6）。
+**2. 占位符与自纠错误扫描**：无 TBD/TODO/“类似上一个任务”；每个代码步骤均给出可运行代码。各任务的 Expected 通过数已逐个重数并纠正（截至终审修复轮实测：T1 7、T2 12、T3 16、T4 7、T5 10、T6 9、T7 16、T8 9、T9 13、T10 10、T11 9、T12 7、T13 5、T14 10；另有终审新增 `tests/test_win32_contract.py` 5 条，合计 145）。
 
 **2b. 自审发现并修掉的设计缺陷**（不是文字问题，会直接导致实现失败）：
 
@@ -3271,4 +3984,19 @@ git commit -m "feat: CLI 编排与 M1/M2 验收证据脚本"
 
 **4. 歧义已消除项**：`fill_printable` 的目标矩形是可打印区而非整张纸（T7 模块注释 + T8 `target_rect` 测试）；无边距生效只由探测偏移为零判定（T10 `borderless_active`），不由规格表推定；裁切线在单格时不画（T6、T9 双处断言）。
 
-**5. 已知未闭环风险（如实记录，不隐藏）**：`RealWinApi.document_properties` 与 `PyDEVMODE` 的真实绑定形态、`win32ui.CreateDCFromHandle` 与 `probe` 回读的句柄适配，必须在装有 G3800 驱动的机器上实测；本计划用 FakeApi 锁住语义，真机偏差由 M5 用户回读校验收敛。
+**5. 已知未闭环风险（如实记录，不隐藏）**：终审 C2 前，`RealWinApi.document_properties` 与 `PyDEVMODE` 的绑定形态、`win32ui.CreateDCFromHandle` 与 `probe` 回读的句柄适配均未在真机上验证。现已用 `.superpowers/sdd/spike_win32.py` 在本机 pywin32 上对 "Microsoft Print to PDF" 驱动实测（不调 StartDoc/StartPage）：`DocumentProperties(fMode=0)` 回 5428、`GetPrinter(2)["pDevMode"]` 可用、`win32gui.CreateDC("WIN32", ...)` 回 int HDC 且 `GetDeviceCaps(LOGPIXELSX)=600`、`probe` 自建 DC 得 210.02×297.01mm。仍待真机（G3800）验证的只剩：实际送纸打印效果、G3800 驱动对 `DC_PAPERS` 的返回顺序与 3R 自定义表单的保存行为。
+
+---
+
+## 终审订正记录（整枝评审 → 修复轮）
+
+整枝终审（`1206d6d..dc94334`，38 个提交）给出 No/With fixes，以下三条已在 `d6020fc` 修复，本计划相应代码块与约束已同期订正；`0c28232` 再修复审留下的 3 条 Minor。
+
+| 编号 | 发现 | 根因 | 修复与证据 |
+|---|---|---|---|
+| C1 | 旋转格照片溢出压邻格 | `dest_mm` 是旋转前坐标，转 90° 后未交换轴 | render 交换 `dx,dy,dw,dh`；新像素测试 + `_lab` A4+4R 越界点 0；A4/LTR/7R/A5 × 3R–ENV_DL 全组合零越界 |
+| C2 | win32 契约 4 错 + 字段名错 | 照文档想象 API，未在本机验证 | `win32con` 标志、`GetPrinter(2)["pDevMode"]`、`win32gui.CreateDC`、`PyDEVMODE` 真字段名；新增 `tests/test_win32_contract.py`（不依赖打印机名），spike 实测通过 |
+| I1 | 证件照被横排 | 三处 `pack.pack` 未传 `allow_rotate` | CLI 统一 `allow_rotate = cell.role != "cell"`；A4+ID1 gap2 由 63 格/42 旋 → 56 格/0 旋，并保留纸类仍旋转的守护测试 |
+| Minor | README 缺依赖行、`store.load` 浮点未校验、`_red_detail.txt` 残留、`_lab` 无旋转断言、crop 零面积越界、`port` 死参 | — | 均已落地；终审复审又发现零面积守卫会推出图外，`0c28232` 夹进图内并加测试 |
+
+遗留（不阻塞合并，记台账）：`--print` 异常未收敛成 `return 2`（traceback 先现）；`Store` 仍不可注入；契约测试用 `inspect.getsource` 钉路由文本，等价重构会假红；`print_job` 的 `port` 形参待接 UI 时清理。真机待验证：G3800 直打与 `DC_PAPERS` 顺序。

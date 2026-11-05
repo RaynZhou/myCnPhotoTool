@@ -1,0 +1,6 @@
+# 直接 import 的包一律显式声明，不依赖传递依赖
+Pillow>=12.0
+pywin32>=306 ; sys_platform == "win32"
+img2pdf>=0.5
+pytest>=8.0
+PySide6>=6.7

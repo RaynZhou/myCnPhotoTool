@@ -28,7 +28,8 @@
    `DM_PROMPT`），用户在其中选介质，回填的 DEVMODE 携带介质选择（私有区由驱动填、
    我们不解析），再据此走 GDI 直打。否决方案 B（自绘介质下拉写私有字节，脆弱不可验）
    与方案 C（XPS/Print Schema，工程量大、收益不比 A 高）；
-3. **打印范围**：点打印时让用户选（全部页 / 仅当前页 / 自定义区间）；
+3. **打印范围**：点打印即打**全部页**（拼版本就是整版产出；"仅当前页/自定义区间"
+   经评审按 YAGNI 砍掉，待真实需求再立增量）；
 4. **驱动设置页时机**：每次点打印都弹；
 5. **范围限于 GUI**，`cli.py` 行为保持逐字冻结、不改动。
 
@@ -44,8 +45,8 @@
 - `win/gdi_print.py`：把"准备 DEVMODE + 弹窗"与"用给定 DEVMODE 打印"拆成两步，
   新增 `print_pages(api, printer, images, sheet, dpi)`：`build` 纸张几何 → `prompt`
   介质 → 重新盖回纸张几何 → `CreateDC` → `verify_physical_size` → 逐页 StretchBlt。
-- `app/main_window.py`：加**打印机下拉**（`enum_printers` 填充）+ **「打印…」按钮**
-  + **页码范围选择对话框**；点打印走 win 层直打，沿用 `_on_export` 调 win 的模式。
+- `app/main_window.py`：加**打印机下拉**（`enum_printers` 填充）+ **「打印…」按钮**；
+  点打印走 win 层直打**全部页**，沿用 `_on_export` 调 win 的模式。
 - 相应脱机测试（FakeApi 管道）与桌面验收步骤。
 
 不做（明确排除，实现时不得顺手加）：
@@ -56,6 +57,7 @@
 - 无边距开关的界面化（仍由驱动设置页内选，继承即可）。
 - 打印预览缩略图、后台打印队列、双面/份数等驱动项——一概交驱动页，不自建。
 - 记住上次介质选择、默认不弹直打（本次定为每次都弹，不做偏好持久化）。
+- 页码范围选择对话框（仅当前页 / 自定义区间）——点打印即打全部页，YAGNI 砍掉。
 
 ## 2. 语义模型与不变量
 
@@ -116,13 +118,11 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
   固定两台。填充失败（win32 异常）→ 下拉留空、不崩、状态栏提示。
 - **「打印…」按钮**（objectName `print_btn`，与 `rotate_btn`/`export_btn` 同风格）：
   启用条件同导出（job 有效才允许）。点击流程：
-  1. 弹**页码范围对话框**：默认"全部页（1–N）"，可选"仅当前页"、"自定义 a–b"。
-     N = `job.page_count`。非法（a>b、越界、非数字）→ 拒绝并提示，不发起打印。
-  2. 同步 `_rebuild_job` 出最新 job。
-  3. `images = render_all(job, PRINT_DPI, show_mask=False)`，按所选范围切片。
-  4. `api = RealWinApi()`；`gdi_print.print_pages(api, 选中打印机, images, job.sheet,
+  1. 同步 `_rebuild_job` 出最新 job。
+  2. `images = render_all(job, PRINT_DPI, show_mask=False)`——**全部页**，不切片。
+  3. `api = RealWinApi()`；`gdi_print.print_pages(api, 选中打印机, images, job.sheet,
      PRINT_DPI, prompt=True)`。
-  5. 返回 `ok` → 状态栏"已发送 N 页到 <打印机>"；否则红字 `message`。
+  4. 返回 `ok` → 状态栏"已发送 N 页到 <打印机>"（N=`job.page_count`）；否则红字 `message`。
 - 打印期间置等待光标；打印是用户显式发起、且中间本就有一个模态驱动弹窗，故走
   同步执行即可，不接异步线程（避免与模态对话框的线程交互复杂化）。异常一律被
   `print_pages` 兜成 message，UI 不外抛（窗口化 exe 无控制台）。
@@ -132,7 +132,6 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
 | 场景 | 处理 |
 |---|---|
 | 未选打印机 / 无打印机 | 下拉置灰 + 提示，「打印…」禁用或点击即提示，不发起 |
-| 页码范围非法 | 拒绝，提示合法区间，不发打印 |
 | 驱动不支持 `DM_PROMPT` 弹窗报错 | 降级为按继承介质直打（`prompt=False` 语义）并状态栏提示"未能打开驱动设置页，已用驱动当前介质" |
 | 用户在驱动页点了取消 | 视为放弃打印，不发作业、状态栏"已取消" |
 | 驱动忽略自定义尺寸（`verify_physical_size` 不过） | 中止，红字沿用现有文案，指向"驱动内建同名表单或改用 PDF 导出" |
@@ -152,9 +151,8 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
     `ok=False` 且带 message，**不抛异常**。
 - `test_app_print_media.py`（FakeApi，`main_window`）：
   - 打印机下拉由 `enum_printers` 填充；`enum_printers` 抛异常时下拉为空且不崩。
-  - 页码范围对话框：全部/当前/自定义三档解析正确；非法输入拒绝、不触发 `print_pages`。
-  - 点打印 → 送出的 `images` 数 = 所选页数，且渲染取自 `render_all`（含当前
-    `photo_rotations`，用方向可辨横图断言打印图非空、页数对）。
+  - 点打印 → 送出的 `images` 数 = `job.page_count`（全部页），且渲染取自
+    `render_all`（含当前 `photo_rotations`，用方向可辨横图断言打印图非空、页数对）。
   - `print_pages` 返回 `ok=False` → 状态栏红字；`ok=True` → 正常色提示。
   - 全程异常安全：让 FakeApi 的 `prompt_devmode`/`create_dc` 抛错，点打印不外抛。
 - 既有 `test_cli_frozen`、`_lab/m1m2_check.py`、`_lab/check_gui_cli_parity.py`

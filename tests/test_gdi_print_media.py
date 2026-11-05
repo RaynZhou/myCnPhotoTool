@@ -2,8 +2,6 @@
 _emit 被 monkeypatch，故本文件全程不 import win32（gdi_print 顶部也不 import）。"""
 import types
 
-import pytest
-
 from photoprint.win import devmode, gdi_print
 
 
@@ -53,8 +51,31 @@ def test_print_job_is_prompt_false_wrapper(monkeypatch):
     monkeypatch.setattr(devmode, "build_with_prompt", fake_build)
     monkeypatch.setattr(gdi_print, "_emit",
                         lambda *a, **k: {"ok": True, "pages": 1, "message": ""})
-    gdi_print.print_job(object(), "P", None, _imgs(1), Sheet, 300)
+    res = gdi_print.print_job(object(), "P", None, _imgs(1), Sheet, 300)
     assert seen["prompt"] is False       # CLI 冻结：绝不弹窗
+    assert res == {"ok": True, "pages": 1, "message": ""}   # 返回值原样透传
+
+
+def test_build_failure_cli_keeps_legacy_prefix(monkeypatch):
+    """CLI（prompt=False）取设置失败的文案必须逐字冻结为旧串“打印失败：”，
+    不得因为 print_pages 新增分区前缀而改变（全局约束 L18）。"""
+    def boom(*a, **k):
+        raise RuntimeError("dm size 0")
+
+    monkeypatch.setattr(devmode, "build_with_prompt", boom)
+    res = gdi_print.print_job(object(), "P", None, _imgs(1), Sheet, 300)
+    assert res["ok"] is False and res["pages"] == 0
+    assert res["message"] == "打印失败：dm size 0"
+
+
+def test_build_failure_gui_uses_media_prompt_prefix(monkeypatch):
+    """GUI（prompt=True）取设置失败用更准的分区前缀“读取打印机设置失败：”。"""
+    def boom(*a, **k):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(devmode, "build_with_prompt", boom)
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300, prompt=True)
+    assert res["message"].startswith("读取打印机设置失败：")
 
 
 def test_build_failure_contained_no_raise(monkeypatch):
@@ -66,9 +87,14 @@ def test_build_failure_contained_no_raise(monkeypatch):
     assert res["ok"] is False and "printer offline" in res["message"]
 
 
-def test_emit_source_does_not_regress_to_win32print_create_dc():
+def test_emit_and_module_never_use_win32print_create_dc():
+    """终审 C2：建 DC 走 win32gui（_create_dc），全模块不得出现 win32print。"""
     import inspect
 
-    src = inspect.getsource(gdi_print._emit)
-    assert "win32ui.CreateDCFromHandle" in src
-    assert "win32print.CreateDC" not in src        # 终审 C2 契约
+    emit_src = inspect.getsource(gdi_print._emit)
+    assert "win32ui.CreateDCFromHandle" in emit_src
+    create_src = inspect.getsource(gdi_print._create_dc)
+    assert "win32gui.CreateDC" in create_src
+    mod_src = inspect.getsource(gdi_print)
+    assert "win32print.CreateDC" not in mod_src   # 不得走不存 win32print.CreateDC
+    assert "import win32print" not in mod_src      # 模块不拉 win32print（docstring 叙事不算）

@@ -48,7 +48,9 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
             api, printer, sheet.w_mm, sheet.h_mm, sheet.driver_paper_code,
             prompt=prompt)
     except Exception as exc:      # 取设置/弹窗阶段失败也要兜住
-        return {"ok": False, "pages": 0, "message": f"读取打印机设置失败：{exc}"}
+        # CLI（prompt=False）文案逐字冻结为旧串；GUI 才用更准的分区前缀
+        prefix = "读取打印机设置失败" if prompt else "打印失败"
+        return {"ok": False, "pages": 0, "message": f"{prefix}：{exc}"}
     return _emit(api, printer, dm_obj, images, sheet, dpi)
 
 

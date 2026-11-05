@@ -107,6 +107,28 @@ def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
     assert page.getpixel((3, page.height // 2)) != (210, 210, 210)
 
 
+def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):
+    """界面层是唯一会写错导出参数的地方：必须钉住 export_to 用所选 dpi 且关遮罩。
+
+    `test_export_writes_equal_size_pdf` 只查 MediaBox（与 dpi 无关），结构上
+    守不到导出路径的 dpi/show_mask。这里 spy 拦一层 jobs.render_all 看真参数。
+    """
+    seen = {}
+    real = jobs.render_all
+
+    def spy(job, dpi, show_mask=None):
+        seen["dpi"] = dpi
+        seen["show_mask"] = show_mask
+        return real(job, dpi, show_mask=show_mask)
+
+    monkeypatch.setattr(jobs, "render_all", spy)
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.export_to(str(tmp_path / "page.pdf"))
+    assert seen["show_mask"] is False          # 导出不带灰遮罩（全局约束）
+    assert seen["dpi"] == 300.0                 # 用下拉选中的 dpi，不是预览 96
+
+
 def test_too_big_cell_reports_instead_of_crashing(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     w.sheet_box.setCurrentIndex(w.sheet_box.findData("3R"))
@@ -137,6 +159,17 @@ def test_last_job_roundtrip_through_two_windows(qapp, tmp_path):
     assert again.cell_box.currentData() == "ID1"
 
 
+def test_bad_offset_pct_in_config_does_not_block_startup(qapp, tmp_path):
+    """坏配置不得卡住启动（与 store 自己的降级原则一致）：offset_pct 元素不可
+    转 int 时静默保持默认 0，不让 ValueError 抛出 __init__。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
+                    "offset_pct": ["a", None]})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))       # 不应抛
+    assert w.h_slider.value() == 0 and w.v_slider.value() == 0
+
+
 def test_offset_sliders_reach_jobs(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
@@ -155,3 +188,14 @@ def test_page_navigation_clamps_at_edges(qapp, tmp_path):
     assert w.page_index == 1         # 越界不得变页码
     w._go_page(-1)
     assert w.page_index == 0
+
+
+def test_close_event_stops_debounce(qapp, tmp_path):
+    """关窗必须停掉 debounce：否则“改参数后 250ms 内关窗”时，debounce 会在
+    关窗之后 fire → _refresh → _render_async 另起一条线程，绕过 closeEvent
+    的全部收尾 → 退出时残留线程被析构硬崩（round-1 评审 C1）。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.h_slider.setValue(10)          # 触发 debounce，还没到期
+    w.close()
+    assert not w._debounce.isActive()

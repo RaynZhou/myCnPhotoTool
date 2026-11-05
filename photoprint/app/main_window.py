@@ -73,6 +73,8 @@ class MainWindow(QMainWindow):
         self.job = None
         self._thread = None
         self._task = None
+        self._gen = 0
+        self._stale = []        # wait 超时没停干净的旧线程，留住引用防其在跑时被回收
         self.setWindowTitle("相片打印助手")
         self._build_ui()
         # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
@@ -207,20 +209,39 @@ class MainWindow(QMainWindow):
         self._render_async()
 
     def _render_async(self):
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(1000)
+        self._gen += 1
+        gen = self._gen
+        self._retire_threads()
         job, index = self.job, self.page_index
         self._thread, self._task = worker.start(
             lambda: job.render(index, jobs.PREVIEW_DPI, show_mask=True))
-        self._task.succeeded.connect(self._on_preview)
-        self._task.failed.connect(lambda msg: self._set_status(msg, error=True))
+        self._task.succeeded.connect(lambda image, g=gen: self._on_preview(image, g))
+        self._task.failed.connect(
+            lambda msg, g=gen: self._on_render_failed(msg, g))
         self._thread.start()
 
-    def _on_preview(self, image):
+    def _retire_threads(self):
+        """quit 打不断正在 run 的渲染，wait 超时就不能丢引用——丢了引用，在跑的
+        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。"""
+        threads = self._stale + ([self._thread] if self._thread is not None else [])
+        keep = []
+        for th in threads:
+            if th.isRunning():
+                th.quit()
+                if not th.wait(2000):
+                    keep.append(th)
+        self._stale = keep
+
+    def _on_preview(self, image, gen=None):
+        if gen is not None and gen != self._gen:
+            return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
         pm = view.to_pixmap(image)
         self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
                                         Qt.SmoothTransformation))
+
+    def _on_render_failed(self, msg, gen=None):
+        if gen is None or gen == self._gen:
+            self._set_status(msg, error=True)
 
     def _go_page(self, delta):
         if self.job is None:
@@ -330,8 +351,13 @@ class MainWindow(QMainWindow):
                 self.dpi_box.setCurrentIndex(idx)
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
-            self.h_slider.setValue(int(pct[0]))
-            self.v_slider.setValue(int(pct[1]))
+            try:
+                hx, vy = int(pct[0]), int(pct[1])
+            except (TypeError, ValueError):
+                pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
+            else:
+                self.h_slider.setValue(hx)
+                self.v_slider.setValue(vy)
         for p in job.get("photo_paths") or []:
             self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
 
@@ -343,8 +369,8 @@ class MainWindow(QMainWindow):
         return self._last_out_dir() or str(Path.home())
 
     def closeEvent(self, event):
+        self._debounce.stop()      # 关窗后 debounce 若还 fire 会另起线程，绕过收尾
         self.save_last_job()
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(2000)
+        self._gen += 1             # 之后任何回投都算过期帧
+        self._retire_threads()     # 收干净当前与遗留线程（含 wait 超时留存的）
         super().closeEvent(event)

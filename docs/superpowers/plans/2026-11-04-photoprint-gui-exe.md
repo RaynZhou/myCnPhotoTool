@@ -1708,6 +1708,8 @@ class MainWindow(QMainWindow):
         self.job = None
         self._thread = None
         self._task = None
+        self._gen = 0
+        self._stale = []        # wait 超时没停干净的旧线程，留住引用防其在跑时被回收
         self.setWindowTitle("相片打印助手")
         self._build_ui()
         # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
@@ -1842,20 +1844,39 @@ class MainWindow(QMainWindow):
         self._render_async()
 
     def _render_async(self):
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(1000)
+        self._gen += 1
+        gen = self._gen
+        self._retire_threads()
         job, index = self.job, self.page_index
         self._thread, self._task = worker.start(
             lambda: job.render(index, jobs.PREVIEW_DPI, show_mask=True))
-        self._task.succeeded.connect(self._on_preview)
-        self._task.failed.connect(lambda msg: self._set_status(msg, error=True))
+        self._task.succeeded.connect(lambda image, g=gen: self._on_preview(image, g))
+        self._task.failed.connect(
+            lambda msg, g=gen: self._on_render_failed(msg, g))
         self._thread.start()
 
-    def _on_preview(self, image):
+    def _retire_threads(self):
+        """quit 打不断正在 run 的渲染，wait 超时就不能丢引用——丢了引用，在跑的
+        QThread 被回收就是 0xC0000409；被丢弃线程迟到的回投靠 gen 当过期帧丢弃。"""
+        threads = self._stale + ([self._thread] if self._thread is not None else [])
+        keep = []
+        for th in threads:
+            if th.isRunning():
+                th.quit()
+                if not th.wait(2000):
+                    keep.append(th)
+        self._stale = keep
+
+    def _on_preview(self, image, gen=None):
+        if gen is not None and gen != self._gen:
+            return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
         pm = view.to_pixmap(image)
         self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
                                         Qt.SmoothTransformation))
+
+    def _on_render_failed(self, msg, gen=None):
+        if gen is None or gen == self._gen:
+            self._set_status(msg, error=True)
 
     def _go_page(self, delta):
         if self.job is None:
@@ -1965,8 +1986,13 @@ class MainWindow(QMainWindow):
                 self.dpi_box.setCurrentIndex(idx)
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
-            self.h_slider.setValue(int(pct[0]))
-            self.v_slider.setValue(int(pct[1]))
+            try:
+                hx, vy = int(pct[0]), int(pct[1])
+            except (TypeError, ValueError):
+                pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
+            else:
+                self.h_slider.setValue(hx)
+                self.v_slider.setValue(vy)
         for p in job.get("photo_paths") or []:
             self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
 
@@ -1978,17 +2004,17 @@ class MainWindow(QMainWindow):
         return self._last_out_dir() or str(Path.home())
 
     def closeEvent(self, event):
+        self._debounce.stop()      # 关窗后 debounce 若还 fire 会另起线程，绕过收尾
         self.save_last_job()
-        if self._thread is not None and self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(2000)
+        self._gen += 1             # 之后任何回投都算过期帧
+        self._retire_threads()     # 收干净当前与遗留线程（含 wait 超时留存的）
         super().closeEvent(event)
 ```
 
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_app_main_window.py -v`
-Expected: 8 passed
+Expected: 11 passed（含 round-1 修复波新增的 export dpi/遮罩、坏 offset_pct 不卡启动、closeEvent 停 debounce 三条）
 
 - [ ] **Step 5: 全量回归 + 手工看一扇窗口**
 
@@ -2531,6 +2557,22 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   收尾先 stop debounce（否则泵送会触发新的 250ms 延迟渲染又起线程），再
   泵到现有线程全停，最后 close 触发 closeEvent 里的 quit+wait 兜底（连跑
   15 次 RC=0）。均回写进计划块。
+- **T7 round-1 评审的修复波（⑰）**：CodeReview round-1 独立核实后确认 4 项，
+  逐条已修并回写 Step 3 块、补 3 条承重测试、变异表扩到 10 点全杀：
+  （C1）`closeEvent` 未 `stop` debounce——改滑块后 250ms 内关窗，debounce 仍会
+  fire 起新线程绕过收尾，触发 "QThread: Destroyed while running" 硬崩（实测复现）；
+  修法：closeEvent 先 `self._debounce.stop()`。
+  （I2）过期帧竞态：慢线程迟到的 `succeeded` 回投会覆盖新页。修法：`_gen`
+  代际号，`_on_preview`/`_on_render_failed` 丢弃 `gen != self._gen` 的回投；
+  `_retire_threads` 对 `wait` 超时的线程留引用进 `_stale`，防在跑线程被回收崩溃。
+  （I3）`export_to` 的 `show_mask`/`dpi` 无测试承重——临时把它改成 `show_mask=True`
+  且用 `PREVIEW_DPI`，原 8 条全过（真缺口）。修法：补 `test_export_passes_selected_dpi_and_no_mask`
+  用 spy 断言 `show_mask is False and dpi == 300.0`（X1/X2 各杀一发）。
+  （I4）`_restore_last_job` 对 `offset_pct` 裸 `int()`——坏配置（如 `["a", None]`）
+  在 `__init__` 抛 ValueError 阻塞启动（实测复现）。修法：try/except 后保持滑块默认 0，
+  与其余字段降级同口径。全局约束“异常一律收敛不外抛”正是被 I4 破坏、本轮修复。
+  说明：I2 的代际/留引用是竞态防御，预览实测 ~11ms、测试造不出确定性的慢线程
+  迟到时序，故不入变异表（同 T6 M4 已知冗余处理）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

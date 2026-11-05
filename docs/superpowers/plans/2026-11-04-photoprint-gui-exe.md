@@ -2409,8 +2409,9 @@ $sizeMb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
 $started = Get-Date
 # onefile 下真实窗口属子进程（引导父进程无窗口）→ 必须按映像名而非父 PID 取标题。
 # 但 PhotoPrint 就是产品 exe 名，绝不能按名全机强杀（会打掉用户自己开着的实例、丢 last_job）。
-# 归属边界用"排除法"：只排除快照时已存在的 PhotoPrint；快照之后（含整个轮询窗口）新起的
-# 外部实例仍会被当成本轮 own，匹配与清理都可能误伤——dev-only 手工脚本可接受的窄 TOCTOU。
+# 归属边界用"排除法"：只排除快照时已存在的 PhotoPrint；从快照起到清理二次枚举为止
+# （≈轮询 30s + 关窗 2s）新起的外部实例仍会被当成本轮 own，匹配与清理都可能误伤——
+# dev-only 手工脚本可接受的窄 TOCTOU。
 $before = @(Get-Process -Name "PhotoPrint" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 if ($before.Count -gt 0) {
     Write-Host "注：检测到 $($before.Count) 个既存 PhotoPrint 实例，本轮不碰也不回收（历史孤儿需手工清）"
@@ -2424,8 +2425,13 @@ function Get-OwnPhotoPrint {
 
 # 先礼貌关窗（走 closeEvent 落 last_job），仍没退的再强杀——把"误伤外部实例"的后果从
 # 强杀丢数据降为正常关窗。只对"本轮 own"（含 TOCTOU 窗口内误纳者）生效。
+# 注意：CloseMainWindow() 是 .NET 方法，对"枚举后已自行退出"的对象会抛 MethodInvocationException，
+# 且该异常不受 -EA SilentlyContinue 管辖（必须 try/catch）；一旦在清理里抛出会中断脚本、
+# 让本轮 own 残留并落进下次的 $before 被永久豁免。故先判 HasExited、再包 try/catch 兜底。
 function Stop-OwnPhotoPrint {
-    foreach ($proc in @(Get-OwnPhotoPrint)) { [void]$proc.CloseMainWindow() }
+    foreach ($proc in @(Get-OwnPhotoPrint)) {
+        if (-not $proc.HasExited) { try { [void]$proc.CloseMainWindow() } catch { } }
+    }
     Start-Sleep -Seconds 2
     @(Get-OwnPhotoPrint) | Where-Object { -not $_.HasExited } |
         Stop-Process -Force -ErrorAction SilentlyContinue
@@ -2816,6 +2822,16 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   （现仅 qwindows/Qt6* 有收集凭证），且 63.3MB 低于 spec §9 原 100–180MB、Step 4 就地订正未回同步 spec；
   这两条（加 exe 导出 PDF 实测 + spec §9 区间/证据二选一同步）归 Task 10。M-B1（`.gitignore` `*.spec` 全域偏宽）：
   保留计划逐字选择，若后续需入库手写 spec 再收窄为 `/PhotoPrint.spec`。
+- **T9 round-4 确认性复审（㉗）**：round-4 给 (A) Spec Approved、(B) Approved（I-3 正式降为已声明 Minor 残余），
+  但附本轮唯一新真实缺陷 W-1（SHOULD FIX、不阻塞）：`Stop-OwnPhotoPrint` 第一阶段 `foreach { [void]$proc.CloseMainWindow() }`
+  对“枚举后已自行退出”的对象抛 `MethodInvocationException`（本会话实测：活而无窗口对象返回 False 不抛、
+  已退对象抛“进程已退出…”），且 **.NET 方法异常不受 `-EA SilentlyContinue` 管辖（实测连 `Continue` 也照样终止），必须 try/catch**。
+  若不修：清理中途抛→本轮 own 残留→落进下次 `$before` 被永久豁免、并被“历史孤儿”提示掩盖。修法（一行守卫，
+  第二阶段已用 HasExited 保护、无需改）：`if (-not $proc.HasExited) { try { [void]$proc.CloseMainWindow() } catch { } }`。另 S-1：
+  TOCTOU 措辞从“含整个轮询窗口”改为“从快照起到清理二次枚举为止（≈轮询 30s + 关窗 2s）”——二次枚举把暴露面延到
+  关窗之后。回写 Step 5 逐字块（verbatim 仍 0）、两 .ps1 重编码保 BOM、`check_exe.ps1` 连跑两次走 FAIL 路径均干净退出 1、
+  无异常、残留 0（本会话窗口枚举此刻不可用，带桌面 OK 归 Task 10）。round-4 既双 Approved，此波只清 SHOULD/CONSIDER，
+  不再派 round-5。A-1 遗留交 Task 10（img2pdf/Pillow 收集 grep 凭证 + exe 导出 PDF 实测 + spec §9 区间与实测同步）。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

@@ -1848,8 +1848,12 @@ class MainWindow(QMainWindow):
                            float(self.v_slider.value())),
         }
 
-    def _refresh(self):
-        """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
+    def _rebuild_job(self):
+        """把当前控件值落成 self.job（含校验与状态栏），但不起渲染线程。
+
+        导出走这条：只需同步出最新 job，不该顺带重渲一遍预览、更不该在
+        `_render_async` 里 `_retire_threads` 阻塞主线程（最长 2s）。
+        """
         p = self._params()
         try:
             self.job = jobs.build_job(self.st, self.photos, p["sheet_key"],
@@ -1865,7 +1869,12 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(any(ph is not None for ph in self.photos))
         self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
                          f"{self.job.note}")
-        self._render_async()
+
+    def _refresh(self):
+        """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
+        self._rebuild_job()
+        if self.job is not None:
+            self._render_async()
 
     def _render_async(self):
         self._gen += 1
@@ -1957,6 +1966,11 @@ class MainWindow(QMainWindow):
         """导出等尺寸 PDF。测试直接调它，不经文件对话框。"""
         from photoprint.win import pdf_export
 
+        # 先把待防抖的控件值落成 job：self.job 是上次 _refresh 的快照，而下面
+        # 的校验与 dpi 取的是实时值，不先同步就会拿陈旧 job 配新参数导出。
+        # 走 _rebuild_job 而非 _refresh：导出不需重渲预览，不起那条会被丢弃的线程。
+        self._debounce.stop()
+        self._rebuild_job()
         if self.job is None or not any(ph is not None for ph in self.photos):
             raise ValueError("没有可导出的照片")
         pages = jobs.render_all(self.job, self._params()["dpi"], show_mask=False)
@@ -2310,15 +2324,26 @@ from PySide6.QtWidgets import QApplication
 
 from photoprint.app import crashlog, main_window
 
+# spec §9 要求崩溃落盘后在状态栏提示的逐字前缀（抽成常量供入口测钉）。
+CRASH_HINT_PREFIX = "已记录错误日志："
+
+
+def wire_crash_hint(win):
+    """把崩溃落盘后的提示接到窗口状态栏（收一个日志 Path）。
+
+    必须在窗口已建后调：启动早期（win 未成）`install()` 装的钩子只落盘、
+    回调为空，接早了会误碰还不存在的 UI。
+    """
+    crashlog.set_ui_callback(
+        lambda p: win._set_status(f"{CRASH_HINT_PREFIX}{p}", error=True))
+
 
 def run(argv=None):
     crashlog.install()
     app = QApplication(argv if argv is not None else sys.argv[:1])
     win = main_window.MainWindow()
     win.show()
-    # 建好窗口后才接状态栏提示：启动阶段的崩溃（win 未成）只落盘、不误碰 UI。
-    crashlog.set_ui_callback(
-        lambda p: win._set_status(f"已记录错误日志：{p}", error=True))
+    wire_crash_hint(win)
     return app.exec()
 
 
@@ -2916,7 +2941,8 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   补列 parity 脚本。均回写计划 Step 2/3 逐字块（check_t10_parity_verbatim 实测 MATCH、字节相等）。实跑：parity 同尺寸/同像素/遮罩正对照/四边纯白全 True RC=0、无 getdata 弃用告警；全量 228 passed RC=0。
 - **T10 round-2 确认性复审（㉙）**：round-2 给 (A) Spec Approved（附一处必订正的措辞 N-1）、(B) 质量 Approved（附 N-1 必修、N-2/N-3/N-4 CONSIDER），零 Critical；round-1 六条 5 条已闭、B-1/B-5 判“部分闭合（代码改了但声明超出证据）”。逐条独立复核后坐实 **N-1 为真 over-claim**：`git grep DEFAULT_OUTPUT_DPI` 仅 jobs.py:16 定义与 parity 脚本引用、无生产消费者→界面 dpi 默认实来自 `main_window.py:28 DPI_CHOICES` 字面量 + `:144 setCurrentIndex(1)`，与脚本的 `jobs.DEFAULT_OUTPUT_DPI` **同值不同源**；`test_app_main_window.py:111-131` 的 spy 只钉 `show_mask is False` + `dpi == 600.0`（跟随所选）、**不检查控件默认值**；其 :104-108 那条负断言在 25.4 dpi 下零牙（恒真）。修法（严格限“验收与文档”范围、纯文档收窄）：docstring 分三档明写“出血真同源 / dpi 同值不同源 / store 读真实 %APPDATA% 刻意一致 fail-loud”、同步收窄 spec §11.5a 与 ㉘ 措辞；N-2（两侧同读真实 store）判定不改（改动会解耦 GUI/CLI store、反引入 parity 假失败风险），已在 docstring 明记前提；N-3 `str(int(DPI))`→`str(DPI)`（已核 cli `--dpi type=float`、“300.0”合法）；N-4a 正对照 `masked` 存 `parity_mask_control.png` 留人工复核探针落带内。**跨任务残留登记交 fin（全分支终审）整枝**：T7 `test_app_main_window.py:104-108` 恒真遮罩断言、及 UI 默认常量未被任何测试断言（评审首选修法：补 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()`/`w.bleed_box.value()`，并把 :107-108 改 dpi=DEFAULT_OUTPUT_DPI + 4 点正断言 + show_mask=True 正对照）。round-2 既 (A)(B) Approved 且 N-1 已闭，此波只清 SHOULD/CONSIDER，不派 round-3。
 - **全分支终审前的整枝（㉚）**：T10 round-2 登记的两条跨任务测试残留属本仓反复踩的“恒真空转”同族（T4⑥/T5⑮/T8M-2/T10 B-2/B-3），在 fin 整枝：① `test_app_main_window.py::test_exported_page_has_no_unprintable_mask` 原在 25.4 dpi 下用负断言 `!= (210,210,210)`、探针 (3, ·) 落遮罩带外（该 dpi 带只 0..2px）→零牙；改 `dpi=jobs.DEFAULT_OUTPUT_DPI`（带 0..39px 包住四边探针）+ 4 点正断言 `== (255,255,255)` + `show_mask=True` 正对照（同 parity B-2 口径）。② 新增 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()==jobs.DEFAULT_OUTPUT_DPI` 与 `w.bleed_box.value()==modes.DEFAULT_BLEED_MM`，补上控件默认值此前无任何断言的那半边（也让 N-1 里“同值不同源”的 dpi 从测试层面变成“同源”约束）。两波均实测验牙：① 把 `render_page` 遮罩闸改为无视 `show_mask` 恒画→①号测 RC=1；② 把 `setCurrentIndex(1)→(0)`→②号测 RC=1；两个变异均已原样还原（git diff 仅留 test 文件）。计划 T7 逐字块同步回写、`check_t7_plan_verbatim` 缺失 0；全量 229 passed RC=0。
-- **全分支终审与修复波（㉛）**：对整枝净改动 `c0d84a2..a33d489` 派发 CodeReview 终审，返回 **(A) Spec = Needs work**（唯一驱动项 A-2）、**(B) 质量 = Approved**（2 Minor + 3 Consider，零 Critical）。逐条独立复核：A-2 坐实为真——spec §9 L204 确有“并在状态栏提示‘已记录错误日志’”，但 `crashlog` 钩子只落盘、未接 UI 回调（`已记录错误日志` 全仓仅出现在 spec）；根因是**计划级遗漏**：计划 T8 段从头就没把这条 §9 要求列进去，T8 三轮按计划实现无从发现，终审正确捕获。修法（闭 A-2）：`crashlog` 加模块级 `_UI_CALLBACK`+`set_ui_callback`，主线程 `hook` 写完日志（`write` 返回路径非 None）后回调、`try/except Exception` 兜底防提示本身坏掉掩盖原异常；子线程 `thread_hook` 只落盘不回调（跨线程改 QWidget 不安全）；`__main__.run` 在 `win.show()` 之后注册 `win._set_status(..., error=True)`（启动早期窗口未成时回调为空、只落盘）。新增测 `test_install_hook_notifies_ui_callback` 双向钉“主线程回调 / 子线程不碰 UI”（变异：让 thread_hook 也回调→`assert got==[]` RC=1，实测验牙后还原）。顺手闭 Minor：**B-1**（`export_to` 顶部先 `_debounce.stop()+_refresh()`，消除陈旧 `self.job` × 实时 dpi 混用）、**B-2**（`test_bad_numeric_configs_do_not_block_startup` 加 `@pytest.mark.filterwarnings("error::RuntimeWarning")`，让 `offset_pct=1e19` 的 shiboken C int 溢出 RuntimeWarning 升成 error、护栏真承重）。A-3/B-3/B-4/B-5 经核为非阻塞/计划已声明偏差/架构示性，不改。计划 T8 crashlog/`__main__` 逐字块同步回写、`check_t8_plan_verbatim` 缺失 0；全量 **230 passed RC=0**（较 229 净增 1）、`m1m2_check`/`check_gui_cli_parity` 均 RC=0（parity 全 True）。
+- **全分支终审与修复波（㉛）**：对整枝净改动 `c0d84a2..a33d489` 派发 CodeReview 终审，返回 **(A) Spec = Needs work**（唯一驱动项 A-2）、**(B) 质量 = Approved**（2 Minor + 3 Consider，零 Critical）。逐条独立复核：A-2 坐实为真——spec §9 L204 确有“并在状态栏提示‘已记录错误日志’”，但 `crashlog` 钩子只落盘、未接 UI 回调（`已记录错误日志` 全仓仅出现在 spec）；根因是**计划级遗漏**：计划 T8 段从头就没把这条 §9 要求列进去，T8 三轮按计划实现无从发现，终审正确捕获。修法（闭 A-2）：`crashlog` 加模块级 `_UI_CALLBACK`+`set_ui_callback`，主线程 `hook` 写完日志（`write` 返回路径非 None）后回调、`try/except Exception` 兜底防提示本身坏掉掩盖原异常；子线程 `thread_hook` 只落盘不回调（跨线程改 QWidget 不安全）；`__main__.run` 在 `win.show()` 之后注册 `win._set_status(..., error=True)`（启动早期窗口未成时回调为空、只落盘）。新增测 `test_install_hook_notifies_ui_callback` 双向钉“主线程回调 / 子线程不碰 UI”（变异：让 thread_hook 也回调→`assert got==[]` RC=1，实测验牙后还原）。顺手闭 Minor：**B-1**（`export_to` 顶部先同步防抖值，消除陈旧 `self.job` × 实时 dpi 混用）、**B-2**（给 `test_bad_numeric_configs_do_not_block_startup` 加 `filterwarnings` 标）。——以上两句措辞经确认复审复核为过声（B-2 的 mark 实测 inert、护栏实由 OverflowError 承重；B-1 无测守住），修正均入 ㉜。A-3/B-3/B-4/B-5 经核为非阻塞/计划已声明偏差/架构示性，不改。计划 T8 crashlog/`__main__` 逐字块同步回写、`check_t8_plan_verbatim` 缺失 0；全量 **230 passed RC=0**（较 229 净增 1）、`m1m2_check`/`check_gui_cli_parity` 均 RC=0（parity 全 True）。
+- **全分支终审确认复审与第二波修复（㉜）**：对 `dac91aa..452ad25`（第一波 A-2/B-1/B-2 + 整枝）派发确认复审，返回 **(A) Spec = Approved**（A-2 判闭合，实测 PySide6 6.12 下槽内未捕获异常确实走 `sys.excepthook`、Qt 不 `qFatal`、提示用户可见）、**(B) 质量 = Approved**，零 Critical；但带出 4 条需处置。逐条独立复核均坐实为真：【A-组 Important】`__main__.run` 那行注册零测试覆盖（删两行 230 全绿）→抽 `wire_crash_hint(win)`+新增 `test_run_wires_status_hint`（用 FakeWin 不跑事件循环直测、断字面“已记录错误日志”非引用常量防同义同变；变异让 wire 变 no-op→`KeyError:'text'` RC=1）。【B-组 Important】B-1 无测守住（M3 全绿）→新增 `test_export_syncs_pending_debounce_before_render`（拖 h_slider 挂防抖、断导出后 `job.offset_pct==(30.0,0.0)`；变异删 `_rebuild_job()`→`assert (0.0,0.0)==(30.0,0.0)` RC=1）。【B-组 Minor、订正 ㉛ B-2】实探 `slider.setValue(int(1e19))` 使 shiboken **同时**发 RuntimeWarning 且**直抛 OverflowError**（被 `_safe` 接），护栏承重来自 OverflowError 本身→之前所加 `filterwarnings` mark 属 **inert**（删护栏+删 mark 仍 4 条全红）、docstring “只发 RuntimeWarning默认不抛、升 error 后才踩护栏”为**事实性 over-claim**→删 mark、docstring 改回实测口径。【A-组 Minor】spec §9 “双钩…并在状态栏提示”字面也盖子线程钩、实现仅主线程提示→已在 spec §9 补口径（子线程钩仅落盘、界面侧线程异常经 worker `failed` 回主线程）。另采纳 Consider：把 `_refresh` 拆为 `_rebuild_job`（build+校验+状态栏、不起线程）+`_render_async`，`export_to` 改调 `_rebuild_job`，消除 B-1 给导出带来的“多起一条预览线程 + `_retire_threads` 最长阻 2s”副作用。计划 T7 `_refresh`/`export_to`、T8 `__main__` 逐字块同步回写，`check_t7`/`check_t8_plan_verbatim` 均缺失 0；全量 **232 passed RC=0**（较 230 净增 2：入口接线测 + B-1 防抖同步测）。【登记不追】复审环境见全量套件在解释器收尾间歇硬崩（0xC0000005/0xC0000409、`QThreadStorage entry destroyed before end of thread`），**基线 dac91aa 与 a33d489 均 3/3 复现**→判非本波引入、不计入本 diff 缺陷（与本仓已知的 Qt 退出 fastfail/线程收尾同族）；带交互桌面真机复跑归终验。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

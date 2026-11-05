@@ -155,6 +155,21 @@ def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):
     assert seen["dpi"] == 600.0           # 取的是下拉所选值，不是预览 96、也不是默认 300
 
 
+def test_export_syncs_pending_debounce_before_render(qapp, tmp_path):
+    """B-1：导出前必须把挂着的防抖控件值同步进 job，否则拿陈旧 job 配新参数导出。
+
+    _fill 同步刷一次（offset 0）；随后拖 h_slider 只起 debounce、不即时重排（offscreen
+    不泵事件、定时器不会 fire）。export_to 顶部那次 _rebuild_job 才把偏移落成 (30,0)。
+    删那两行同步→ self.job 仍是陈旧的 (0,0)，导出后的断言当场变红（实测验过牙）。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.h_slider.setValue(30)                       # 防抖挂着：self.job 仍 (0,0)
+    assert w.job.offset_pct == (0.0, 0.0)
+    w.export_to(str(tmp_path / "sync.pdf"))
+    assert w.job.offset_pct == (30.0, 0.0)        # 导出前已把待防抖值同步进 job
+
+
 def test_too_big_cell_reports_instead_of_crashing(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     w.sheet_box.setCurrentIndex(w.sheet_box.findData("3R"))
@@ -250,20 +265,21 @@ def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
     assert w.h_slider.value() == 0 and w.v_slider.value() == 0
 
 
-@pytest.mark.filterwarnings("error::RuntimeWarning")
 @pytest.mark.parametrize("key,value", [
     ("gap_mm", int("9" * 400)),        # float(huge int) → OverflowError
     ("bleed_mm", int("9" * 400)),
     ("dpi", int("9" * 400)),
-    ("offset_pct", [1e19, 0]),         # int(1e19) 能转，但 setValue 喂给 C int 溢出
+    ("offset_pct", [1e19, 0]),         # setValue(int(1e19)) → shiboken 抛 OverflowError
 ])
 def test_bad_numeric_configs_do_not_block_startup(qapp, tmp_path, key, value):
     """I5/W1：数值字段超大值一律不得卡启动——写入控件的 OverflowError 必须被
     _restore_last_job 的降级护栏接住。删护栏则本用例在 __init__ 抛。
 
-    标 filterwarnings=error::RuntimeWarning：`offset_pct=1e19` 走的是
-    `int(1e19)` 能转、但 `slider.setValue` 喂给 shiboken C int 溢出只发
-    RuntimeWarning（默认不抛），升成 error 后该用例才真踩到护栏。
+    实测（PySide6 6.12）：`slider.setValue(int(1e19))` 会让 shiboken 同时
+    发一条 RuntimeWarning 且抛出 OverflowError（“int too big to convert”），后者被
+    _safe 的 (TypeError, ValueError, OverflowError) 接住——护栏的承重来自 OverflowError
+    本身，删护栏则 4 条全红（含 offset_pct）。不加 filterwarnings mark：该路径不是
+    “只告警不抛”，mark 对本用例零作用（inert），反而会把无关 RuntimeWarning 升 error。
     """
     s = _store(tmp_path)
     s.set_last_job({"sheet_key": "A4", "cell_key": "3R", key: value})

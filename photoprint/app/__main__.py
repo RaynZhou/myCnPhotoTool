@@ -11,15 +11,26 @@ from PySide6.QtWidgets import QApplication
 
 from photoprint.app import crashlog, main_window
 
+# spec §9 要求崩溃落盘后在状态栏提示的逐字前缀（抽成常量供入口测钉）。
+CRASH_HINT_PREFIX = "已记录错误日志："
+
+
+def wire_crash_hint(win):
+    """把崩溃落盘后的提示接到窗口状态栏（收一个日志 Path）。
+
+    必须在窗口已建后调：启动早期（win 未成）`install()` 装的钩子只落盘、
+    回调为空，接早了会误碰还不存在的 UI。
+    """
+    crashlog.set_ui_callback(
+        lambda p: win._set_status(f"{CRASH_HINT_PREFIX}{p}", error=True))
+
 
 def run(argv=None):
     crashlog.install()
     app = QApplication(argv if argv is not None else sys.argv[:1])
     win = main_window.MainWindow()
     win.show()
-    # 建好窗口后才接状态栏提示：启动阶段的崩溃（win 未成）只落盘、不误碰 UI。
-    crashlog.set_ui_callback(
-        lambda p: win._set_status(f"已记录错误日志：{p}", error=True))
+    wire_crash_hint(win)
     return app.exec()
 
 

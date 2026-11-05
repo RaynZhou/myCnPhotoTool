@@ -189,8 +189,12 @@ class MainWindow(QMainWindow):
                            float(self.v_slider.value())),
         }
 
-    def _refresh(self):
-        """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
+    def _rebuild_job(self):
+        """把当前控件值落成 self.job（含校验与状态栏），但不起渲染线程。
+
+        导出走这条：只需同步出最新 job，不该顺带重渲一遍预览、更不该在
+        `_render_async` 里 `_retire_threads` 阻塞主线程（最长 2s）。
+        """
         p = self._params()
         try:
             self.job = jobs.build_job(self.st, self.photos, p["sheet_key"],
@@ -206,7 +210,12 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(any(ph is not None for ph in self.photos))
         self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
                          f"{self.job.note}")
-        self._render_async()
+
+    def _refresh(self):
+        """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
+        self._rebuild_job()
+        if self.job is not None:
+            self._render_async()
 
     def _render_async(self):
         self._gen += 1
@@ -300,8 +309,9 @@ class MainWindow(QMainWindow):
 
         # 先把待防抖的控件值落成 job：self.job 是上次 _refresh 的快照，而下面
         # 的校验与 dpi 取的是实时值，不先同步就会拿陈旧 job 配新参数导出。
+        # 走 _rebuild_job 而非 _refresh：导出不需重渲预览，不起那条会被丢弃的线程。
         self._debounce.stop()
-        self._refresh()
+        self._rebuild_job()
         if self.job is None or not any(ph is not None for ph in self.photos):
             raise ValueError("没有可导出的照片")
         pages = jobs.render_all(self.job, self._params()["dpi"], show_mask=False)

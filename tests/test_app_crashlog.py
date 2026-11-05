@@ -144,3 +144,37 @@ def test_install_hook_notifies_ui_callback(tmp_path):
         assert "子线程炸了" in target.read_text(encoding="utf-8")
     finally:
         sys.excepthook, threading.excepthook, crashlog._UI_CALLBACK = old
+
+
+def test_run_wires_status_hint(tmp_path):
+    """A-2：入口 wire_crash_hint 必须真把"已记录错误日志"接到状态栏（钉逐字文案）。
+
+    抽成函数后可不跑事件循环直接测：装钩子→注册回调→触发主线程钩子→窗口收到文案。
+    补上此前 run() 那行注册零测试覆盖的缺口——删注册或改文案，本用例即红。
+    """
+    import pytest
+
+    pytest.importorskip("PySide6")
+    from photoprint.app import __main__ as entry
+
+    old = sys.excepthook, crashlog._UI_CALLBACK
+    got = {}
+
+    class FakeWin:
+        def _set_status(self, text, error=False):
+            got["text"] = text
+            got["error"] = error
+
+    target = tmp_path / "e.log"
+    try:
+        crashlog.install(target)
+        entry.wire_crash_hint(FakeWin())
+        try:
+            raise RuntimeError("预览炸了")
+        except RuntimeError:
+            sys.excepthook(*sys.exc_info())
+    finally:
+        sys.excepthook, crashlog._UI_CALLBACK = old
+    # 钉 spec §9 的逐字措辞（非引用常量）：若入口改了文案，本行要能变红。
+    assert got["text"].startswith("已记录错误日志")
+    assert str(target) in got["text"] and got["error"] is True

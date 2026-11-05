@@ -201,7 +201,9 @@ if cell.rotated:
   它只做三件事：装异常钩子、建 `QApplication`、进事件循环。
 - 异常钩子：`sys.excepthook` + `threading.excepthook` 双钩，traceback 追加写入
   `%APPDATA%\PhotoPrint\error.log`（目录由 `store.default_path()` 的父目录推导，不另起一套路
-  径规则），并在状态栏提示"已记录错误日志"。
+  径规则），并在状态栏提示"已记录错误日志"。状态栏提示只接在主线程 `sys.excepthook`
+  上（`threading.excepthook` 跨线程改 `QWidget` 不安全、仅落盘）；界面侧的子线程渲染异常本
+  就经 `worker` 的 `failed` 信号回主线程提示，不依赖 `threading.excepthook`。
 - 打包参数：`--onefile --windowed --name PhotoPrint`。`PySide6` 的 `platforms/qwindows.dll`
   由 PyInstaller 官方 hook 自动收集；`img2pdf`、`Pillow` 收集面已实测坐全（T10 复核：
   `Select-String build\PhotoPrint\Analysis-00.toc -Pattern "\('img2pdf'"` 命中顶层 `img2pdf.py`，

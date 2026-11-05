@@ -83,6 +83,7 @@ class Job:
     photos: list = field(default_factory=list)
     offset_pct: tuple[float, float] = (0.0, 0.0)
     borderless_active: bool = False
+    rotations: tuple = ()   # 逐图顺时针角度，原样交 core 归一；短于 photos 缺位按 0
 
     @property
     def count(self) -> int:
@@ -120,15 +121,20 @@ class Job:
             raise IndexError(f"页码越界：{page_index}（共 {self.page_count} 页）")
         i = page_index * self.count
         chunk = self.photos[i:i + self.count]
+        # 角度与照片共用一个下标空间（第 i 张照片配 rotations[i]）：photos 按页
+        # 切片后 rotations 必须同样切片，否则第 2 页起角度会错位到别的照片上
+        rot_chunk = self.rotations[i:i + self.count]
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
-                                  offset_pct=self.offset_pct)
+                                  offset_pct=self.offset_pct,
+                                  rotations=rot_chunk)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               bleed_mm=modes.DEFAULT_BLEED_MM, mode=None,
-              offset_pct=(0.0, 0.0), borderless_active=False) -> Job:
+              offset_pct=(0.0, 0.0), borderless_active=False,
+              rotations=()) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active)
     # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
@@ -136,7 +142,8 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
     return Job(plan=plan, mode=mode_eff, sheet=st.resolve(sheet_key),
                photos=list(photos),
                offset_pct=tuple(float(v) for v in offset_pct),
-               borderless_active=borderless_active)
+               borderless_active=borderless_active,
+               rotations=tuple(rotations))
 
 
 def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Image]:

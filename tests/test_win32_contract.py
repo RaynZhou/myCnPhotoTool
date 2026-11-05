@@ -58,12 +58,12 @@ def test_real_api_routes_through_the_verified_calls():
 
 
 def test_prompt_devmode_uses_document_properties_with_dm_prompt():
-    pytest.importorskip("win32print")
     import inspect
 
-    from photoprint.win import api
-
     src = inspect.getsource(api.RealWinApi.prompt_devmode)
+    # 只认代码里独有的限定写法：裸 "DM_PROMPT" 会被 docstring 同词喂饱（永真断言）
     assert "win32print.DocumentProperties" in src
-    assert "DM_PROMPT" in src
-    assert "DM_IN_BUFFER" in src and "DM_OUT_BUFFER" in src
+    assert "win32con.DM_PROMPT" in src
+    assert "win32con.DM_IN_BUFFER" in src and "win32con.DM_OUT_BUFFER" in src
+    # win32 必须在方法体内 import（顶层 import 会让脱机机器 import 期就炸）
+    assert "import win32" in src

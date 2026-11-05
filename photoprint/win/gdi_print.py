@@ -36,31 +36,34 @@ def pick_dpi(driver_dpi, cap=600):
     return max(DPI_FLOOR, min(int(driver_dpi), int(cap)))
 
 
-def print_job(api, printer, port, images, sheet, dpi, dm=None):
-    """打印多页。返回 {'ok': bool, 'pages': int, 'message': str}。
+def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
+    """打印多页。prompt=True 时弹驱动设置页让用户选介质（I-1 由 devmode 保证
+    几何权威），交 `_emit` 建 DC 送图。返回 {'ok','pages','message'}，异常不外抛。"""
+    from photoprint.win import devmode as dm_mod
 
-    port 仅为兼容旧调用保留：它不参与建 DC（_create_dc 只收 printer 与
-    devmode），现代驱动走默认端口。
-    """
+    if not images:
+        return {"ok": False, "pages": 0, "message": "没有可打印的页面"}
+    try:
+        dm_obj, _size = dm_mod.build_with_prompt(
+            api, printer, sheet.w_mm, sheet.h_mm, sheet.driver_paper_code,
+            prompt=prompt)
+    except Exception as exc:      # 取设置/弹窗阶段失败也要兜住
+        return {"ok": False, "pages": 0, "message": f"读取打印机设置失败：{exc}"}
+    return _emit(api, printer, dm_obj, images, sheet, dpi)
+
+
+def _emit(api, printer, dm_obj, images, sheet, dpi):
+    """建 DC → 校验物理尺寸 → 逐页 StretchBlt。这是本模块唯一碰 win32 处。
+    StartDoc 后异常经 EndDoc/DeleteDC 展开后统一转 message（打印不得崩）。"""
     from PIL import ImageWin
 
     import win32con
     import win32ui
 
     from photoprint.core import units
-    from photoprint.win import devmode as dm_mod
     from photoprint.win import probe
 
-    if not images:
-        return {"ok": False, "pages": 0, "message": "没有可打印的页面"}
-
-    hprinter = api.open_printer(printer)
     try:
-        # T12 派前拦截②：原写法把 _take_devmode 的整条返回（即 build 的
-        # (dm, size) 元组）赋给了 dm_obj，真机 CreateDC 拿到 tuple 必错；
-        # build 内部已含"先问长度再取回"两步，这里直接解包它的返回
-        dm_obj, _size = dm_mod.build(api, printer, sheet.w_mm, sheet.h_mm,
-                                     sheet.driver_paper_code)
         hdc = win32ui.CreateDCFromHandle(_as_dc_ref(_create_dc(printer, dm_obj)))
         try:
             result = probe.probe(api, printer, dc=_as_dc_ref(hdc))
@@ -88,8 +91,12 @@ def print_job(api, printer, port, images, sheet, dpi, dm=None):
             hdc.DeleteDC()
     except Exception as exc:  # 打印阶段不得崩溃：统一转成可读消息
         return {"ok": False, "pages": 0, "message": f"打印失败：{exc}"}
-    finally:
-        api.close_printer(hprinter)
+
+
+def print_job(api, printer, port, images, sheet, dpi, dm=None):
+    """CLI 冻结入口：等价 print_pages(prompt=False)。port/dm 为兼容旧签名保留，
+    不参与建 DC（现代驱动走默认端口，CreateDC 只收 printer 名与 devmode）。"""
+    return print_pages(api, printer, images, sheet, dpi, prompt=False)
 
 
 def _create_dc(printer, dm_obj):

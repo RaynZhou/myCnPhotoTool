@@ -1970,36 +1970,45 @@ class MainWindow(QMainWindow):
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
 
+    def _safe(self, fn):
+        """坏配置只降级成“这一项不恢复”，绝不让异常出 __init__（全局约束：窗口化 exe
+        无控制台，外抛即静默闪退）。与 store 的“单条坏记录不牵连其余”同口径。
+        覆盖 TypeError/ValueError/OverflowError——含 int()/float() 转换、以及 setValue
+        把超大值喂给 shiboken C int（4 字节）的溢出（±50% 之外的手改配置、超大数、Infinity）。"""
+        try:
+            fn()
+        except (TypeError, ValueError, OverflowError):
+            pass
+
     def _restore_last_job(self):
         job = self.st.get_last_job()
         if not job:
             return
         for key, box in (("sheet_key", self.sheet_box), ("cell_key", self.cell_box)):
-            idx = box.findData(job.get(key))
-            if idx >= 0:
-                box.setCurrentIndex(idx)
+            self._safe(lambda b=box, v=job.get(key): self._select_by_data(b, v))
         mode_index = job.get("mode_index")
         if isinstance(mode_index, int) and 0 <= mode_index < self.mode_box.count():
-            self.mode_box.setCurrentIndex(mode_index)
+            self._safe(lambda: self.mode_box.setCurrentIndex(mode_index))
         for key, box in (("gap_mm", self.gap_box), ("bleed_mm", self.bleed_box)):
             if isinstance(job.get(key), (int, float)):
-                box.setValue(float(job[key]))
+                self._safe(lambda b=box, v=job[key]: b.setValue(float(v)))
         if isinstance(job.get("dpi"), (int, float)):
-            idx = self.dpi_box.findData(float(job["dpi"]))
-            if idx >= 0:
-                self.dpi_box.setCurrentIndex(idx)
+            self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
-            try:
-                hx, vy = int(pct[0]), int(pct[1])
-            except (TypeError, ValueError, OverflowError):
-                pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
-            else:
-                self.h_slider.setValue(hx)
-                self.v_slider.setValue(vy)
+            self._safe(lambda: self._apply_offset(pct))
         paths = job.get("photo_paths")
         for p in (paths if isinstance(paths, (list, tuple)) else []):
-            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
+            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞（append_photo 内部已收敛）
+
+    def _select_by_data(self, box, value):
+        idx = box.findData(value)
+        if idx >= 0:
+            box.setCurrentIndex(idx)
+
+    def _apply_offset(self, pct):
+        self.h_slider.setValue(int(pct[0]))
+        self.v_slider.setValue(int(pct[1]))
 
     def _last_out_dir(self):
         d = self.st.get_last_job().get("out_dir")
@@ -2024,7 +2033,7 @@ class MainWindow(QMainWindow):
 - [ ] **Step 4: 跑到通过**
 
 Run: `python -m pytest tests/test_app_main_window.py -v`
-Expected: 16 passed（round-1 修复波新增 3 条 + round-2 修复波新增 5 条：坏 photo_paths/out_dir、offset 溢出、代际过期帧、retire 留引用、closeEvent 无上限 wait）
+Expected: 21 passed（round-1 新增 3 条 + round-2 新增 5 条 + round-3 新增 5 条：数值超大配置降级参数化 4 条、render_failed 过期帧 1 条）
 
 - [ ] **Step 5: 全量回归 + 手工看一扇窗口**
 
@@ -2600,6 +2609,19 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   （M2）`_build_ui` 注释“3R 已不在预设里”与事实相反（3R 在 PAPER_PRESETS）→改为 findData 必命中。
   变异表新增 I5a/I5b/I5c/I6a/I6b/I8 六点全杀（共 16）；_on_render_failed 的 gen 判断无测试能造
   慢线程失败迟到时序，仍不入表（同 T6 M4）。
+- **T7 round-3 复审的修复波（⑲）**：CodeReview round-3 判 I5/I6/I7/I8/M1/M2/M4 全关、
+  Spec ✅，但揪出 W1——同一函数、同一“异常一律收敛不外抛”约束被第四次破坏：round-2 的
+  I5 只把 `int()`/`float()` 转换纳进 try/except，而 `setValue(huge)`（喂给 shiboken C int
+  溢出）与 `float(huge_int)` 都在护栏之外（四条路径均实测复现 OverflowError 出 __init__）。
+  不再打地鼠，改结构性收敛：新增 `_safe(fn)` 护栏，`_restore_last_job` 里每一处控件写入
+  （_select_by_data/mode_box/gap·bleed 的 setValue/dpi/offset）一律过 `_safe`，捕获
+  TypeError+ValueError+OverflowError，使这一整类“坏数值配置卡启动”彻底终结而非第五次补丁。
+  offset 的 try/except 裸转改写为 `_apply_offset` 经 `_safe` 调用。补测：`test_bad_numeric_configs_do_not_block_startup`
+  参数化 gap/bleed/dpi/offset 四类超大值不卡启动（W1a 杀）、`test_stale_generation_render_failed_is_dropped`
+  钉住 _on_render_failed 的代际守卫（S2，此前因“造不出竞态”未测，实则纯函数式调用可确定钉）；
+  FakeThread 加 quit_calls 计数（S1，证 _retire_threads 先 quit 再 wait）。变异表重写并扩到 18 点
+  全杀（I4 锚点改指 _safe 包裹、I5c 缩进改到 _safe 的 except、新增 W1a/S1）。修后 T7 21 passed、
+  全量 215 passed RC=0、逐字校对 0 缺失。_retire_threads 的超时留引用（I6b）仍靠 keep.append。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

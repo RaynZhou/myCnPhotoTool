@@ -335,36 +335,45 @@ class MainWindow(QMainWindow):
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
 
+    def _safe(self, fn):
+        """坏配置只降级成“这一项不恢复”，绝不让异常出 __init__（全局约束：窗口化 exe
+        无控制台，外抛即静默闪退）。与 store 的“单条坏记录不牵连其余”同口径。
+        覆盖 TypeError/ValueError/OverflowError——含 int()/float() 转换、以及 setValue
+        把超大值喂给 shiboken C int（4 字节）的溢出（±50% 之外的手改配置、超大数、Infinity）。"""
+        try:
+            fn()
+        except (TypeError, ValueError, OverflowError):
+            pass
+
     def _restore_last_job(self):
         job = self.st.get_last_job()
         if not job:
             return
         for key, box in (("sheet_key", self.sheet_box), ("cell_key", self.cell_box)):
-            idx = box.findData(job.get(key))
-            if idx >= 0:
-                box.setCurrentIndex(idx)
+            self._safe(lambda b=box, v=job.get(key): self._select_by_data(b, v))
         mode_index = job.get("mode_index")
         if isinstance(mode_index, int) and 0 <= mode_index < self.mode_box.count():
-            self.mode_box.setCurrentIndex(mode_index)
+            self._safe(lambda: self.mode_box.setCurrentIndex(mode_index))
         for key, box in (("gap_mm", self.gap_box), ("bleed_mm", self.bleed_box)):
             if isinstance(job.get(key), (int, float)):
-                box.setValue(float(job[key]))
+                self._safe(lambda b=box, v=job[key]: b.setValue(float(v)))
         if isinstance(job.get("dpi"), (int, float)):
-            idx = self.dpi_box.findData(float(job["dpi"]))
-            if idx >= 0:
-                self.dpi_box.setCurrentIndex(idx)
+            self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
-            try:
-                hx, vy = int(pct[0]), int(pct[1])
-            except (TypeError, ValueError, OverflowError):
-                pass                   # 坏配置不卡启动：保持滑块默认 0，与其他字段同口径
-            else:
-                self.h_slider.setValue(hx)
-                self.v_slider.setValue(vy)
+            self._safe(lambda: self._apply_offset(pct))
         paths = job.get("photo_paths")
         for p in (paths if isinstance(paths, (list, tuple)) else []):
-            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞
+            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞（append_photo 内部已收敛）
+
+    def _select_by_data(self, box, value):
+        idx = box.findData(value)
+        if idx >= 0:
+            box.setCurrentIndex(idx)
+
+    def _apply_offset(self, pct):
+        self.h_slider.setValue(int(pct[0]))
+        self.v_slider.setValue(int(pct[1]))
 
     def _last_out_dir(self):
         d = self.st.get_last_job().get("out_dir")

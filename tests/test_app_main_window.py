@@ -226,6 +226,28 @@ def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
     assert w.h_slider.value() == 0 and w.v_slider.value() == 0
 
 
+@pytest.mark.parametrize("key,value", [
+    ("gap_mm", int("9" * 400)),        # float(huge int) → OverflowError
+    ("bleed_mm", int("9" * 400)),
+    ("dpi", int("9" * 400)),
+    ("offset_pct", [1e19, 0]),         # int(1e19) 能转，但 setValue 喂给 C int 溢出
+])
+def test_bad_numeric_configs_do_not_block_startup(qapp, tmp_path, key, value):
+    """I5/W1：数值字段超大值一律不得卡启动——写入控件的 OverflowError 必须被
+    _restore_last_job 的降级护栏接住。删护栏则本用例在 __init__ 抛。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R", key: value})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))       # 不应抛
+    if key == "offset_pct":
+        assert w.h_slider.value() == 0 and w.v_slider.value() == 0
+    elif key == "dpi":
+        assert w.dpi_box.currentIndex() == 1   # 保持默认 300
+    else:
+        box = w.gap_box if key == "gap_mm" else w.bleed_box
+        assert box.minimum() <= box.value() <= box.maximum()   # 超大值被护栏挡下，控件仍在量程内
+
+
 def test_stale_generation_preview_frame_is_dropped(qapp, tmp_path):
     """I6：代际守卫是纯函数式调用，不需造竞态就能钉。删 `_on_preview` 的
     `if gen != self._gen: return` 则过期帧也会落 pixmap，本用例变红。"""
@@ -238,15 +260,30 @@ def test_stale_generation_preview_frame_is_dropped(qapp, tmp_path):
     assert not w.preview.pixmap().isNull()
 
 
+def test_stale_generation_render_failed_is_dropped(qapp, tmp_path):
+    """S2：_on_render_failed 的 gen 判断同为纯函数式守卫（非竞态）。删
+    `if gen == self._gen` 则过期失败帧也会改状态栏，第一条断言变红。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    _settle(w, qapp)
+    w._set_status("当前状态", error=False)
+    w._on_render_failed("boom", w._gen - 1)   # 过期失败帧：不得改状态栏
+    assert w.statusBar().currentMessage() == "当前状态"
+    w._on_render_failed("boom", w._gen)       # 当代失败帧：应回写状态栏
+    assert "boom" in w.statusBar().currentMessage()
+
+
 class _FakeThread:
     """不 start 的假线程，专测 _retire_threads 的引用留存/释放与 wait 传参。"""
     def __init__(self, stops):
         self._running, self._stops, self.wait_args = True, stops, []
+        self.quit_calls = 0
 
     def isRunning(self):
         return self._running
 
     def quit(self):
+        self.quit_calls += 1
         if self._stops:
             self._running = False
 
@@ -266,6 +303,7 @@ def test_retire_threads_keeps_then_clears_stale_reference(qapp, tmp_path):
     w._retire_threads()                        # 默认 2000ms 超时
     assert w._stale == [stuck]                 # 删 keep.append → 此处变红
     assert stuck.wait_args == [2000]
+    assert stuck.quit_calls == 1               # S1：不先 quit 则事件循环永不退，无上限 wait 会永挂
     stuck._running = False                     # 模拟那条线程随后自己跑完
     w._retire_threads()
     assert w._stale == []                       # 停干净后不留

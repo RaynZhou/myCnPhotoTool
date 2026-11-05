@@ -1480,7 +1480,7 @@ from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
 from photoprint.app.main_window import MainWindow  # noqa: E402
-from photoprint.core import store  # noqa: E402
+from photoprint.core import modes, store  # noqa: E402
 
 
 def _store(tmp_path):
@@ -1568,11 +1568,35 @@ def test_export_writes_equal_size_pdf(qapp, tmp_path):
     assert vals[3] == pytest.approx(841.89, abs=1.0)    # A4 高 297mm
 
 
+def test_ui_defaults_match_shared_constants(qapp, tmp_path):
+    """界面默认值必须跨层与共享常量同源，否则 jobs/编排改了默认、界面会悄悄漂移。
+
+    导出 dpi 下拉默认（`DPI_CHOICES[1]` → setCurrentIndex(1)）、出血默认都对应到生产
+    常量。控件默认值此前无任何断言（parity 脚本只声明“同值不同源”），这条把它们钉住。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    assert float(w.dpi_box.currentData()) == jobs.DEFAULT_OUTPUT_DPI
+    assert w.bleed_box.value() == modes.DEFAULT_BLEED_MM
+
+
 def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
+    """导出（show_mask=False）产物四边必须纯白——不可印区灰遮罩只属于预览。
+
+    旧版在 dpi 25.4 下用负断言 `!= (210,210,210)`：A4 遮罩带在该 dpi 只覆盖 0..2px，
+    探针 (3, ·) 落带外 → 导出即使误开遮罩也报不了（恒真零牙）。改用与界面导出同源的
+    `DEFAULT_OUTPUT_DPI`（遮罩带 0..39px 把四边探针包住），四边正断言纯白，并加一层
+    `show_mask=True` 正对照先钉四边确为合成灰，断言才有牙。
+    """
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    page = jobs.render_all(w.job, 25.4, show_mask=False)[0]
-    assert page.getpixel((3, page.height // 2)) != (210, 210, 210)
+    dpi = jobs.DEFAULT_OUTPUT_DPI
+    page = jobs.render_all(w.job, dpi, show_mask=False)[0]
+    wpx, hpx = page.size
+    probes = [(3, hpx // 2), (wpx // 2, 3), (wpx - 4, hpx // 2), (wpx // 2, hpx - 4)]
+    assert [page.getpixel(xy) for xy in probes] == [(255, 255, 255)] * 4
+    # 正对照：同图开遮罩必须先看到灰遮罩色，否则上面的纯白可能因整体渲染坏掉而恒真。
+    masked = jobs.render_all(w.job, dpi, show_mask=True)[0]
+    assert [masked.getpixel(xy) for xy in probes] == [(210, 210, 210)] * 4
 
 
 def test_too_big_cell_reports_instead_of_crashing(qapp, tmp_path):
@@ -2870,6 +2894,7 @@ git commit -m "docs: 界面与 exe 用法、导出遮罩口径；补 GUI/CLI 一
   §9 与 §11.4/§11.5 明写“收集≠exe 进程内真能出 PDF”、将 §11.5 拆为 5a（GUI编排≡CLI PNG，本任务 ✅）/5b（exe≡CLI PDF，带桌面终审 ☐）；README check_exe 行标“需交互桌面、无桌面必 FAIL”、
   补列 parity 脚本。均回写计划 Step 2/3 逐字块（check_t10_parity_verbatim 实测 MATCH、字节相等）。实跑：parity 同尺寸/同像素/遮罩正对照/四边纯白全 True RC=0、无 getdata 弃用告警；全量 228 passed RC=0。
 - **T10 round-2 确认性复审（㉙）**：round-2 给 (A) Spec Approved（附一处必订正的措辞 N-1）、(B) 质量 Approved（附 N-1 必修、N-2/N-3/N-4 CONSIDER），零 Critical；round-1 六条 5 条已闭、B-1/B-5 判“部分闭合（代码改了但声明超出证据）”。逐条独立复核后坐实 **N-1 为真 over-claim**：`git grep DEFAULT_OUTPUT_DPI` 仅 jobs.py:16 定义与 parity 脚本引用、无生产消费者→界面 dpi 默认实来自 `main_window.py:28 DPI_CHOICES` 字面量 + `:144 setCurrentIndex(1)`，与脚本的 `jobs.DEFAULT_OUTPUT_DPI` **同值不同源**；`test_app_main_window.py:111-131` 的 spy 只钉 `show_mask is False` + `dpi == 600.0`（跟随所选）、**不检查控件默认值**；其 :104-108 那条负断言在 25.4 dpi 下零牙（恒真）。修法（严格限“验收与文档”范围、纯文档收窄）：docstring 分三档明写“出血真同源 / dpi 同值不同源 / store 读真实 %APPDATA% 刻意一致 fail-loud”、同步收窄 spec §11.5a 与 ㉘ 措辞；N-2（两侧同读真实 store）判定不改（改动会解耦 GUI/CLI store、反引入 parity 假失败风险），已在 docstring 明记前提；N-3 `str(int(DPI))`→`str(DPI)`（已核 cli `--dpi type=float`、“300.0”合法）；N-4a 正对照 `masked` 存 `parity_mask_control.png` 留人工复核探针落带内。**跨任务残留登记交 fin（全分支终审）整枝**：T7 `test_app_main_window.py:104-108` 恒真遮罩断言、及 UI 默认常量未被任何测试断言（评审首选修法：补 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()`/`w.bleed_box.value()`，并把 :107-108 改 dpi=DEFAULT_OUTPUT_DPI + 4 点正断言 + show_mask=True 正对照）。round-2 既 (A)(B) Approved 且 N-1 已闭，此波只清 SHOULD/CONSIDER，不派 round-3。
+- **全分支终审前的整枝（㉚）**：T10 round-2 登记的两条跨任务测试残留属本仓反复踩的“恒真空转”同族（T4⑥/T5⑮/T8M-2/T10 B-2/B-3），在 fin 整枝：① `test_app_main_window.py::test_exported_page_has_no_unprintable_mask` 原在 25.4 dpi 下用负断言 `!= (210,210,210)`、探针 (3, ·) 落遮罩带外（该 dpi 带只 0..2px）→零牙；改 `dpi=jobs.DEFAULT_OUTPUT_DPI`（带 0..39px 包住四边探针）+ 4 点正断言 `== (255,255,255)` + `show_mask=True` 正对照（同 parity B-2 口径）。② 新增 `test_ui_defaults_match_shared_constants` 钉 `w.dpi_box.currentData()==jobs.DEFAULT_OUTPUT_DPI` 与 `w.bleed_box.value()==modes.DEFAULT_BLEED_MM`，补上控件默认值此前无任何断言的那半边（也让 N-1 里“同值不同源”的 dpi 从测试层面变成“同源”约束）。两波均实测验牙：① 把 `render_page` 遮罩闸改为无视 `show_mask` 恒画→①号测 RC=1；② 把 `setCurrentIndex(1)→(0)`→②号测 RC=1；两个变异均已原样还原（git diff 仅留 test 文件）。计划 T7 逐字块同步回写、`check_t7_plan_verbatim` 缺失 0；全量 229 passed RC=0。
 - **占位符扫描**：无 TBD/TODO；每个代码步都给了完整可粘正文。
 - **类型一致性**：`worker.start` 在 T6 定死“只组装不启动”，T7 `_render_async` 显式
   `self._thread.start()`；`build_job` 的关键字参数名 `offset_pct` 在 T3/T7/T10 一致。

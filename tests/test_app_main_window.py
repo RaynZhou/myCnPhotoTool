@@ -13,7 +13,7 @@ from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
 from photoprint.app.main_window import MainWindow  # noqa: E402
-from photoprint.core import store  # noqa: E402
+from photoprint.core import modes, store  # noqa: E402
 
 
 def _store(tmp_path):
@@ -101,11 +101,35 @@ def test_export_writes_equal_size_pdf(qapp, tmp_path):
     assert vals[3] == pytest.approx(841.89, abs=1.0)    # A4 高 297mm
 
 
+def test_ui_defaults_match_shared_constants(qapp, tmp_path):
+    """界面默认值必须跨层与共享常量同源，否则 jobs/编排改了默认、界面会悄悄漂移。
+
+    导出 dpi 下拉默认（`DPI_CHOICES[1]` → setCurrentIndex(1)）、出血默认都对应到生产
+    常量。控件默认值此前无任何断言（parity 脚本只声明“同值不同源”），这条把它们钉住。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    assert float(w.dpi_box.currentData()) == jobs.DEFAULT_OUTPUT_DPI
+    assert w.bleed_box.value() == modes.DEFAULT_BLEED_MM
+
+
 def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
+    """导出（show_mask=False）产物四边必须纯白——不可印区灰遮罩只属于预览。
+
+    旧版在 dpi 25.4 下用负断言 `!= (210,210,210)`：A4 遮罩带在该 dpi 只覆盖 0..2px，
+    探针 (3, ·) 落带外 → 导出即使误开遮罩也报不了（恒真零牙）。改用与界面导出同源的
+    `DEFAULT_OUTPUT_DPI`（遮罩带 0..39px 把四边探针包住），四边正断言纯白，并加一层
+    `show_mask=True` 正对照先钉四边确为合成灰，断言才有牙。
+    """
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    page = jobs.render_all(w.job, 25.4, show_mask=False)[0]
-    assert page.getpixel((3, page.height // 2)) != (210, 210, 210)
+    dpi = jobs.DEFAULT_OUTPUT_DPI
+    page = jobs.render_all(w.job, dpi, show_mask=False)[0]
+    wpx, hpx = page.size
+    probes = [(3, hpx // 2), (wpx // 2, 3), (wpx - 4, hpx // 2), (wpx // 2, hpx - 4)]
+    assert [page.getpixel(xy) for xy in probes] == [(255, 255, 255)] * 4
+    # 正对照：同图开遮罩必须先看到灰遮罩色，否则上面的纯白可能因整体渲染坏掉而恒真。
+    masked = jobs.render_all(w.job, dpi, show_mask=True)[0]
+    assert [masked.getpixel(xy) for xy in probes] == [(210, 210, 210)] * 4
 
 
 def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):

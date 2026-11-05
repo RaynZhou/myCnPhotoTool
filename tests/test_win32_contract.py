@@ -55,3 +55,15 @@ def test_real_api_routes_through_the_verified_calls():
     assert "win32print.GetDeviceCaps" in caps_src
     props_src = inspect.getsource(api.RealWinApi.document_properties)
     assert "DM_IN_BUFFER" in props_src and "win32con" in props_src
+
+
+def test_prompt_devmode_uses_document_properties_with_dm_prompt():
+    pytest.importorskip("win32print")
+    import inspect
+
+    from photoprint.win import api
+
+    src = inspect.getsource(api.RealWinApi.prompt_devmode)
+    assert "win32print.DocumentProperties" in src
+    assert "DM_PROMPT" in src
+    assert "DM_IN_BUFFER" in src and "DM_OUT_BUFFER" in src

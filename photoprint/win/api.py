@@ -59,6 +59,17 @@ class RealWinApi:
         flag = win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER
         return win32print.DocumentProperties(0, handle, printer, dm, dm, flag)
 
+    def prompt_devmode(self, handle, printer, dm):
+        """弹驱动自己的设置页（介质类型、无边距等私有项都在里面），返回用户
+        确认后的 DEVMODE。介质活在驱动私有扩展区——由驱动自己读写，我们从不
+        解析它（这是不随驱动版本碎裂的根基）。DM_PROMPT 与既有 fMode 常量同源。"""
+        import win32con
+        import win32print
+        flag = (win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER
+                | win32con.DM_PROMPT)
+        win32print.DocumentProperties(0, handle, printer, dm, dm, flag)
+        return dm
+
     def create_dc(self, printer, devmode=None):
         import win32gui
         return win32gui.CreateDC("WIN32", printer, devmode)

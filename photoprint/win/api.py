@@ -16,6 +16,11 @@
 from __future__ import annotations
 
 
+class PromptCancelled(Exception):
+    """用户在驱动设置页点了取消。置于 win32 边界层的纯 Python 模块顶层（不拉
+    win32），使 devmode/gdi_print/tests 都能导入它来区分“取消”与“弹窗报错”。"""
+
+
 def as_hdc(hdc):
     """int HDC 与 PyCDC 都接受。
 
@@ -62,13 +67,27 @@ class RealWinApi:
     def prompt_devmode(self, handle, printer, dm):
         """弹驱动自己的设置页（介质类型、无边距等私有项都在里面），返回用户
         确认后的 DEVMODE。介质活在驱动私有扩展区——由驱动自己读写，我们从不
-        解析它（这是不随驱动版本碎裂的根基）。DM_PROMPT 与既有 fMode 常量同源。"""
+        解析它（这是不随驱动版本碎裂的根基）。DM_PROMPT 与既有 fMode 常量同源。
+
+        真机契约：DocumentProperties 返回 >0 为确认、0 为用户取消、<0 为失败。
+        取消必须抛 PromptCancelled 让上层放弃打印（而非拿未确认的 dm 照打）；
+        失败交由下层降级。"""
         import win32con
         import win32print
         flag = (win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER
                 | win32con.DM_PROMPT)
-        win32print.DocumentProperties(0, handle, printer, dm, dm, flag)
+        ret = win32print.DocumentProperties(0, handle, printer, dm, dm, flag)
+        if ret == 0:
+            raise PromptCancelled("用户在驱动设置页取消了打印")
+        if ret < 0:
+            raise RuntimeError(f"驱动设置页失败（DocumentProperties={ret}）")
         return dm
+
+    def get_default_printer(self):
+        """系统默认打印机名（供下拉默认选中）。取不到时 pywin32 抛异常，
+        由调用方兜。"""
+        import win32print
+        return win32print.GetDefaultPrinter()
 
     def create_dc(self, printer, devmode=None):
         import win32gui

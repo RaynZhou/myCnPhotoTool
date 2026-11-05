@@ -38,20 +38,28 @@ def pick_dpi(driver_dpi, cap=600):
 
 def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
     """打印多页。prompt=True 时弹驱动设置页让用户选介质（I-1 由 devmode 保证
-    几何权威），交 `_emit` 建 DC 送图。返回 {'ok','pages','message'}，异常不外抛。"""
+    几何权威），交 `_emit` 建 DC 送图。返回 {'ok','pages','message'}，异常不外抛；
+    驱动页取消回 {'cancelled': True}，弹窗降级成功时回 {'degraded': True}。"""
     from photoprint.win import devmode as dm_mod
+    from photoprint.win.api import PromptCancelled
 
     if not images:
         return {"ok": False, "pages": 0, "message": "没有可打印的页面"}
     try:
-        dm_obj, _size = dm_mod.build_with_prompt(
+        dm_obj, _size, degraded = dm_mod.build_with_prompt(
             api, printer, sheet.w_mm, sheet.h_mm, sheet.driver_paper_code,
             prompt=prompt)
+    except PromptCancelled:
+        # W-1：用户在驱动页取消 → 放弃打印，不是错误（UI 走“已取消”非红字）
+        return {"ok": False, "cancelled": True, "pages": 0, "message": "已取消"}
     except Exception as exc:      # 取设置/弹窗阶段失败也要兜住
         # CLI（prompt=False）文案逐字冻结为旧串；GUI 才用更准的分区前缀
         prefix = "读取打印机设置失败" if prompt else "打印失败"
         return {"ok": False, "pages": 0, "message": f"{prefix}：{exc}"}
-    return _emit(api, printer, dm_obj, images, sheet, dpi)
+    res = _emit(api, printer, dm_obj, images, sheet, dpi)
+    if degraded and res.get("ok"):
+        res["degraded"] = True      # W-3：降级仍打成功，标记供 UI 附提示
+    return res
 
 
 def _emit(api, printer, dm_obj, images, sheet, dpi):

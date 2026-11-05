@@ -8,6 +8,7 @@ PaperLength / DefaultSource / Scale / Size）：旧 fake 用 dmFields、dmPaperS
 import pytest
 
 from photoprint.win import devmode
+from photoprint.win.api import PromptCancelled
 
 
 class FakeDM:
@@ -120,22 +121,29 @@ def test_build_rejects_zero_size():
 
 class PromptApi(FakeApi):
     """prompt_devmode 模拟驱动：把用户可能改坏的自定义尺寸留下（重置成 9 号
-    Letter 的 PaperSize、宽高清零），但保留私有区的介质选择——正是要验证
-    build_with_prompt 会盖回几何、却不碰介质。可切换为抛错以测降级。"""
+    Letter 的 PaperSize、宽高清零），并模拟用户改选了纸盒（DefaultSource），
+    但保留私有区的介质选择——正是要验证 build_with_prompt 会盖回几何（I-1）、
+    却不夺走用户选的纸盒（W-2）、也不碰介质。可切换抛错/取消以测降级/放弃。"""
 
-    def __init__(self, size=520, raise_on_prompt=False):
+    USER_SOURCE = 257          # 用户在驱动页选的纸盒（非 DMBIN_USER=4）
+
+    def __init__(self, size=520, raise_on_prompt=False, cancel_on_prompt=False):
         super().__init__(size)
         self.prompt_calls = 0
         self.raise_on_prompt = raise_on_prompt
+        self.cancel_on_prompt = cancel_on_prompt
 
     def prompt_devmode(self, handle, printer, dm):
         self.prompt_calls += 1
+        if self.cancel_on_prompt:
+            raise PromptCancelled("用户在驱动页点了取消")
         if self.raise_on_prompt:
             raise RuntimeError("driver has no config page")
-        # 驱动弹窗后：尺寸被用户改成 Letter，介质私有字段保留
+        # 驱动弹窗后：尺寸被用户改成 Letter、纸盒改成 USER_SOURCE，介质私有字段保留
         dm.PaperSize = 9
         dm.PaperWidth = 2159
         dm.PaperLength = 2794
+        dm.DefaultSource = self.USER_SOURCE
         return dm
 
 
@@ -143,8 +151,10 @@ def test_build_with_prompt_off_equals_build():
     api = PromptApi()
     dm1, size1 = devmode.build(api, "P", 89.0, 127.0)
     api2 = PromptApi()
-    dm2, size2 = devmode.build_with_prompt(api2, "P", 89.0, 127.0, prompt=False)
+    dm2, size2, degraded = devmode.build_with_prompt(api2, "P", 89.0, 127.0,
+                                                     prompt=False)
     assert api2.prompt_calls == 0            # 不弹
+    assert degraded is False                 # 未弹窗谈不上降级
     assert dm2.PaperWidth == 890 and dm2.PaperLength == 1270  # 与 build 同
 
 
@@ -152,18 +162,43 @@ def test_geometry_reapplied_after_prompt_keeps_media():
     """I-1：弹窗把尺寸改坏也必须盖回；介质私有字段（Duplex/MediaType 建模）
     不得被 modify 触碰。删掉"弹窗后再 modify"本测试即红。"""
     api = PromptApi()
-    dm, _size = devmode.build_with_prompt(api, "P", 89.0, 127.0, prompt=True)
+    dm, _size, degraded = devmode.build_with_prompt(api, "P", 89.0, 127.0,
+                                                    prompt=True)
     assert api.prompt_calls == 1
+    assert degraded is False                 # 弹窗成功，非降级
     assert dm.PaperWidth == 890 and dm.PaperLength == 1270   # 盖回成功
     assert dm.PaperSize == devmode.DMPAPER_USER
     assert dm.MediaType == 700 and dm.Duplex == 300          # 私有区原样保留
 
 
+def test_post_prompt_reapply_preserves_user_source():
+    """W-2：I-1 只授权盖回纸张几何（PaperSize/Width/Length/Scale），DefaultSource
+    不在其列——弹窗后用户选的纸盒必须原样保留，第二次 modify 不得用
+    default_source=True 把它夺回 DMBIN_USER。"""
+    api = PromptApi()
+    dm, _size, _deg = devmode.build_with_prompt(api, "P", 89.0, 127.0,
+                                                prompt=True)
+    assert dm.PaperWidth == 890 and dm.PaperLength == 1270   # 几何仍盖回（I-1）
+    assert dm.DefaultSource == PromptApi.USER_SOURCE         # 纸盒不被夺回
+
+
+def test_prompt_cancel_propagates():
+    """W-1：用户在驱动页取消（prompt_devmode 抛 PromptCancelled）必须向上传播，
+    不能被降级分支的 except Exception 吞掉——否则取消后仍会照打。"""
+    api = PromptApi(cancel_on_prompt=True)
+    with pytest.raises(PromptCancelled):
+        devmode.build_with_prompt(api, "P", 89.0, 127.0, prompt=True)
+    assert "update" not in api.mode_log      # 取消后绝不交回驱动/建作业
+
+
 def test_prompt_devmode_exception_degrades_to_inherited_media():
-    """驱动不支持弹窗：不外抛、降级为按继承介质直打，几何仍按请求写入。"""
+    """W-3：驱动不支持弹窗→不外抛、降级为按继承介质直打，几何仍按请求写入，
+    并回报 degraded=True（供上层状态栏提示）。"""
     api = PromptApi(raise_on_prompt=True)
-    dm, _size = devmode.build_with_prompt(api, "P", 89.0, 127.0, prompt=True)
+    dm, _size, degraded = devmode.build_with_prompt(api, "P", 89.0, 127.0,
+                                                    prompt=True)
     assert api.prompt_calls == 1
+    assert degraded is True                  # 降级标志上浮
     assert dm.PaperWidth == 890 and dm.PaperLength == 1270
     assert "update" in api.mode_log          # 仍走完驱动校验回填
 

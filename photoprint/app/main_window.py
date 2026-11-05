@@ -379,7 +379,8 @@ class MainWindow(QMainWindow):
 
     def _load_printers(self):
         """填充打印机下拉。win32 异常（无后台打印程序/未装 pywin32）→ 留空、
-        禁用、不崩——窗口化 exe 无控制台，抛出去即静默闪退。"""
+        禁用、不崩——窗口化 exe 无控制台，抛出去即静默闪退。
+        默认选中系统默认打印机（§4）；取不到/不在列表则回退第一项。"""
         self.printer_box.clear()
         try:
             names = list(self.api.enum_printers())
@@ -388,6 +389,14 @@ class MainWindow(QMainWindow):
         for n in names:
             self.printer_box.addItem(n)
         self.printer_box.setEnabled(bool(names))
+        if not names:
+            return
+        try:
+            default = self.api.get_default_printer()
+        except Exception:
+            default = None
+        idx = names.index(default) if default in names else 0
+        self.printer_box.setCurrentIndex(idx)
 
     def _on_print(self):
         """直打全部页：先同步落最新 job（含旋转/偏移），渲染交 render_all（关遮罩，
@@ -421,8 +430,13 @@ class MainWindow(QMainWindow):
             self._set_status(f"打印失败：{exc}", error=True)
             return
         QApplication.restoreOverrideCursor()
-        if res["ok"]:
-            self._set_status(f"已发送 {res['pages']} 页到 {printer}")
+        if res.get("cancelled"):                    # W-1：驱动页取消，非错误
+            self._set_status("已取消")
+        elif res["ok"]:
+            msg = f"已发送 {res['pages']} 页到 {printer}"
+            if res.get("degraded"):                 # W-3：降级仍成功，附提示
+                msg += "（未能打开驱动设置页，已用驱动当前介质）"
+            self._set_status(msg)
         else:
             self._set_status(f"未打印：{res['message']}", error=True)
 

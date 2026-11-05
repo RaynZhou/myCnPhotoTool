@@ -67,3 +67,23 @@ def test_prompt_devmode_uses_document_properties_with_dm_prompt():
     assert "win32con.DM_IN_BUFFER" in src and "win32con.DM_OUT_BUFFER" in src
     # win32 必须在方法体内 import（顶层 import 会让脱机机器 import 期就炸）
     assert "import win32" in src
+
+
+def test_prompt_devmode_inspects_return_for_cancel():
+    """W-1：DocumentProperties 取消时返回 0（不报错），旧实现丢弃返回值直接
+    照打。真机契约：必须接住返回值、为 0 时抛 PromptCancelled（否则取消不生效）。"""
+    import inspect
+
+    src = inspect.getsource(api.RealWinApi.prompt_devmode)
+    assert "= win32print.DocumentProperties" in src   # 接住返回值，不能丢弃
+    assert "PromptCancelled" in src                    # 取消 → 抛专属异常
+
+
+def test_get_default_printer_routes_through_win32print():
+    """W-4：默认打印机取 win32print.GetDefaultPrinter（真实 API），方法体内 import。"""
+    import inspect
+
+    assert hasattr(win32print, "GetDefaultPrinter")
+    src = inspect.getsource(api.RealWinApi.get_default_printer)
+    assert "win32print.GetDefaultPrinter" in src
+    assert "import win32" in src

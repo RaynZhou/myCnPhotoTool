@@ -13,6 +13,8 @@ dmPaperSize 只会 AttributeError（终审 C2）。
 """
 from __future__ import annotations
 
+from photoprint.win.api import PromptCancelled
+
 DMPAPER_USER = 259
 
 DM_PAPERSIZE = 0x00000200
@@ -45,12 +47,21 @@ def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):
 
 def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
     """取驱动默认 DEVMODE → 写纸张几何 →（可选）弹驱动页选介质 → 再盖一次
-    几何 → 交回驱动校验回填。返回 (dm, size)。
+    几何 → 交回驱动校验回填。返回 (dm, size, degraded)。
 
     I-1：弹窗返回的 dm 可能被用户/驱动改成别的表单尺寸，故 prompt 之后再
     `modify` 一次把几何钉回请求值；`modify` 只动纸张字段、从不碰私有区，
-    所以用户选的介质（活在私有扩展区）原样保留。弹窗抛错则静默降级为
-    "用驱动当前介质"（几何已在弹窗前写好，继续走 update 即可），不外抛。
+    所以用户选的介质（活在私有扩展区）原样保留。
+
+    W-2：弹窗后的二次 `modify` 只盖回几何（default_source=False）——DefaultSource
+    不在 I-1 授权的几何集（PaperSize/Width/Length/Scale）内，用户在驱动页选的
+    纸盒必须保留，不得被夺回 DMBIN_USER。
+
+    W-1：用户在驱动页取消（prompt_devmode 抛 PromptCancelled）向上传播，中止
+    本次打印，不交回驱动、不建作业。
+
+    W-3：驱动无配置页（prompt_devmode 抛非取消异常）→ 降级为继承当前介质，
+    不外抛，回报 degraded=True 供上层状态栏提示。
 
     三步不可合并（真实契约）：
       1. DocumentProperties(fMode=0, None, None) 问出含私有区的总长；
@@ -58,6 +69,7 @@ def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
       3. 改完再用 DM_IN_BUFFER|DM_OUT_BUFFER 交回驱动校验/回填。
     """
     handle = api.open_printer(printer)
+    degraded = False
     try:
         size = api.document_properties(handle, printer, "size")
         if not size:
@@ -69,15 +81,20 @@ def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
         if prompt:
             try:
                 dm = api.prompt_devmode(handle, printer, dm)
+            except PromptCancelled:
+                raise                      # W-1：取消不是降级，直接向上传
             except Exception:
-                pass          # 驱动无配置页：降级为继承当前介质，不中断打印
-            modify(dm, size, w_mm, h_mm, paper_code)   # 几何以请求为准（I-1）
+                degraded = True            # W-3：驱动无配置页→继承当前介质
+            # 几何以请求为准（I-1）；但保留用户选的纸盒（W-2）
+            modify(dm, size, w_mm, h_mm, paper_code, default_source=False)
         api.document_properties(handle, printer, "update", dm)
     finally:
         api.close_printer(handle)
-    return dm, size
+    return dm, size, degraded
 
 
 def build(api, printer, w_mm, h_mm, paper_code=None):
     """旧入口：等价 prompt=False。CLI / print_job 行为逐字不变。"""
-    return build_with_prompt(api, printer, w_mm, h_mm, paper_code, prompt=False)
+    dm, size, _degraded = build_with_prompt(api, printer, w_mm, h_mm,
+                                           paper_code, prompt=False)
+    return dm, size

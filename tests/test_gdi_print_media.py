@@ -3,6 +3,7 @@ _emit 被 monkeypatch，故本文件全程不 import win32（gdi_print 顶部也
 import types
 
 from photoprint.win import devmode, gdi_print
+from photoprint.win.api import PromptCancelled
 
 
 class Sheet:
@@ -27,7 +28,7 @@ def test_prompt_flag_propagates(monkeypatch):
 
     def fake_build(api, printer, w, h, code, prompt=False):
         seen["prompt"] = prompt
-        return ("DM", 520)
+        return ("DM", 520, False)
 
     def fake_emit(api, printer, dm, images, sheet, dpi):
         seen["dm"] = dm
@@ -46,7 +47,7 @@ def test_print_job_is_prompt_false_wrapper(monkeypatch):
 
     def fake_build(api, printer, w, h, code, prompt=False):
         seen["prompt"] = prompt
-        return ("DM", 520)
+        return ("DM", 520, False)
 
     monkeypatch.setattr(devmode, "build_with_prompt", fake_build)
     monkeypatch.setattr(gdi_print, "_emit",
@@ -85,6 +86,31 @@ def test_build_failure_contained_no_raise(monkeypatch):
     monkeypatch.setattr(devmode, "build_with_prompt", boom)
     res = gdi_print.print_pages(object(), "P", _imgs(2), Sheet, 300)
     assert res["ok"] is False and "printer offline" in res["message"]
+
+
+def test_prompt_cancel_returns_cancelled_not_error(monkeypatch):
+    """W-1：build 阶段抛 PromptCancelled → print_pages 返回 cancelled=True、
+    不发作业（不调 _emit），区别于普通失败。"""
+    def cancel(*a, **k):
+        raise PromptCancelled("cancelled")
+
+    emit_calls = []
+    monkeypatch.setattr(devmode, "build_with_prompt", cancel)
+    monkeypatch.setattr(gdi_print, "_emit",
+                        lambda *a, **k: emit_calls.append(1))
+    res = gdi_print.print_pages(object(), "P", _imgs(2), Sheet, 300, prompt=True)
+    assert res["cancelled"] is True and res["ok"] is False
+    assert not emit_calls                    # 取消后不建 DC 不送图
+
+
+def test_degraded_flag_propagates_on_success(monkeypatch):
+    """W-3：build 回报 degraded=True 且打印成功 → 结果携 degraded 标志供 UI 提示。"""
+    monkeypatch.setattr(devmode, "build_with_prompt",
+                        lambda *a, **k: ("DM", 520, True))
+    monkeypatch.setattr(gdi_print, "_emit",
+                        lambda *a, **k: {"ok": True, "pages": 2, "message": ""})
+    res = gdi_print.print_pages(object(), "P", _imgs(2), Sheet, 300, prompt=True)
+    assert res["ok"] is True and res.get("degraded") is True
 
 
 def test_emit_and_module_never_use_win32print_create_dc():

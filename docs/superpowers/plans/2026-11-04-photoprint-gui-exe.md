@@ -2076,6 +2076,7 @@ git commit -m "feat(app): 表单主窗口（预览、微调滑块、状态栏、
 """窗口化 exe 没有控制台，异常只能落盘才看得见。"""
 import sys
 import threading
+import types
 
 from photoprint.app import crashlog
 
@@ -2097,6 +2098,18 @@ def test_write_appends_traceback(tmp_path):
     assert "ValueError" in text and "A4 放不下 5R" in text
 
 
+def test_write_creates_missing_parent_dir(tmp_path):
+    """日志目录还没建时 write 要用 mkdir(parents=True) 补上（真实首次运行
+    即此情形）：不建则 open 抛 FileNotFoundError 被吞掉、返回 None，首启崩溃反而
+    留不下任何日志。tmp_path 下两级子目录都预先不存在。"""
+    p = tmp_path / "PhotoPrint" / "nested" / "error.log"
+    try:
+        raise ValueError("首启")
+    except ValueError:
+        got = crashlog.write(sys.exc_info(), p)
+    assert got == p and p.exists()
+
+
 def test_write_appends_instead_of_overwriting(tmp_path):
     p = tmp_path / "error.log"
     for _ in range(2):
@@ -2104,7 +2117,13 @@ def test_write_appends_instead_of_overwriting(tmp_path):
             raise KeyError("sheet_key")
         except KeyError:
             crashlog.write(sys.exc_info(), p)
-    assert p.read_text(encoding="utf-8").count("KeyError") == 2
+    # 钉的是“追加两条、没互相覆盖”，而非某易变字符串出现几次：一次 traceback 里
+    # KeyError 会出现两遍（源码行 raise KeyError(...) + 末尾 KeyError: 'sheet_key'），
+    # 按计划原写法 count("KeyError")==2 恒不成立。改数“Traceback 抬头”条数，直读意图且
+    # 不受 traceback 具体排版影响。
+    text = p.read_text(encoding="utf-8")
+    assert text.count("Traceback (most recent call last)") == 2
+    assert text.count("KeyError: 'sheet_key'") == 2
 
 
 def test_write_failure_returns_none(tmp_path):
@@ -2122,6 +2141,17 @@ def test_install_replaces_both_hooks(tmp_path):
         except RuntimeError:
             sys.excepthook(*sys.exc_info())
         assert "RuntimeError" in target.read_text(encoding="utf-8")
+        # 名字叫 both_hooks 就得两条钩子都真承重：threading.excepthook 收的是
+        # 一个带 exc_type/exc_value/exc_traceback 的 args。不驱动它，删产品
+        # 代码里 `threading.excepthook = thread_hook` 那一行本用例仍会绿（真缺口）。
+        try:
+            raise ValueError("子线程炸了")
+        except ValueError as exc:
+            args = types.SimpleNamespace(exc_type=type(exc), exc_value=exc,
+                                        exc_traceback=exc.__traceback__)
+            threading.excepthook(args)
+        text = target.read_text(encoding="utf-8")
+        assert "ValueError" in text and "子线程炸了" in text
     finally:
         sys.excepthook, threading.excepthook = old, old_thread
 ```

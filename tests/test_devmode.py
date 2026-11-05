@@ -108,6 +108,10 @@ def test_build_asks_size_then_gets_filled_struct():
     # T11 评审 Important：必须钉住第一元素是已填好的 dm 本体——
     # 曾写 `return modify(...), size` 而 modify 返回 size，元组实为 (520, 520)
     assert dm.PaperWidth == 890 and dm.PaperSize == devmode.DMPAPER_USER
+    # 非弹窗路径（CLI/build）仍照旧把纸盒设为 DMBIN_USER，以启用自定义尺寸；
+    # 这一半与 W-2（弹窗后不夺回）相反，需单独钉住防静默回归
+    assert dm.DefaultSource == devmode.DMBIN_USER
+    assert dm.Fields & devmode.DM_DEFAULTSOURCE
     # 真实契约：先问长度 → 取驱动当前结构 → 改完交回驱动校验
     assert api.mode_log == ["size", "devmode", "update"], \
         "顺序必须是 size → pDevMode → DM_IN_BUFFER|DM_OUT_BUFFER"

@@ -76,7 +76,9 @@ def test_prompt_devmode_inspects_return_for_cancel():
 
     src = inspect.getsource(api.RealWinApi.prompt_devmode)
     assert "= win32print.DocumentProperties" in src   # 接住返回值，不能丢弃
-    assert "PromptCancelled" in src                    # 取消 → 抛专属异常
+    # 只认代码独有写法：裸 "PromptCancelled" 会被 docstring 同词喂饱（永真断言）
+    assert "raise PromptCancelled" in src              # docstring 写“抛”非“raise”
+    assert "if ret == 0" in src                         # 钉住取消码判定这一行
 
 
 def test_get_default_printer_routes_through_win32print():

@@ -26,7 +26,7 @@
 ## 文件结构（改动地图）
 
 - 修改 `photoprint/core/render.py`：新增 `page_cells_px` / `_fit_rect` / `cell_index_at` / `cell_rects_view`（`_fit_rect` 私有）。
-- 新建 `tests/test_render_geometry.py`：三纯函数 headless 测试。
+- 新建 `tests/test_render_hit_geometry.py`：三纯函数 headless 测试（`tests/test_render_geometry.py` 已被既有渲染输出测试占用，命中几何另起新文件不覆盖）。
 - 新建 `photoprint/app/preview_view.py`：`PreviewView(QLabel)`——显示整页 pixmap + 描格框/高亮 + 点击发 `cellClicked(int 格内序)`。
 - 新建 `tests/test_app_preview_view.py`：`PreviewView` offscreen 测试（含 `_no_leaked_threads`）。
 - 修改 `photoprint/app/main_window.py`：数据模型 `pool`/`placements`/`cell_rot`/`_pages`/`_current_cell`/`_count_last`；`_rebuild_job` 物化 + 结构变更清空；`place`/`rotate_cell`/`clear_cell`/`_maybe_shrink_pages`；`_go_page` 增页/收缩 + 重置选中；`append_photo`/`_on_add_photos`/`import_folder` 不再自动排版；`_on_clear_photos` 清放置；`_on_rotate` 改逐格；`save_last_job`/`_restore_last_job` 新 schema + `_migrate_sequential`；预览切 `PreviewView`；`_on_cell_clicked` 接线；新增"清空格"按钮。
@@ -40,7 +40,7 @@
 
 **Files:**
 - Modify: `photoprint/core/render.py`（在 `_mask_bands` 之后追加）
-- Test: `tests/test_render_geometry.py`
+- Test: `tests/test_render_hit_geometry.py`
 
 **Interfaces:**
 - Consumes: `units.mm_to_px`、`render_page` 已用的 `plan.cells`（每格 `.x_mm/.y_mm/.w_mm/.h_mm`）、`sheet.w_mm/.h_mm`；测试用 `jobs.build_job` 取真实 `plan`/`sheet`。
@@ -52,7 +52,7 @@
 
 - [ ] **Step 1: 写失败测试**
 
-新建 `tests/test_render_geometry.py`：
+新建 `tests/test_render_hit_geometry.py`：
 
 ```python
 """core 命中几何：page_cells_px / cell_index_at / cell_rects_view。
@@ -121,7 +121,7 @@ def test_rects_view_covers_hit_point():
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `pytest tests/test_render_geometry.py -v`
+Run: `pytest tests/test_render_hit_geometry.py -v`
 Expected: FAIL — `AttributeError: module 'photoprint.core.render' has no attribute 'page_cells_px'`
 
 - [ ] **Step 3: 最小实现**
@@ -180,17 +180,17 @@ def cell_rects_view(cell_rects_px, image_wh, view_wh):
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `pytest tests/test_render_geometry.py -v`
+Run: `pytest tests/test_render_hit_geometry.py -v`
 Expected: PASS（7 条全绿）
 
 - [ ] **Step 5: 变异验牙**
 
-用 SearchReplace 把 `cell_index_at` 的 `ix, iy = (px - ox) / s, (py - oy) / s` 改成 `ix, iy = (px - ox) / s, (px - oy) / s`（复制粘贴笔误：y 误用 px），跑 `pytest tests/test_render_geometry.py::test_hit_respects_letterbox_offset -v` 必须转红；还原。再删 `_fit_rect` 里的居中偏移（`return (0.0, 0.0, scale)`）→ `test_scaled_view_hit_matches_unscaled` 或 letterbox 用例须转红；还原。
+用 SearchReplace 把 `cell_index_at` 的 `ix, iy = (px - ox) / s, (py - oy) / s` 改成 `ix, iy = (px - ox) / s, (px - oy) / s`（复制粘贴笔误：y 误用 px），跑 `pytest tests/test_render_hit_geometry.py::test_hit_respects_letterbox_offset -v` 必须转红；还原。再删 `_fit_rect` 里的居中偏移（`return (0.0, 0.0, scale)`）→ `test_scaled_view_hit_matches_unscaled` 或 letterbox 用例须转红；还原。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add photoprint/core/render.py tests/test_render_geometry.py
+git add photoprint/core/render.py tests/test_render_hit_geometry.py
 ```
 用无 BOM 消息文件：`core: 新增命中几何三函数（page_cells_px/cell_index_at/cell_rects_view）`
 

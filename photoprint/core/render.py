@@ -177,3 +177,52 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                           fill=(CUT_LINE_GRAY, CUT_LINE_GRAY, CUT_LINE_GRAY),
                           width=lw)
     return page
+
+
+def page_cells_px(plan, sheet, dpi):
+    """整页图像像素尺寸 + 各格在图像像素坐标的矩形 (x,y,w,h)。
+
+    与 render_page 的 mm→px 装箱同源，供预览命中/描框复用——杜绝第二套几何
+    真相源；只算格框，不含遮罩/切缝。
+    """
+    image_wh = (units.mm_to_px(sheet.w_mm, dpi), units.mm_to_px(sheet.h_mm, dpi))
+    rects = [(units.mm_to_px(c.x_mm, dpi), units.mm_to_px(c.y_mm, dpi),
+              units.mm_to_px(c.w_mm, dpi), units.mm_to_px(c.h_mm, dpi))
+             for c in plan.cells]
+    return image_wh, rects
+
+
+def _fit_rect(image_wh, view_wh):
+    """KeepAspectRatio 信箱：图像等比缩放进视图时的 (offset_x, offset_y, scale)。
+
+    与 QLabel.setPixmap(scaled(..., KeepAspectRatio)) 的居中放置逐条对齐；
+    退化尺寸（≤0）按不缩放处理，避免除零。
+    """
+    iw, ih = image_wh
+    vw, vh = view_wh
+    if iw <= 0 or ih <= 0 or vw <= 0 or vh <= 0:
+        return (0.0, 0.0, 1.0)
+    scale = min(vw / iw, vh / ih)
+    ow, oh = iw * scale, ih * scale
+    return ((vw - ow) / 2.0, (vh - oh) / 2.0, scale)
+
+
+def cell_index_at(cell_rects_px, image_wh, view_wh, pos):
+    """视图坐标点 pos=(x,y) 命中的格内序；信箱留白区/格间空隙 → None。
+
+    先经 _fit_rect 逆变换回图像坐标，再逐格判定（左闭右开，边界不串邻格）。
+    """
+    ox, oy, s = _fit_rect(image_wh, view_wh)
+    px, py = pos
+    ix, iy = (px - ox) / s, (py - oy) / s
+    for idx, (rx, ry, rw, rh) in enumerate(cell_rects_px):
+        if rx <= ix < rx + rw and ry <= iy < ry + rh:
+            return idx
+    return None
+
+
+def cell_rects_view(cell_rects_px, image_wh, view_wh):
+    """格矩形映到视图像素坐标，供 paintEvent 描格框；与 cell_index_at 共用 _fit_rect。"""
+    ox, oy, s = _fit_rect(image_wh, view_wh)
+    return [(rx * s + ox, ry * s + oy, rw * s, rh * s)
+            for (rx, ry, rw, rh) in cell_rects_px]

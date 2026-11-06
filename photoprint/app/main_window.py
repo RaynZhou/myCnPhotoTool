@@ -88,12 +88,15 @@ class MainWindow(QMainWindow):
         self.api = printer_api
         self.st = st if st is not None else store.Store()
         self.st.load()
-        self.photos = []        # PIL 图；读取失败的占位 None 会被渲染当空格
-        self.photo_paths = []
-        self.photo_rotations = []  # 逐图顺时针角度，与 photos 严格等长同序
+        self.pool = []             # 库：[{"path": str, "img": PIL|None}]
+        self.placements = {}       # 槽位下标 → 库下标；缺省即空格
+        self.cell_rot = {}         # 槽位下标 → 0/90/180/270（缺省 0）
+        self._pages = 1            # 当前总页数（派生 + 翻页增页）
         self.page_index = 0
+        self._current_cell = None  # 预览选中的全局槽位
+        self._count_last = None    # 上次每页格数（检测结构性布局变更）
         self.job = None
-        self._full_pm = None      # 未缩放的整页 pixmap：resize 时据此重新适配预览
+        self._full_pm = None       # 未缩放整页 pixmap：resize 时据此重新适配预览
         self._thread = None
         self._task = None
         self._gen = 0
@@ -229,28 +232,114 @@ class MainWindow(QMainWindow):
                            float(self.v_slider.value())),
         }
 
-    def _rebuild_job(self):
-        """把当前控件值落成 self.job（含校验与状态栏），但不起渲染线程。
+    def _ensure_count(self):
+        """不依赖 job 拿当前每页格数：恢复/迁移在首刷前也要用它算页数。"""
+        p = self._params()
+        try:
+            plan, _ = jobs.build_layout(self.st, p["sheet_key"], p["cell_key"],
+                                        p["gap_mm"], p["bleed_mm"], p["mode"],
+                                        borderless_active=False)
+        except ValueError:
+            return self._count_last or 0
+        self._count_last = plan.count
+        return plan.count
 
-        导出走这条：只需同步出最新 job，不该顺带重渲一遍预览、更不该在
-        `_render_async` 里 `_retire_threads` 阻塞主线程（最长 2s）。
+    def _has_any_photo(self):
+        return any(self.pool[pi]["img"] is not None
+                   for pi in self.placements.values() if 0 <= pi < len(self.pool))
+
+    def _reset_placements(self, msg):
+        self.placements = {}
+        self.cell_rot = {}
+        self._pages = 1
+        self.page_index = 0
+        self._current_cell = None
+        self._set_status(msg)                    # 正常色：引导重摆，非错误
+
+    def place(self, slot, pool_idx):
+        """唯一写放置入口（与 2b 拖放共用；迁移重放也走它）。"""
+        if not 0 <= pool_idx < len(self.pool):
+            return False
+        count = self._count_last or 0
+        if count and slot >= 0:
+            self._pages = max(self._pages, slot // count + 1)
+        self.placements[slot] = pool_idx
+        self._current_cell = slot
+        self._debounce.start()
+        return True
+
+    def rotate_cell(self, slot):
+        if slot is None or slot not in self.placements:
+            self._set_status("请先点选版面中已放图的格")
+            return
+        self.cell_rot[slot] = (self.cell_rot.get(slot, 0) + 90) % 360
+        self._debounce.start()
+
+    def clear_cell(self, slot):
+        if slot is None:
+            self._set_status("请先点选版面中的格")
+            return
+        self.placements.pop(slot, None)
+        self.cell_rot.pop(slot, None)
+        self._maybe_shrink_pages()
+        self._debounce.start()
+
+    def _maybe_shrink_pages(self):
+        count = self._count_last or 0
+        if not count:
+            return
+        while self._pages > 1:
+            last_start = (self._pages - 1) * count
+            last_filled = any(last_start <= s < self._pages * count
+                              for s in self.placements)
+            if last_filled or self.page_index == self._pages - 1:
+                break
+            self._pages -= 1
+
+    def _rebuild_job(self):
+        """算 count→派生 photos/rotations→build_job。结构变（count 变）清空放置。
+
+        先 build_layout 只为拿 count 给物化定长；随后 build_job 作唯一权威
+        构造（含模式校验、rotations 归一交 core）——两次纯函数同输入同输出。
         """
         p = self._params()
         try:
-            self.job = jobs.build_job(self.st, self.photos, p["sheet_key"],
-                                      p["cell_key"], gap_mm=p["gap_mm"],
-                                      bleed_mm=p["bleed_mm"], mode=p["mode"],
-                                      offset_pct=p["offset_pct"],
-                                      rotations=tuple(self.photo_rotations))
-        except ValueError as exc:      # 放不下 / 非法模式组合 / 未知尺寸
+            plan, _ = jobs.build_layout(self.st, p["sheet_key"], p["cell_key"],
+                                        p["gap_mm"], p["bleed_mm"], p["mode"],
+                                        borderless_active=False)
+        except ValueError as exc:
+            self.job = None
+            self._set_status(str(exc), error=True)
+            self.export_btn.setEnabled(False)
+            return
+        count = plan.count
+        cleared = False
+        if count != self._count_last:
+            if self._count_last is not None and self.placements:
+                self._reset_placements("布局已变，请重新摆放")
+                cleared = True
+            self._count_last = count
+        n = self._pages * count
+        photos = [None] * n
+        for slot, pi in self.placements.items():
+            if 0 <= slot < n and 0 <= pi < len(self.pool):
+                photos[slot] = self.pool[pi]["img"]
+        rotations = [self.cell_rot.get(i, 0) for i in range(n)]
+        try:
+            self.job = jobs.build_job(self.st, photos, p["sheet_key"], p["cell_key"],
+                                      gap_mm=p["gap_mm"], bleed_mm=p["bleed_mm"],
+                                      mode=p["mode"], offset_pct=p["offset_pct"],
+                                      rotations=rotations)
+        except ValueError as exc:
             self.job = None
             self._set_status(str(exc), error=True)
             self.export_btn.setEnabled(False)
             return
         self.page_index = min(self.page_index, self.job.page_count - 1)
-        self.export_btn.setEnabled(any(ph is not None for ph in self.photos))
-        self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
-                         f"{self.job.note}")
+        self.export_btn.setEnabled(self._has_any_photo())
+        if not cleared:                             # 结构性清空时保留“请重新摆放”引导，不被信息行覆盖
+            self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
+                             f"{self.job.note}")
 
     def _refresh(self):
         """算排版 → 起线程渲当前页。排版失败只报状态栏，不弹不崩。"""
@@ -313,10 +402,14 @@ class MainWindow(QMainWindow):
     def _go_page(self, delta):
         if self.job is None:
             return
+        if delta > 0 and self.page_index >= self._pages - 1:
+            self._pages += 1                        # 末页之后追加空页
         nxt = self.page_index + delta
-        if 0 <= nxt < self.job.page_count:
+        if 0 <= nxt < self._pages:
             self.page_index = nxt
-            self._render_async()
+            self._current_cell = None               # 翻页即弃旧选中
+            self._maybe_shrink_pages()              # 离开空末页时收缩
+            self._refresh()
 
     def _set_status(self, text, error=False):
         self.statusBar().setStyleSheet(f"color:{ERROR_COLOR}" if error else "")
@@ -355,51 +448,40 @@ class MainWindow(QMainWindow):
         return len(paths)
 
     def append_photo(self, path):
-        """读图失败不阻塞其余：占位 None 进渲染当空格，列表标红。"""
+        """读图失败不阻塞其余：img=None 进库，被放置时物化成空格；列表标红。"""
         name = Path(path).name
         try:
             img = jobs.load_photo(path)
         except Exception as exc:      # IO 边界什么都可能抛，全部收敛
-            self.photos.append(None)
-            self.photo_paths.append(str(path))
-            self.photo_rotations.append(0)
-            item = QListWidgetItem(self._photo_item_text(name, None, 0))
+            self.pool.append({"path": str(path), "img": None})
+            item = QListWidgetItem(self._photo_item_text(name, None))
             item.setForeground(QColor(ERROR_COLOR))
             self.photo_list.addItem(item)
             self._set_status(f"无法读取 {name}：{exc}", error=True)
             return
-        self.photos.append(img)
-        self.photo_paths.append(str(path))
-        self.photo_rotations.append(0)
-        item = QListWidgetItem(self._photo_item_text(name, img, 0))
+        self.pool.append({"path": str(path), "img": img})
+        item = QListWidgetItem(self._photo_item_text(name, img))
         item.setIcon(QIcon(view.to_thumbnail(img, THUMB_PX)))
         self.photo_list.addItem(item)
 
     @staticmethod
-    def _photo_item_text(name, img, angle):
-        """列表项文字单一真相源：0° 时逐字等于旧文案，既有断言不受扰动。"""
+    def _photo_item_text(name, img):
+        """列表项文字：旋转已移到格上，不再有角度段。"""
         if img is None:
-            base = f"{name}（读取失败）"
-        else:
-            base = f"{name}  {img.width}×{img.height}px"
-        return base if angle == 0 else f"{base}  ↻{angle}°"
+            return f"{name}（读取失败）"
+        return f"{name}  {img.width}×{img.height}px"
 
     def _on_rotate(self):
-        row = self.photo_list.currentRow()
-        if not 0 <= row < len(self.photo_rotations):
-            self._set_status("请先选中照片")     # 正常色：这是引导，不是错误
-            return
-        self.photo_rotations[row] = (self.photo_rotations[row] + 90) % 360
-        item = self.photo_list.item(row)
-        img = self.photos[row] if row < len(self.photos) else None
-        item.setText(self._photo_item_text(
-            Path(self.photo_paths[row]).name, img, self.photo_rotations[row]))
-        self._debounce.start()
+        self.rotate_cell(self._current_cell)
 
     def _on_clear_photos(self):
-        self.photos, self.photo_paths, self.photo_rotations = [], [], []
-        self.photo_list.clear()
+        self.pool = []
+        self.placements = {}
+        self.cell_rot = {}
+        self._pages = 1
         self.page_index = 0
+        self._current_cell = None
+        self.photo_list.clear()
         self._refresh()
 
     # ---------- 导出 ----------
@@ -413,7 +495,7 @@ class MainWindow(QMainWindow):
         # 走 _rebuild_job 而非 _refresh：导出不需重渲预览，不起那条会被丢弃的线程。
         self._debounce.stop()
         self._rebuild_job()
-        if self.job is None or not any(ph is not None for ph in self.photos):
+        if self.job is None or not self._has_any_photo():
             raise ValueError("没有可导出的照片")
         pages = jobs.render_all(self.job, self._params()["dpi"], show_mask=False)
         pdf_export.export_pdf(pages, self.job.sheet, out_path)
@@ -471,7 +553,7 @@ class MainWindow(QMainWindow):
             return
         if self.job is None:
             return                    # _rebuild_job 已把准确原因写进状态栏，不覆盖
-        if not any(ph is not None for ph in self.photos):
+        if not self._has_any_photo():
             self._set_status("没有可打印的照片", error=True)
             return
         printer = self.printer_box.currentText()
@@ -511,8 +593,10 @@ class MainWindow(QMainWindow):
             "gap_mm": p["gap_mm"], "bleed_mm": p["bleed_mm"], "dpi": p["dpi"],
             "offset_pct": [self.h_slider.value(), self.v_slider.value()],
             "out_dir": out_dir or self._last_out_dir(),
-            "photo_paths": list(self.photo_paths),
-            "rotations": list(self.photo_rotations)})
+            "pool_paths": [e["path"] for e in self.pool],
+            "placements": {str(s): pi for s, pi in self.placements.items()},
+            "cell_rot": {str(s): a for s, a in self.cell_rot.items() if a},
+            "pages": self._pages})
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
 
@@ -543,30 +627,68 @@ class MainWindow(QMainWindow):
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
             self._safe(lambda: self._apply_offset(pct))
-        paths = job.get("photo_paths")
-        for p in (paths if isinstance(paths, (list, tuple)) else []):
-            self.append_photo(str(p))      # 文件已删则走标红分支，不阻塞（append_photo 内部已收敛）
-        self._restore_rotations(job)
+        new_shape = ("placements" in job) or ("pool_paths" in job)
+        paths = job.get("pool_paths") if new_shape else job.get("photo_paths")
+        for pth in (paths if isinstance(paths, (list, tuple)) else []):
+            self.append_photo(str(pth))    # 坏图走标红占位、保留库下标对齐
+        self._ensure_count()
+        if new_shape:
+            self._safe(lambda: self._restore_placements(job))
+        else:
+            self._safe(lambda: self._migrate_sequential(job))
 
-    def _restore_rotations(self, job):
-        """rotations 与 photo_paths 按下标对齐：任一元素不可转 int 就整体不
-        恢复（全 0）——逐项降级会把"第 3 张转了"错位成"第 4 张转了"，比全丢
-        更糟。长度不符按规格第 5 节截断/补 0。角度原样存，归一只在 core 做。"""
-        rots = job.get("rotations")
-        n = len(self.photo_rotations)
-        if rots is None or not isinstance(rots, (list, tuple)):
-            return
+    def _restore_placements(self, job):
+        """新 schema：placements/cell_rot/pages 逐条降级（引用完整性优先）。"""
+        pl = job.get("placements")
+        if not isinstance(pl, dict):
+            return                                    # 放置段整体降级：保库、重摆
+        for k, v in pl.items():
+            try:
+                slot, pi = int(k), int(v)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if slot >= 0 and 0 <= pi < len(self.pool):
+                self.placements[slot] = pi
+        rot = job.get("cell_rot")
+        if isinstance(rot, dict):
+            for k, v in rot.items():
+                try:
+                    slot, a = int(k), int(v)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if slot in self.placements:
+                    self.cell_rot[slot] = a
+        count = self._count_last or 1
         try:
-            vals = [int(v) for v in rots]
+            self._pages = max(1, int(job.get("pages")))
         except (TypeError, ValueError, OverflowError):
+            self._pages = 1
+        if self.placements:
+            self._pages = max(self._pages, max(self.placements) // count + 1)
+
+    def _migrate_sequential(self, job):
+        """旧 last_job（photo_paths+rotations、无 placements）→ 顺序重放：
+        槽 i 放库 i，rotations 位置对齐逐格；任一坏角度整体不恢复（全 0），
+        超长截到库长、不足补 0——与旧 _restore_rotations 同容错口径。"""
+        count = self._count_last or 0
+        n = len(self.pool)
+        if not count or not n:
             return
-        vals = vals[:n]
-        self.photo_rotations = vals + [0] * (n - len(vals))
-        for row in range(n):
-            img = self.photos[row] if row < len(self.photos) else None
-            name = Path(self.photo_paths[row]).name
-            self.photo_list.item(row).setText(
-                self._photo_item_text(name, img, self.photo_rotations[row]))
+        rots = job.get("rotations")
+        vals = [0] * n
+        if isinstance(rots, (list, tuple)):
+            try:
+                parsed = [int(v) for v in rots]
+            except (TypeError, ValueError, OverflowError):
+                parsed = None
+            if parsed is not None:
+                parsed = parsed[:n]
+                vals = parsed + [0] * (n - len(parsed))
+        for i in range(n):
+            self.placements[i] = i
+            if vals[i] % 360:
+                self.cell_rot[i] = vals[i]
+        self._pages = max(1, -(-n // count))
 
     def _select_by_data(self, box, value):
         idx = box.findData(value)

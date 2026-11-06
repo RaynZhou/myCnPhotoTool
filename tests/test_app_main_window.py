@@ -32,8 +32,11 @@ def _make_photos(tmp_path, n=4):
 
 
 def _fill(window, tmp_path, n=4):
+    """append 进库后顺序 place 到槽 0..n-1——复现旧“自动填充”对既有测试的意义。"""
     for p in _make_photos(tmp_path, n):
         window.append_photo(p)
+    for i in range(n):
+        window.place(i, i)
     window._refresh()
 
 
@@ -184,7 +187,7 @@ def test_unreadable_photo_is_marked_and_does_not_block(qapp, tmp_path):
     bad.write_bytes(b"not an image")
     w = MainWindow(st=_store(tmp_path))
     w.append_photo(str(bad))
-    assert w.photos[-1] is None
+    assert w.pool[-1]["img"] is None
     assert "无法读取" in w.statusBar().currentMessage()
     assert "读取失败" in w.photo_list.item(0).text()
 
@@ -219,15 +222,20 @@ def test_offset_sliders_reach_jobs(qapp, tmp_path):
     assert w.job.offset_pct == (50.0, 0.0)
 
 
-def test_page_navigation_clamps_at_edges(qapp, tmp_path):
+def test_page_navigation_extends_forward_and_clamps_backward(qapp, tmp_path):
+    """增量②：末页点“下一页”自动增页；越向前仍夹在第一页。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path, n=5)          # 5 张于 A4+3R 是 2 页
     assert w.job.page_count == 2
     w._go_page(1)
     assert w.page_index == 1
-    w._go_page(1)
-    assert w.page_index == 1         # 越界不得变页码
+    w._go_page(1)                    # 已在末页 → 自动追加空页
+    assert w._pages == 3 and w.page_index == 2
+    w._go_page(-1)                   # 离开空末页 → 收缩回 2 页
+    assert w._pages == 2 and w.page_index == 1
     w._go_page(-1)
+    assert w.page_index == 0
+    w._go_page(-1)                   # 首页向前越界不动
     assert w.page_index == 0
 
 
@@ -250,7 +258,7 @@ def test_bad_photo_paths_and_out_dir_do_not_block_startup(qapp, tmp_path):
                     "out_dir": 123})
     s.save()
     w = MainWindow(st=_store(tmp_path))       # photo_paths=5 不应抛
-    assert w.photos == []
+    assert w.pool == []
     w.save_last_job()                          # 坏 out_dir 走 _last_out_dir 降级，不应抛
 
 
@@ -371,36 +379,8 @@ def _rotate_btn(w):
     return w.findChild(type(w.export_btn), "rotate_btn")
 
 
-def test_rotate_without_selection_prompts_and_keeps_state(qapp, tmp_path):
-    w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path)
-    w.photo_list.clearSelection()
-    assert w.photo_list.currentRow() == -1      # 前提显式钉住，不依赖 addItem 不置当前行的细节（T3 评审 M-1）
-    before = list(w.photo_rotations)
-    _rotate_btn(w).click()
-    assert w.photo_rotations == before == [0, 0, 0, 0]
-    assert "请先选中照片" in w.statusBar().currentMessage()
-
-
-def test_rotate_cycles_90_degrees_and_marks_list(qapp, tmp_path):
-    w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path)
-    w.photo_list.setCurrentRow(1)
-    _rotate_btn(w).click()
-    assert w._debounce.isActive()                # 点了就得起防抖，不靠手工 _refresh 兜（T3 评审 I-1）
-    assert w.photo_rotations == [0, 90, 0, 0]
-    assert "↻90°" in w.photo_list.item(1).text()
-    assert "↻" not in w.photo_list.item(0).text()   # 0° 行逐字保持原文案
-    w._refresh()
-    assert w.job.rotations == (0, 90, 0, 0)         # 角度进了编排层（Task 2 接口）
-    for _ in range(3):                              # 4 次一循环回 0
-        _rotate_btn(w).click()
-    assert w.photo_rotations == [0, 0, 0, 0]
-    assert "↻" not in w.photo_list.item(1).text()
-
-
 def test_rotate_then_refresh_changes_preview_pixels(qapp, tmp_path):
-    """所见即所得的构造保证：按钮 → photo_rotations → build_job → 渲染层，
+    """所见即所得的构造保证：按钮 → rotate_cell/cell_rot → build_job → 渲染层，
     全链路走通后当前页像素必须真的变了（断言像素，不断言中间变量）。
 
     不用 _fill 的纯色图：纯色（含仅角上小标记、标记被裁切/缩采样抹平的情形）
@@ -412,10 +392,10 @@ def test_rotate_then_refresh_changes_preview_pixels(qapp, tmp_path):
     img.save(twotone)
     w = MainWindow(st=_store(tmp_path))
     w.append_photo(str(twotone))
+    w.place(0, 0)                                 # 入版面，_current_cell 置 0
     w._refresh()
     before = w.job.render(0, 25.4).tobytes()
-    w.photo_list.setCurrentRow(0)
-    _rotate_btn(w).click()
+    _rotate_btn(w).click()                        # 逐格旋转当前格（0）
     w._refresh()
     assert w.job.render(0, 25.4).tobytes() != before
 
@@ -423,33 +403,20 @@ def test_rotate_then_refresh_changes_preview_pixels(qapp, tmp_path):
 def test_clear_resets_rotations(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    w.photo_list.setCurrentRow(0)
-    _rotate_btn(w).click()
+    _rotate_btn(w).click()                        # _current_cell==3（_fill 末次 place）
+    assert w.cell_rot                             # 已有一格角度
     w._on_clear_photos()
-    assert w.photo_rotations == []
-
-
-def test_failed_photo_still_tracks_rotation(qapp, tmp_path):
-    """读取失败占位项也允许记角度（渲染时被跳过，数据不坏）：不做特殊分支。"""
-    bad = tmp_path / "bad.jpg"
-    bad.write_bytes(b"not an image")
-    w = MainWindow(st=_store(tmp_path))
-    w.append_photo(str(bad))
-    w.photo_list.setCurrentRow(0)
-    _rotate_btn(w).click()
-    assert w.photo_rotations == [90]
-    assert "↻90°" in w.photo_list.item(0).text()
+    assert w.cell_rot == {}
 
 
 def test_rotations_roundtrip_through_two_windows(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    w.photo_list.setCurrentRow(1)
-    _rotate_btn(w).click()
+    _rotate_btn(w).click()                        # _current_cell==3（_fill 末次 place）
     w.save_last_job(out_dir=str(tmp_path))
     again = MainWindow(st=_store(tmp_path))
-    assert again.photo_rotations == [0, 90, 0, 0]        # 角度与照片下标对齐
-    assert "↻90°" in again.photo_list.item(1).text()
+    assert again.cell_rot == {3: 90}              # 角度按格落库并回读
+    assert again.placements == {0: 0, 1: 1, 2: 2, 3: 3}
 
 
 @pytest.mark.parametrize("bad", ["[90]", "90", [90, "x"], [90, None]])
@@ -464,7 +431,7 @@ def test_bad_rotations_config_degrades_to_all_zero(qapp, tmp_path, bad):
                     "rotations": bad})
     s.save()
     w = MainWindow(st=_store(tmp_path))                   # 不应抛
-    assert w.photo_rotations == [0, 0]
+    assert w.cell_rot == {}
 
 
 def test_rotations_length_mismatch_truncates_or_pads(qapp, tmp_path):
@@ -474,7 +441,7 @@ def test_rotations_length_mismatch_truncates_or_pads(qapp, tmp_path):
                     "rotations": [90, 180, 270, 45]})     # 超长：截到 2
     s.save()
     w = MainWindow(st=_store(tmp_path))
-    assert w.photo_rotations == [90, 180]
+    assert w.cell_rot == {0: 90, 1: 180}                 # 超长：截到库长 2
     # 45 不在 {0,90,180,270}，core 归一按 0 渲染；界面原样保留，不在此层换算
 
 
@@ -487,7 +454,7 @@ def test_rotations_short_list_pads_to_equal_length(qapp, tmp_path):
                     "rotations": [90]})                # 不足：补 0 到等长
     s.save()
     w = MainWindow(st=_store(tmp_path))                 # 删补 0 则此处 IndexError
-    assert w.photo_rotations == [90, 0, 0]
+    assert w.cell_rot == {0: 90}                        # 不足：补 0，仅非 0 角度入库
 
 
 def test_rotations_out_of_range_still_renderable(qapp, tmp_path):
@@ -498,7 +465,7 @@ def test_rotations_out_of_range_still_renderable(qapp, tmp_path):
                     "rotations": [-90]})
     s.save()
     w = MainWindow(st=_store(tmp_path))
-    assert w.photo_rotations == [-90]
+    assert w.cell_rot == {0: -90}                       # 原样存、core 归一
     w._refresh()
     assert w.job is not None                              # 渲染路径不被坏角度打死
 
@@ -560,21 +527,8 @@ def test_failed_photo_has_no_icon(qapp, tmp_path):
 
 
 def test_thumbnail_does_not_mutate_shared_photo(qapp, tmp_path):
-    """I-2 界面侧：挂完缩略图 self.photos[-1] 仍是原图尺寸，未被 thumbnail 改小。"""
+    """I-2 界面侧：挂完缩略图 pool[-1]["img"] 仍是原图尺寸，未被 thumbnail 改小。"""
     w = MainWindow(st=_store(tmp_path))
     paths = _make_photos(tmp_path, n=1)          # 400×200
     w.append_photo(paths[0])
-    assert w.photos[-1].size == (400, 200)
-
-
-def test_rotate_keeps_thumbnail_unchanged(qapp, tmp_path):
-    """spec 决策 1：旋转只改文字 ↻ 后缀，不重生成/改动图标。"""
-    w = MainWindow(st=_store(tmp_path))
-    paths = _make_photos(tmp_path, n=1)
-    w.append_photo(paths[0])
-    w.photo_list.setCurrentRow(0)
-    before = w.photo_list.item(0).icon().pixmap(64, 64).toImage()
-    w._on_rotate()
-    assert "↻90°" in w.photo_list.item(0).text()
-    after = w.photo_list.item(0).icon().pixmap(64, 64).toImage()
-    assert before == after
+    assert w.pool[-1]["img"].size == (400, 200)

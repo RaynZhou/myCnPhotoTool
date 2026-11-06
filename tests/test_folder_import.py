@@ -95,7 +95,7 @@ def test_import_folder_adds_sorted(qapp, tmp_path):
     n = w.import_folder(str(src))
     assert n == 3
     assert w.photo_list.count() == 3
-    assert len(w.photos) == 3
+    assert len(w.pool) == 3
     texts = [w.photo_list.item(i).text() for i in range(3)]
     assert texts[0].startswith("a.tif") and texts[1].startswith("b.png") \
         and texts[2].startswith("c.jpg")
@@ -109,7 +109,7 @@ def test_import_folder_bad_image_flags_and_continues(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     n = w.import_folder(str(src))
     assert n == 2                                  # 两张都识别入列
-    assert w.photos.count(None) == 1               # 坏图为 None 占位
+    assert sum(1 for e in w.pool if e["img"] is None) == 1   # 坏图为 None 占位
     assert w.photo_list.item(0).text().startswith("broken")   # broken < good
     assert "（读取失败）" in w.photo_list.item(0).text()
 

@@ -67,6 +67,7 @@ def _win(tmp_path, api=None, photos=1):
     w = MainWindow(st=_store(tmp_path), printer_api=api or FakePrinterApi())
     for i in range(photos):
         w.append_photo(_landscape(tmp_path, f"p{i}.png"))
+        w.place(i, i)                    # 增量②：入库后需显式放置才进版面可打印
     return w
 
 

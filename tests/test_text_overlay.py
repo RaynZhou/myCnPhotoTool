@@ -1,9 +1,14 @@
 """叠加文字的纯几何：字号 dpi 无关、四角锚点、内缩边距。"""
+import os
+
 import pytest
 
 pytest.importorskip("PIL", reason="需要 Pillow")
 
+from PIL import Image  # noqa: E402
+
 from photoprint.core import units  # noqa: E402
+from photoprint.core import text_overlay as to  # noqa: E402
 from photoprint.core.text_overlay import (Corner, TextSpec, FONT_TABLE,  # noqa: E402
                                           size_px, inset_px, anchor_point)
 
@@ -36,3 +41,76 @@ def test_textspec_defaults_and_font_table_shape():
     assert s.enabled is False and s.corner == Corner.BR and s.alpha == 255
     for key, (reg, bold) in FONT_TABLE.items():
         assert isinstance(reg, str) and (bold is None or isinstance(bold, str))
+
+
+def _arial():
+    p = os.path.join(r"C:\Windows\Fonts", "arial.ttf")
+    return p if os.path.isfile(p) else None
+
+
+def _spec(**kw):
+    base = dict(enabled=True, font_key="t", size_mm=24.0, weight="normal",
+                corner=Corner.TL, rgb=(255, 0, 0), alpha=255, margin_pct=4.0)
+    base.update(kw)
+    return TextSpec(**base)
+
+
+def test_draw_overlay_solid_glyph_present(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    page = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(), "DATE", 25.4)
+    assert max(p[0] for p in page.getdata()) == 255      # 实心红
+
+
+def test_draw_overlay_alpha_is_semi(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    page = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(alpha=128), "DATE", 25.4)
+    peak = max(p[0] for p in page.getdata())
+    assert 0 < peak < 255                                 # 半透明压在黑底上
+
+
+def test_draw_overlay_clips_to_cell(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    page = Image.new("RGB", (300, 300), (0, 0, 0))
+    to.draw_overlay(page, (50, 50, 100, 100), _spec(), "MD", 25.4)
+    # 格 (50..150,50..150) 之外一律零污染（验逐格 clip + 落位偏移）
+    assert page.crop((150, 150, 300, 300)).getbbox() is None
+    assert page.crop((0, 0, 50, 300)).getbbox() is None
+
+
+def test_draw_overlay_missing_font_skips(monkeypatch):
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (r"C:\nope\no.ttf", None)})
+    page = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(), "DATE", 25.4)
+    assert page.getbbox() is None                           # 未画、未抛
+
+
+def test_draw_overlay_disabled_or_empty_noop(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    page = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(enabled=False), "DATE", 25.4)
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(), "", 25.4)
+    assert page.getbbox() is None
+
+
+def test_draw_overlay_bold_stroke_fallback_when_no_bold_file(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})   # 无粗体文件
+    page = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 120), _spec(weight="bold"), "WWW", 25.4)
+    assert max(p[0] for p in page.getdata()) == 255               # stroke 合成仍画出

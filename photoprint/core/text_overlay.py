@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from PIL import ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
 from photoprint.core import units
 
@@ -67,3 +67,62 @@ def anchor_point(corner, cell_wh, text_wh, inset):
     if corner == Corner.BL:
         return (inset, ch - th - inset)
     return (cw - tw - inset, ch - th - inset)   # BR
+
+
+def _load_font(path, size):
+    try:
+        return ImageFont.truetype(path, size)
+    except (OSError, ValueError):
+        return None
+
+
+def draw_overlay(page, cell_rect_px, spec, text, dpi):
+    """在 page(RGB) 的 cell_rect_px=(x,y,w,h) 格内画 text，逐格 clip 合成。
+
+    前置不满足（未启用 / 空文字 / 格尺寸非法 / 字体缺失 / 缩到仍放不下）一律
+    静默返回，绝不抛——一次坏叠加不得把整页渲染打死。"""
+    if not spec.enabled or not text:
+        return
+    x, y, cw, ch = (int(v) for v in cell_rect_px)
+    if cw <= 0 or ch <= 0:
+        return
+    paths = FONT_TABLE.get(spec.font_key)
+    if not paths:
+        return
+    reg, bold = paths
+    stroke = 0
+    if spec.weight == "bold" and bold and os.path.isfile(bold):
+        font_path = bold
+    else:
+        font_path = reg
+        if spec.weight == "bold":
+            stroke = max(1, size_px(spec.size_mm, dpi) // 12)
+    if not font_path or not os.path.isfile(font_path):
+        return
+    size = size_px(spec.size_mm, dpi)
+    font = _load_font(font_path, size)
+    if font is None:
+        return
+    inset = inset_px(spec.margin_pct, (cw, ch))
+    avail_w, avail_h = cw - 2 * inset, ch - 2 * inset
+    measure = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    tw = th = 0
+    l = t = 0
+    for _ in range(3):                       # 超长降级：缩字号重算 ≤3 次
+        l, t, tw, th = measure.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        if tw <= avail_w or size <= 1:
+            break
+        size = max(1, int(size * 0.8))
+        font = _load_font(font_path, size)
+        if font is None:
+            return
+    if tw > avail_w or th > avail_h:
+        return
+    ax, ay = anchor_point(spec.corner, (cw, ch), (tw, th), inset)
+    layer = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+    fill = tuple(spec.rgb)[:3] + (int(spec.alpha),)
+    ImageDraw.Draw(layer).text((ax - l, ay - t), text, font=font, fill=fill,
+                               stroke_width=stroke, stroke_fill=fill)
+    region = page.crop((x, y, x + cw, y + ch)).convert("RGBA")
+    region = Image.alpha_composite(region, layer)
+    page.paste(region.convert("RGB"), (x, y))

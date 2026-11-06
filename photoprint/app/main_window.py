@@ -31,6 +31,22 @@ OFFSET_MAX_PCT = 50
 THUMB_PX = 40
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
+
+
+def list_folder_images(dir_path):
+    """顶层、按 IMAGE_EXTS（大小写不敏感）筛选、按路径小写排序的图片路径。
+
+    目录不存在/不可读一律返回 []——窗口化 exe 无控制台，异常外抛即静默闪退。
+    仅取文件、不递归子目录（增量①明确排除递归）。
+    """
+    try:
+        entries = list(Path(dir_path).iterdir())
+    except (OSError, ValueError):
+        return []
+    imgs = [str(p) for p in entries
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+    return sorted(imgs, key=lambda s: s.lower())
 
 
 def _spin(lo, hi, value=0.0):

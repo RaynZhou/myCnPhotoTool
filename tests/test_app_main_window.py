@@ -1,4 +1,5 @@
 """界面冒烟：offscreen 下构造窗口、驱动一次排版与导出，不碰文件对话框。"""
+import os
 import re
 
 import pytest
@@ -569,3 +570,52 @@ def test_gallery_failed_item_text_marks_failure(qapp, tmp_path):
     item = w.photo_list.item(0)
     assert item.text().split("\n")[-1] == "读取失败"
     assert item.foreground().color() == QColor(ERROR_COLOR)
+
+
+def test_params_builds_two_text_specs(qapp, tmp_path):
+    from photoprint.core.text_overlay import TextSpec
+    w = MainWindow(st=_store(tmp_path))
+    p = w._params()
+    assert isinstance(p["date_overlay"], TextSpec)
+    assert isinstance(p["watermark_overlay"], TextSpec)
+    assert p["date_overlay"].enabled is False          # 默认关
+
+
+def test_enabling_watermark_reaches_job(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.wm_enabled.setChecked(True)
+    w.wm_text.setText("样片")
+    w._rebuild_job()
+    assert w.job.watermark_overlay.enabled is True
+    assert w.job.watermark_overlay.text == "样片"
+
+
+def test_append_photo_stores_date_text(qapp, tmp_path):
+    import time
+    w = MainWindow(st=_store(tmp_path))
+    p = _make_photos(tmp_path, 1)[0]
+    w.append_photo(p)
+    got = w.pool[0]["date"]
+    want = time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(p)))
+    assert got == want                                   # 无 EXIF→mtime 日期
+
+
+def test_rebuild_materializes_date_texts(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.date_enabled.setChecked(True)
+    _fill(w, tmp_path, n=2)
+    assert w.job.date_texts[0] is not None
+    assert w.job.date_overlay.enabled is True
+
+
+def test_overlay_persist_roundtrip(qapp, tmp_path):
+    st = _store(tmp_path)
+    w = MainWindow(st=st)
+    w.date_enabled.setChecked(True)
+    w.date_size.setValue(9.0)
+    w.date_corner.setCurrentIndex(1)                     # 右上
+    w.save_last_job()
+    w2 = MainWindow(st=_store(tmp_path))                 # 同 store 路径
+    assert w2.date_enabled.isChecked() is True
+    assert abs(w2.date_size.value() - 9.0) < 1e-6
+    assert w2.date_corner.currentIndex() == 1

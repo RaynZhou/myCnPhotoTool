@@ -10,15 +10,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QIcon
-from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
-                               QFormLayout, QHBoxLayout, QLabel, QListWidget,
-                               QListView, QListWidgetItem, QMainWindow, QMenu,
-                               QMessageBox, QPushButton, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
+                               QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListView,
+                               QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+                               QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from photoprint import jobs
 from photoprint.app import view, worker
 from photoprint.app.preview_view import PreviewView
 from photoprint.core import modes, render, specs, store
+from photoprint.core.text_overlay import Corner, TextSpec
 
 MODE_LABELS = (
     ("自动", None),
@@ -33,6 +35,12 @@ GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
+FONT_CHOICES = (("微软雅黑", "yahei"), ("黑体", "heiti"), ("宋体", "songti"),
+                ("Arial", "arial"))
+WEIGHT_CHOICES = (("常规", "normal"), ("加粗", "bold"))
+CORNER_CHOICES = (("左上", Corner.TL), ("右上", Corner.TR),
+                  ("左下", Corner.BL), ("右下", Corner.BR))
+OVERLAY_DEFAULT_RGB = (255, 255, 255)
 
 
 def list_folder_images(dir_path):
@@ -113,6 +121,13 @@ class MainWindow(QMainWindow):
         for w in (self.sheet_box, self.cell_box, self.mode_box, self.gap_box,
                   self.bleed_box, self.dpi_box, self.h_slider, self.v_slider):
             _connect_param_changed(w, self._debounce.start)
+        for w in (self.date_font, self.date_size, self.date_weight,
+                  self.date_corner, self.wm_font, self.wm_size,
+                  self.wm_weight, self.wm_corner, self.wm_alpha):
+            _connect_param_changed(w, self._debounce.start)
+        for cb in (self.date_enabled, self.wm_enabled):
+            cb.toggled.connect(lambda _: self._debounce.start())
+        self.wm_text.textChanged.connect(lambda _: self._debounce.start())
         self._restore_last_job()
         self._refresh()
 
@@ -205,6 +220,59 @@ class MainWindow(QMainWindow):
         panel.addRow("水平微调", _slider_row(self.h_slider, self.h_label))
         panel.addRow("垂直微调", _slider_row(self.v_slider, self.v_label))
 
+        overlay = QGroupBox("文字叠加")
+        ovl = QVBoxLayout(overlay)
+        self._date_rgb = OVERLAY_DEFAULT_RGB
+        self._wm_rgb = OVERLAY_DEFAULT_RGB
+
+        self.date_enabled = QCheckBox("日期标签")
+        self.date_font = QComboBox()
+        for label, key in FONT_CHOICES:
+            self.date_font.addItem(label, key)
+        self.date_size = _spin(1.0, 30.0, 4.0)
+        self.date_weight = QComboBox()
+        for label, key in WEIGHT_CHOICES:
+            self.date_weight.addItem(label, key)
+        self.date_corner = QComboBox()
+        for label, key in CORNER_CHOICES:
+            self.date_corner.addItem(label, key)
+        self.date_color_btn = QPushButton()
+        self.date_color_btn.clicked.connect(self._pick_date_color)
+        drow = QHBoxLayout()
+        for widget in (self.date_font, self.date_size, self.date_weight,
+                       self.date_corner, self.date_color_btn):
+            drow.addWidget(widget)
+        ovl.addWidget(self.date_enabled)
+        ovl.addLayout(drow)
+
+        self.wm_enabled = QCheckBox("文字水印")
+        self.wm_text = QLineEdit()
+        self.wm_font = QComboBox()
+        for label, key in FONT_CHOICES:
+            self.wm_font.addItem(label, key)
+        self.wm_size = _spin(1.0, 30.0, 6.0)
+        self.wm_weight = QComboBox()
+        for label, key in WEIGHT_CHOICES:
+            self.wm_weight.addItem(label, key)
+        self.wm_corner = QComboBox()
+        for label, key in CORNER_CHOICES:
+            self.wm_corner.addItem(label, key)
+        self.wm_color_btn = QPushButton()
+        self.wm_color_btn.clicked.connect(self._pick_wm_color)
+        self.wm_alpha = QSlider(Qt.Horizontal)
+        self.wm_alpha.setRange(0, 100)
+        self.wm_alpha.setValue(50)
+        wrow = QHBoxLayout()
+        for widget in (self.wm_font, self.wm_size, self.wm_weight,
+                       self.wm_corner, self.wm_color_btn, self.wm_alpha):
+            wrow.addWidget(widget)
+        ovl.addWidget(self.wm_enabled)
+        ovl.addWidget(self.wm_text)
+        ovl.addLayout(wrow)
+        panel.addRow(overlay)
+
+        self._refresh_overlay_btn_colors()
+
         self.preview = PreviewView()
         self.preview.cellClicked.connect(self._on_cell_clicked)
         self.preview.cellContextMenuRequested.connect(self._on_cell_context_menu)
@@ -244,6 +312,22 @@ class MainWindow(QMainWindow):
             "dpi": float(self.dpi_box.currentData()),
             "offset_pct": (float(self.h_slider.value()),
                            float(self.v_slider.value())),
+            "date_overlay": TextSpec(
+                enabled=self.date_enabled.isChecked(),
+                font_key=self.date_font.currentData(),
+                size_mm=float(self.date_size.value()),
+                weight=self.date_weight.currentData(),
+                corner=self.date_corner.currentData(),
+                rgb=self._date_rgb, alpha=255),
+            "watermark_overlay": TextSpec(
+                enabled=self.wm_enabled.isChecked(),
+                text=self.wm_text.text(),
+                font_key=self.wm_font.currentData(),
+                size_mm=float(self.wm_size.value()),
+                weight=self.wm_weight.currentData(),
+                corner=self.wm_corner.currentData(),
+                rgb=self._wm_rgb,
+                alpha=int(round(self.wm_alpha.value() / 100.0 * 255))),
         }
 
     def _ensure_count(self):
@@ -339,11 +423,18 @@ class MainWindow(QMainWindow):
             if 0 <= slot < n and 0 <= pi < len(self.pool):
                 photos[slot] = self.pool[pi]["img"]
         rotations = [self.cell_rot.get(i, 0) for i in range(n)]
+        date_texts = [None] * n
+        for slot, pi in self.placements.items():
+            if 0 <= slot < n and 0 <= pi < len(self.pool):
+                date_texts[slot] = self.pool[pi].get("date")
         try:
             self.job = jobs.build_job(self.st, photos, p["sheet_key"], p["cell_key"],
                                       gap_mm=p["gap_mm"], bleed_mm=p["bleed_mm"],
                                       mode=p["mode"], offset_pct=p["offset_pct"],
-                                      rotations=rotations)
+                                      rotations=rotations,
+                                      date_overlay=p["date_overlay"],
+                                      watermark_overlay=p["watermark_overlay"],
+                                      date_texts=date_texts)
         except ValueError as exc:
             self.job = None
             self._set_status(str(exc), error=True)
@@ -470,6 +561,26 @@ class MainWindow(QMainWindow):
             self._maybe_shrink_pages()              # 离开空末页时收缩
             self._refresh()
 
+    def _pick_date_color(self):
+        c = QColorDialog.getColor(QColor(*self._date_rgb), self, "日期颜色")
+        if c.isValid():
+            self._date_rgb = (c.red(), c.green(), c.blue())
+            self._refresh_overlay_btn_colors()
+            self._debounce.start()
+
+    def _pick_wm_color(self):
+        c = QColorDialog.getColor(QColor(*self._wm_rgb), self, "水印颜色")
+        if c.isValid():
+            self._wm_rgb = (c.red(), c.green(), c.blue())
+            self._refresh_overlay_btn_colors()
+            self._debounce.start()
+
+    def _refresh_overlay_btn_colors(self):
+        for btn, rgb in ((self.date_color_btn, self._date_rgb),
+                         (self.wm_color_btn, self._wm_rgb)):
+            btn.setStyleSheet(
+                "background:rgb(%d,%d,%d);border:1px solid #888;" % rgb)
+
     def _set_status(self, text, error=False):
         self.statusBar().setStyleSheet(f"color:{ERROR_COLOR}" if error else "")
         self.statusBar().showMessage(text)
@@ -512,13 +623,14 @@ class MainWindow(QMainWindow):
         try:
             img = jobs.load_photo(path)
         except Exception as exc:      # IO 边界什么都可能抛，全部收敛
-            self.pool.append({"path": str(path), "img": None})
+            self.pool.append({"path": str(path), "img": None, "date": None})
             item = QListWidgetItem(self._photo_item_text(name, None))
             item.setForeground(QColor(ERROR_COLOR))
             self.photo_list.addItem(item)
             self._set_status(f"无法读取 {name}：{exc}", error=True)
             return
-        self.pool.append({"path": str(path), "img": img})
+        self.pool.append({"path": str(path), "img": img,
+                          "date": jobs.photo_date_text(path)})
         item = QListWidgetItem(self._photo_item_text(name, img))
         item.setIcon(QIcon(view.to_thumbnail(img, GALLERY_THUMB_PX)))
         self.photo_list.addItem(item)
@@ -656,6 +768,20 @@ class MainWindow(QMainWindow):
             "pool_paths": [e["path"] for e in self.pool],
             "placements": {str(s): pi for s, pi in self.placements.items()},
             "cell_rot": {str(s): a for s, a in self.cell_rot.items() if a},
+            "date_overlay": {"enabled": self.date_enabled.isChecked(),
+                             "font_key": self.date_font.currentData(),
+                             "size_mm": float(self.date_size.value()),
+                             "weight": self.date_weight.currentData(),
+                             "corner": self.date_corner.currentData(),
+                             "rgb": list(self._date_rgb)},
+            "watermark_overlay": {"enabled": self.wm_enabled.isChecked(),
+                                  "text": self.wm_text.text(),
+                                  "font_key": self.wm_font.currentData(),
+                                  "size_mm": float(self.wm_size.value()),
+                                  "weight": self.wm_weight.currentData(),
+                                  "corner": self.wm_corner.currentData(),
+                                  "rgb": list(self._wm_rgb),
+                                  "alpha_pct": self.wm_alpha.value()},
             "pages": self._pages})
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
@@ -696,6 +822,35 @@ class MainWindow(QMainWindow):
             self._safe(lambda: self._restore_placements(job))
         else:
             self._safe(lambda: self._migrate_sequential(job))
+        self._restore_overlay(job.get("date_overlay"), is_date=True)
+        self._restore_overlay(job.get("watermark_overlay"), is_date=False)
+
+    def _restore_overlay(self, d, is_date):
+        if not isinstance(d, dict):
+            return
+        box = self.date_enabled if is_date else self.wm_enabled
+        self._safe(lambda: box.setChecked(bool(d.get("enabled", False))))
+        for key, cb in (("font_key", self.date_font if is_date else self.wm_font),
+                        ("weight", self.date_weight if is_date else self.wm_weight),
+                        ("corner", self.date_corner if is_date else self.wm_corner)):
+            v = d.get(key)
+            if v is not None:
+                self._safe(lambda c=cb, val=v: self._select_by_data(c, val))
+        size = self.date_size if is_date else self.wm_size
+        if isinstance(d.get("size_mm"), (int, float)):
+            self._safe(lambda b=size, v=float(d["size_mm"]): b.setValue(v))
+        rgb = d.get("rgb")
+        if isinstance(rgb, (list, tuple)) and len(rgb) == 3:
+            if is_date:
+                self._date_rgb = tuple(int(x) for x in rgb)
+            else:
+                self._wm_rgb = tuple(int(x) for x in rgb)
+        if not is_date:
+            if isinstance(d.get("text"), str):
+                self._safe(lambda: self.wm_text.setText(d["text"]))
+            if isinstance(d.get("alpha_pct"), (int, float)):
+                self._safe(lambda: self.wm_alpha.setValue(int(d["alpha_pct"])))
+        self._safe(self._refresh_overlay_btn_colors)
 
     def _restore_placements(self, job):
         """新 schema：placements/cell_rot/pages 逐条降级（引用完整性优先）。"""

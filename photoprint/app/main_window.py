@@ -40,6 +40,8 @@ FONT_CHOICES = (("微软雅黑", "yahei"), ("黑体", "heiti"), ("宋体", "song
 WEIGHT_CHOICES = (("常规", "normal"), ("加粗", "bold"))
 CORNER_CHOICES = (("左上", Corner.TL), ("右上", Corner.TR),
                   ("左下", Corner.BL), ("右下", Corner.BR))
+ROTATION_LABELS = (("0°", 0), ("45°", 45), ("90°", 90), ("135°", 135),
+                   ("180°", 180), ("225°", 225), ("270°", 270), ("315°", 315))
 OVERLAY_DEFAULT_RGB = (255, 255, 255)
 
 
@@ -104,6 +106,9 @@ class MainWindow(QMainWindow):
         self.page_index = 0
         self._current_cell = None  # 预览选中的全局槽位
         self._place_source = None  # 当前作为放置源的库下标（None=无选中，点格纯选中）
+        self._ov_base = None       # 全局默认（未选中时面板编辑它），_build_ui 后初始化
+        self._ov_editing = None    # 当前编辑的 pool 下标（None＝编辑默认）
+        self._ov_loading = False   # 载入照片值时阻断回写
         self._count_last = None    # 上次每页格数（检测结构性布局变更）
         self.job = None
         self._thread = None
@@ -112,6 +117,7 @@ class MainWindow(QMainWindow):
         self._stale = []        # wait 超时没停干净的旧线程，留住引用防其在跑时被回收
         self.setWindowTitle("相片打印助手")
         self._build_ui()
+        self._ov_base = self._read_overlay_widgets()
         self._load_printers()
         # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
         self._debounce = QTimer(self)
@@ -122,9 +128,11 @@ class MainWindow(QMainWindow):
                   self.bleed_box, self.dpi_box, self.h_slider, self.v_slider):
             _connect_param_changed(w, self._debounce.start)
         for w in (self.date_font, self.date_size, self.date_weight,
-                  self.date_corner, self.wm_font, self.wm_size,
-                  self.wm_weight, self.wm_corner, self.wm_alpha):
+                  self.wm_font, self.wm_size,
+                  self.wm_weight, self.wm_alpha):
             _connect_param_changed(w, self._debounce.start)
+        for cb in (self.date_corner, self.date_rot, self.wm_corner, self.wm_rot):
+            cb.currentIndexChanged.connect(self._on_overlay_widget_changed)
         for cb in (self.date_enabled, self.wm_enabled):
             cb.toggled.connect(lambda _: self._debounce.start())
         self.wm_text.textChanged.connect(lambda _: self._debounce.start())
@@ -236,11 +244,14 @@ class MainWindow(QMainWindow):
         self.date_corner = QComboBox()
         for label, key in CORNER_CHOICES:
             self.date_corner.addItem(label, key)
+        self.date_rot = QComboBox()
+        for label, deg in ROTATION_LABELS:
+            self.date_rot.addItem(label, deg)
         self.date_color_btn = QPushButton()
         self.date_color_btn.clicked.connect(self._pick_date_color)
         drow = QHBoxLayout()
         for widget in (self.date_font, self.date_size, self.date_weight,
-                       self.date_corner, self.date_color_btn):
+                       self.date_corner, self.date_rot, self.date_color_btn):
             drow.addWidget(widget)
         ovl.addWidget(self.date_enabled)
         ovl.addLayout(drow)
@@ -257,6 +268,9 @@ class MainWindow(QMainWindow):
         self.wm_corner = QComboBox()
         for label, key in CORNER_CHOICES:
             self.wm_corner.addItem(label, key)
+        self.wm_rot = QComboBox()
+        for label, deg in ROTATION_LABELS:
+            self.wm_rot.addItem(label, deg)
         self.wm_color_btn = QPushButton()
         self.wm_color_btn.clicked.connect(self._pick_wm_color)
         self.wm_alpha = QSlider(Qt.Horizontal)
@@ -264,12 +278,16 @@ class MainWindow(QMainWindow):
         self.wm_alpha.setValue(50)
         wrow = QHBoxLayout()
         for widget in (self.wm_font, self.wm_size, self.wm_weight,
-                       self.wm_corner, self.wm_color_btn, self.wm_alpha):
+                       self.wm_corner, self.wm_rot, self.wm_color_btn, self.wm_alpha):
             wrow.addWidget(widget)
         ovl.addWidget(self.wm_enabled)
         ovl.addWidget(self.wm_text)
         ovl.addLayout(wrow)
         panel.addRow(overlay)
+
+        self.apply_overlay_btn = QPushButton("应用到所有照片")
+        self.apply_overlay_btn.clicked.connect(self._apply_overlay_to_all)
+        panel.addRow("", self.apply_overlay_btn)
 
         self._refresh_overlay_btn_colors()
 
@@ -318,6 +336,7 @@ class MainWindow(QMainWindow):
                 size_mm=float(self.date_size.value()),
                 weight=self.date_weight.currentData(),
                 corner=self.date_corner.currentData(),
+                rotation=self.date_rot.currentData(),
                 rgb=self._date_rgb, alpha=255),
             "watermark_overlay": TextSpec(
                 enabled=self.wm_enabled.isChecked(),
@@ -326,6 +345,7 @@ class MainWindow(QMainWindow):
                 size_mm=float(self.wm_size.value()),
                 weight=self.wm_weight.currentData(),
                 corner=self.wm_corner.currentData(),
+                rotation=self.wm_rot.currentData(),
                 rgb=self._wm_rgb,
                 alpha=int(round(self.wm_alpha.value() / 100.0 * 255))),
         }
@@ -427,6 +447,15 @@ class MainWindow(QMainWindow):
         for slot, pi in self.placements.items():
             if 0 <= slot < n and 0 <= pi < len(self.pool):
                 date_texts[slot] = self.pool[pi].get("date")
+        date_over = [None] * n
+        wm_over = [None] * n
+        for slot, pi in self.placements.items():
+            if 0 <= slot < n and 0 <= pi < len(self.pool):
+                e = self.pool[pi]
+                date_over[slot] = (e.get("date_corner", self._ov_base["date_corner"]),
+                                   e.get("date_rot", self._ov_base["date_rot"]))
+                wm_over[slot] = (e.get("wm_corner", self._ov_base["wm_corner"]),
+                                 e.get("wm_rot", self._ov_base["wm_rot"]))
         try:
             self.job = jobs.build_job(self.st, photos, p["sheet_key"], p["cell_key"],
                                       gap_mm=p["gap_mm"], bleed_mm=p["bleed_mm"],
@@ -434,7 +463,9 @@ class MainWindow(QMainWindow):
                                       rotations=rotations,
                                       date_overlay=p["date_overlay"],
                                       watermark_overlay=p["watermark_overlay"],
-                                      date_texts=date_texts)
+                                      date_texts=date_texts,
+                                      date_overrides=date_over,
+                                      wm_overrides=wm_over)
         except ValueError as exc:
             self.job = None
             self._set_status(str(exc), error=True)
@@ -528,9 +559,13 @@ class MainWindow(QMainWindow):
             self.photo_list.clearSelection()
             self.photo_list.setCurrentRow(-1)      # 清当前行（高亮不再停留）
             self._set_status("已取消选中：点版面格将选中格（供旋转/清空格）")
+            self._ov_editing = None
+            self._load_overlay_widgets_from_base()
         else:
             self._place_source = row
             self.photo_list.setCurrentRow(row)
+            self._ov_editing = row
+            self._load_overlay_widgets_for(row)
 
     def _highlight_current_cell(self):
         """当前选中格高亮：仅当选中格落在当前页才映射到页内序。"""
@@ -581,6 +616,50 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(
                 "background:rgb(%d,%d,%d);border:1px solid #888;" % rgb)
 
+    def _read_overlay_widgets(self):
+        return {"date_corner": self.date_corner.currentData(),
+                "date_rot": self.date_rot.currentData(),
+                "wm_corner": self.wm_corner.currentData(),
+                "wm_rot": self.wm_rot.currentData()}
+
+    def _load_overlay_widgets_for(self, pi):
+        e = self.pool[pi]
+        self._ov_loading = True
+        try:
+            self._select_by_data(self.date_corner, e.get("date_corner", self._ov_base["date_corner"]))
+            self._select_by_data(self.date_rot, e.get("date_rot", self._ov_base["date_rot"]))
+            self._select_by_data(self.wm_corner, e.get("wm_corner", self._ov_base["wm_corner"]))
+            self._select_by_data(self.wm_rot, e.get("wm_rot", self._ov_base["wm_rot"]))
+        finally:
+            self._ov_loading = False
+
+    def _load_overlay_widgets_from_base(self):
+        self._ov_loading = True
+        try:
+            for key, cb in (("date_corner", self.date_corner), ("date_rot", self.date_rot),
+                            ("wm_corner", self.wm_corner), ("wm_rot", self.wm_rot)):
+                self._select_by_data(cb, self._ov_base[key])
+        finally:
+            self._ov_loading = False
+
+    def _on_overlay_widget_changed(self, *_):
+        if self._ov_loading:
+            return
+        vals = self._read_overlay_widgets()
+        pi = self._ov_editing
+        if pi is not None and 0 <= pi < len(self.pool):
+            self.pool[pi].update(vals)
+        else:
+            self._ov_base.update(vals)
+        self._debounce.start()
+
+    def _apply_overlay_to_all(self):
+        vals = self._read_overlay_widgets()
+        self._ov_base.update(vals)
+        for e in self.pool:
+            e.update(vals)
+        self._rebuild_job()
+
     def _set_status(self, text, error=False):
         self.statusBar().setStyleSheet(f"color:{ERROR_COLOR}" if error else "")
         self.statusBar().showMessage(text)
@@ -623,14 +702,22 @@ class MainWindow(QMainWindow):
         try:
             img = jobs.load_photo(path)
         except Exception as exc:      # IO 边界什么都可能抛，全部收敛
-            self.pool.append({"path": str(path), "img": None, "date": None})
+            self.pool.append({"path": str(path), "img": None, "date": None,
+                              "date_corner": self._ov_base["date_corner"],
+                              "date_rot": self._ov_base["date_rot"],
+                              "wm_corner": self._ov_base["wm_corner"],
+                              "wm_rot": self._ov_base["wm_rot"]})
             item = QListWidgetItem(self._photo_item_text(name, None))
             item.setForeground(QColor(ERROR_COLOR))
             self.photo_list.addItem(item)
             self._set_status(f"无法读取 {name}：{exc}", error=True)
             return
         self.pool.append({"path": str(path), "img": img,
-                          "date": jobs.photo_date_text(path)})
+                          "date": jobs.photo_date_text(path),
+                          "date_corner": self._ov_base["date_corner"],
+                          "date_rot": self._ov_base["date_rot"],
+                          "wm_corner": self._ov_base["wm_corner"],
+                          "wm_rot": self._ov_base["wm_rot"]})
         item = QListWidgetItem(self._photo_item_text(name, img))
         item.setIcon(QIcon(view.to_thumbnail(img, GALLERY_THUMB_PX)))
         self.photo_list.addItem(item)
@@ -653,6 +740,8 @@ class MainWindow(QMainWindow):
         self.page_index = 0
         self._current_cell = None
         self._place_source = None
+        self._ov_editing = None
+        self._load_overlay_widgets_from_base()
         self.photo_list.clear()
         self._refresh()
 

@@ -619,3 +619,64 @@ def test_overlay_persist_roundtrip(qapp, tmp_path):
     assert w2.date_enabled.isChecked() is True
     assert abs(w2.date_size.value() - 9.0) < 1e-6
     assert w2.date_corner.currentIndex() == 1
+
+
+def test_new_photo_seeds_overlay_from_base(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.date_corner.setCurrentIndex(3)                     # 无选中→写 base=右下
+    w.date_rot.setCurrentIndex(1)                       # 45°
+    w.append_photo(_make_photos(tmp_path, 1)[0])
+    assert w.pool[0]["date_corner"] == "br"
+    assert w.pool[0]["date_rot"] == 45
+
+
+def test_select_photo_loads_its_overlay(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)
+    w.pool[1]["date_corner"] = "bl"
+    w._on_photo_clicked(w.photo_list.item(1))
+    assert w._ov_editing == 1
+    assert w.date_corner.currentData() == "bl"
+
+
+def test_editing_selected_photo_writes_only_that_photo(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)
+    w._on_photo_clicked(w.photo_list.item(0))
+    base_before = dict(w._ov_base)
+    w.date_corner.setCurrentIndex(3)                    # 右下
+    assert w.pool[0]["date_corner"] == "br"
+    assert w._ov_base == base_before                    # base 不动
+    assert w.pool[1]["date_corner"] != "br"
+
+
+def test_deselect_restores_base(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.date_corner.setCurrentIndex(3)                    # base=br（无选中）
+    _fill(w, tmp_path, n=1)
+    w.pool[0]["date_corner"] = "tl"                     # 令照片≠base
+    item = w.photo_list.item(0)
+    w._on_photo_clicked(item)                           # 选中→tl
+    assert w.date_corner.currentData() == "tl"
+    w._on_photo_clicked(item)                           # 再点取消→回 base
+    assert w._ov_editing is None
+    assert w.date_corner.currentData() == "br"
+
+
+def test_apply_overlay_to_all(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)
+    w.date_corner.setCurrentIndex(3)                    # 右下（写 base）
+    w._apply_overlay_to_all()
+    assert w.pool[0]["date_corner"] == "br"
+    assert w.pool[1]["date_corner"] == "br"
+
+
+def test_rebuild_materializes_overrides(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.date_enabled.setChecked(True)
+    _fill(w, tmp_path, n=2)
+    w.pool[0]["date_corner"] = "br"
+    w._rebuild_job()
+    assert w.job.date_overrides[0] == ("br", w.pool[0]["date_rot"])
+    assert w.job.date_overrides[1] is not None

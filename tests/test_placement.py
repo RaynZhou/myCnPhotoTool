@@ -292,3 +292,22 @@ def test_selected_photo_shows_visible_selection(qapp, tmp_path):
     assert item.isSelected() is True
     w._on_photo_clicked(item)                    # 再点取消
     assert item.isSelected() is False
+
+
+def test_preview_emits_context_menu_signal(qapp):
+    """右键命中格 → 发 cellContextMenuRequested(页内序, 全局坐标)；命中空白不发。"""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QContextMenuEvent
+    from photoprint.app.preview_view import PreviewView
+    pv = PreviewView()
+    pv.resize(400, 300)
+    pv.set_geometry([(0, 0, 200, 150), (200, 0, 200, 150)], (400, 300))
+    got = []
+    pv.cellContextMenuRequested.connect(lambda pos, gp: got.append((pos, gp)))
+    pv.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse,
+                                          QPoint(50, 50), QPoint(50, 50)))
+    assert got and got[0][0] == 0
+    got.clear()
+    pv.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse,
+                                          QPoint(390, 290), QPoint(390, 290)))
+    assert got == []                            # 空白区不发

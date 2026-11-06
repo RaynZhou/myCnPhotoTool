@@ -5,7 +5,7 @@ mm/像素/裁切运算——守住 app 层红线。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QLabel
 
@@ -19,6 +19,7 @@ _EMPTY_TEXT = "（无预览）"
 
 class PreviewView(QLabel):
     cellClicked = Signal(int)          # 格内序 [0, count)
+    cellContextMenuRequested = Signal(int, QPoint)   # 页内序 + 菜单全局坐标
 
     def __init__(self, parent=None):
         super().__init__(_EMPTY_TEXT, parent)
@@ -74,6 +75,12 @@ class PreviewView(QLabel):
         idx = self.hit_position(event.position().x(), event.position().y())
         if idx is not None:
             self.cellClicked.emit(idx)
+
+    def contextMenuEvent(self, event):
+        """右键命中某格 → 发页内序 + 全局坐标；命中空白不发。放置语义交 MainWindow。"""
+        idx = self.hit_position(event.pos().x(), event.pos().y())
+        if idx is not None:
+            self.cellContextMenuRequested.emit(idx, event.globalPos())
 
     # ---------- 绘制格框 ----------
 

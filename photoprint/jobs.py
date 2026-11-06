@@ -89,6 +89,8 @@ class Job:
     date_overlay: object = None
     watermark_overlay: object = None
     date_texts: tuple = ()
+    date_overrides: tuple = ()
+    wm_overrides: tuple = ()
 
     @property
     def count(self) -> int:
@@ -130,6 +132,8 @@ class Job:
         # 切片后 rotations 必须同样切片，否则第 2 页起角度会错位到别的照片上
         rot_chunk = self.rotations[i:i + self.count]
         dt_chunk = self.date_texts[i:i + self.count]
+        do_chunk = self.date_overrides[i:i + self.count]
+        wo_chunk = self.wm_overrides[i:i + self.count]
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
@@ -137,14 +141,16 @@ class Job:
                                   rotations=rot_chunk,
                                   date_overlay=self.date_overlay,
                                   watermark_overlay=self.watermark_overlay,
-                                  date_texts=dt_chunk)
+                                  date_texts=dt_chunk,
+                                  date_overrides=do_chunk,
+                                  wm_overrides=wo_chunk)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               bleed_mm=modes.DEFAULT_BLEED_MM, mode=None,
               offset_pct=(0.0, 0.0), borderless_active=False,
               rotations=(), date_overlay=None, watermark_overlay=None,
-              date_texts=()) -> Job:
+              date_texts=(), date_overrides=(), wm_overrides=()) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active)
     # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
@@ -155,7 +161,9 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
                borderless_active=borderless_active,
                rotations=tuple(rotations),
                date_overlay=date_overlay, watermark_overlay=watermark_overlay,
-               date_texts=tuple(date_texts))
+               date_texts=tuple(date_texts),
+               date_overrides=tuple(date_overrides),
+               wm_overrides=tuple(wm_overrides))
 
 
 def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Image]:

@@ -47,3 +47,26 @@ def test_build_job_accepts_specs(tmp_path):
                          date_overlay=spec,
                          date_texts=["2025-01-02"])
     assert job.date_overlay is spec and job.date_texts == ("2025-01-02",)
+
+
+def test_build_job_accepts_overrides(tmp_path):
+    st = _store(tmp_path)
+    job = jobs.build_job(st, [Image.new("RGB", (200, 100))], "A4", "ID1",
+                         date_overrides=[("br", 45)], wm_overrides=[("tl", 90)])
+    assert job.date_overrides == (("br", 45),)
+    assert job.wm_overrides == (("tl", 90),)
+
+
+def test_job_overrides_reach_render(tmp_path, monkeypatch):
+    st = _store(tmp_path)
+    seen = {}
+    real = jobs.render.render_page
+
+    def spy(*a, **k):
+        seen["d"] = k.get("date_overrides")
+        return real(*a, **k)
+    monkeypatch.setattr(jobs.render, "render_page", spy)
+    job = jobs.build_job(st, [Image.new("RGB", (200, 100))], "A4", "ID1",
+                         date_texts=["2025-01-02"], date_overrides=[("br", 0)])
+    job.render(0, 96.0)
+    assert seen["d"] == (("br", 0),)

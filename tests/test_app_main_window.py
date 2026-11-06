@@ -680,3 +680,27 @@ def test_rebuild_materializes_overrides(qapp, tmp_path):
     w._rebuild_job()
     assert w.job.date_overrides[0] == ("br", w.pool[0]["date_rot"])
     assert w.job.date_overrides[1] is not None
+
+
+def test_overlay_per_photo_persist_roundtrip(qapp, tmp_path):
+    st = _store(tmp_path)
+    w = MainWindow(st=st)
+    _fill(w, tmp_path, n=2)
+    w._on_photo_clicked(w.photo_list.item(1))
+    w.date_corner.setCurrentIndex(3)                    # photo1→右下
+    w.date_rot.setCurrentIndex(2)                       # 90°
+    w.save_last_job()
+    w2 = MainWindow(st=_store(tmp_path))
+    assert w2.pool[1]["date_corner"] == "br"
+    assert w2.pool[1]["date_rot"] == 90
+    assert w2.pool[0]["date_corner"] != "br"            # photo0 保自己的
+
+
+def test_overlay_base_persist_roundtrip(qapp, tmp_path):
+    st = _store(tmp_path)
+    w = MainWindow(st=st)
+    w.date_corner.setCurrentIndex(1)                    # 无选中→base=右上
+    w.save_last_job()
+    w2 = MainWindow(st=_store(tmp_path))
+    assert w2._ov_base["date_corner"] == "tr"
+    assert w2.date_corner.currentData() == "tr"         # 未选中态即编辑默认

@@ -862,6 +862,7 @@ class MainWindow(QMainWindow):
                              "size_mm": float(self.date_size.value()),
                              "weight": self.date_weight.currentData(),
                              "corner": self.date_corner.currentData(),
+                             "rotation": self.date_rot.currentData(),
                              "rgb": list(self._date_rgb)},
             "watermark_overlay": {"enabled": self.wm_enabled.isChecked(),
                                   "text": self.wm_text.text(),
@@ -869,8 +870,12 @@ class MainWindow(QMainWindow):
                                   "size_mm": float(self.wm_size.value()),
                                   "weight": self.wm_weight.currentData(),
                                   "corner": self.wm_corner.currentData(),
+                                  "rotation": self.wm_rot.currentData(),
                                   "rgb": list(self._wm_rgb),
                                   "alpha_pct": self.wm_alpha.value()},
+            "ov_base": dict(self._ov_base),
+            "pool_ov": [[e.get("date_corner"), e.get("date_rot"),
+                         e.get("wm_corner"), e.get("wm_rot")] for e in self.pool],
             "pages": self._pages})
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
@@ -906,6 +911,13 @@ class MainWindow(QMainWindow):
         paths = job.get("pool_paths") if new_shape else job.get("photo_paths")
         for pth in (paths if isinstance(paths, (list, tuple)) else []):
             self.append_photo(str(pth))    # 坏图走标红占位、保留库下标对齐
+        pool_ov = job.get("pool_ov")
+        if isinstance(pool_ov, (list, tuple)):
+            for i, ov in enumerate(pool_ov):
+                if i < len(self.pool) and isinstance(ov, (list, tuple)) and len(ov) == 4:
+                    self._safe(lambda e=self.pool[i], v=ov: e.update({
+                        "date_corner": v[0], "date_rot": v[1],
+                        "wm_corner": v[2], "wm_rot": v[3]}))
         self._ensure_count()
         if new_shape:
             self._safe(lambda: self._restore_placements(job))
@@ -913,6 +925,13 @@ class MainWindow(QMainWindow):
             self._safe(lambda: self._migrate_sequential(job))
         self._restore_overlay(job.get("date_overlay"), is_date=True)
         self._restore_overlay(job.get("watermark_overlay"), is_date=False)
+        saved_base = job.get("ov_base")
+        if isinstance(saved_base, dict):
+            self._ov_base.update({k: saved_base[k] for k in
+                                  ("date_corner", "date_rot", "wm_corner", "wm_rot")
+                                  if k in saved_base})
+        self._ov_editing = None
+        self._load_overlay_widgets_from_base()
 
     def _restore_overlay(self, d, is_date):
         if not isinstance(d, dict):
@@ -921,10 +940,15 @@ class MainWindow(QMainWindow):
         self._safe(lambda: box.setChecked(bool(d.get("enabled", False))))
         for key, cb in (("font_key", self.date_font if is_date else self.wm_font),
                         ("weight", self.date_weight if is_date else self.wm_weight),
-                        ("corner", self.date_corner if is_date else self.wm_corner)):
+                        ("corner", self.date_corner if is_date else self.wm_corner),
+                        ("rotation", self.date_rot if is_date else self.wm_rot)):
             v = d.get(key)
             if v is not None:
-                self._safe(lambda c=cb, val=v: self._select_by_data(c, val))
+                self._ov_loading = True                   # 回灌控件不得反向写 _ov_base
+                try:
+                    self._safe(lambda c=cb, val=v: self._select_by_data(c, val))
+                finally:
+                    self._ov_loading = False
         size = self.date_size if is_date else self.wm_size
         if isinstance(d.get("size_mm"), (int, float)):
             self._safe(lambda b=size, v=float(d["size_mm"]): b.setValue(v))

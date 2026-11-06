@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw
 
-from photoprint.core import crop, modes, specs, units
+from photoprint.core import crop, modes, specs, text_overlay, units
 
 CUT_LINE_GRAY = 217  # 15% 灰：不抢画面，又能在照片上看见
 CUT_LINE_MM = 0.35
@@ -77,7 +77,8 @@ def _mask_bands(sheet, rect):
 
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
-                offset_pct=(0.0, 0.0), rotations=()):
+                offset_pct=(0.0, 0.0), rotations=(),
+                date_overlay=None, watermark_overlay=None, date_texts=()):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。
 
     rotations 是逐图顺时针角度（短于 photos 缺位按 0）：生效照片在取尺寸之前
@@ -137,6 +138,16 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         paste_x = units.mm_to_px(ox + dx, dpi)
         paste_y = units.mm_to_px(oy + dy, dpi)
         page.paste(piece, (paste_x, paste_y))
+
+        # 逐张叠加文字（日期/水印）：落位矩形为贴图区，逐格 clip 不溢邻格
+        rect_px = (paste_x, paste_y, piece.width, piece.height)
+        if watermark_overlay is not None and watermark_overlay.enabled:
+            text_overlay.draw_overlay(page, rect_px, watermark_overlay,
+                                      watermark_overlay.text, dpi)
+        if date_overlay is not None and date_overlay.enabled:
+            dt = date_texts[idx] if idx < len(date_texts) else None
+            if dt:
+                text_overlay.draw_overlay(page, rect_px, date_overlay, dt, dpi)
 
     # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；
     # 正常拼版下照片都在可打印区内，不会被遮罩压到

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel, QListWidget,
                                QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
@@ -28,6 +28,7 @@ MODE_LABELS = (
 DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
+THUMB_PX = 40
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
 
@@ -109,6 +110,7 @@ class MainWindow(QMainWindow):
 
         self.photo_list = QListWidget()
         self.photo_list.setFixedWidth(260)   # 只钉宽；高度不封顶，随窗口纵向伸展
+        self.photo_list.setIconSize(QSize(THUMB_PX, THUMB_PX))
         panel.addRow("照片", self.photo_list)
 
         add_btn = QPushButton("添加照片…")
@@ -326,8 +328,9 @@ class MainWindow(QMainWindow):
         self.photos.append(img)
         self.photo_paths.append(str(path))
         self.photo_rotations.append(0)
-        self.photo_list.addItem(
-            QListWidgetItem(self._photo_item_text(name, img, 0)))
+        item = QListWidgetItem(self._photo_item_text(name, img, 0))
+        item.setIcon(QIcon(view.to_thumbnail(img, THUMB_PX)))
+        self.photo_list.addItem(item)
 
     @staticmethod
     def _photo_item_text(name, img, angle):

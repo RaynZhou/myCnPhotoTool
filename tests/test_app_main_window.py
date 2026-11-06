@@ -535,3 +535,46 @@ def test_preview_rescales_on_window_resize(qapp, tmp_path):
     # 等比缩放后 pixmap 的长边（此处竖向：高）应贴合可用区，容差 1px
     assert pm.height() == pytest.approx(avail.height(), abs=1)
     assert pm.height() > 480        # 大于初始最小预览区，钉住“确实变大了”
+
+
+def test_photo_list_has_thumbnail_icon(qapp, tmp_path):
+    """加载成功的条目须带非空缩略图图标，且长边 ≤ 40（删 setIcon 则转红）。"""
+    w = MainWindow(st=_store(tmp_path))
+    paths = _make_photos(tmp_path, n=1)          # 400×200 横图
+    w.append_photo(paths[0])
+    icon = w.photo_list.item(0).icon()
+    assert not icon.isNull()
+    sizes = icon.availableSizes()
+    assert sizes and max(max(s.width(), s.height()) for s in sizes) <= 40
+
+
+def test_failed_photo_has_no_icon(qapp, tmp_path):
+    """读取失败占位项不挂图标，仍红字（钉住失败分支不回归）。"""
+    bad = tmp_path / "missing.jpg"
+    bad.write_bytes(b"not an image")
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(str(bad))
+    item = w.photo_list.item(0)
+    assert item.icon().isNull()
+    assert "（读取失败）" in item.text()
+
+
+def test_thumbnail_does_not_mutate_shared_photo(qapp, tmp_path):
+    """I-2 界面侧：挂完缩略图 self.photos[-1] 仍是原图尺寸，未被 thumbnail 改小。"""
+    w = MainWindow(st=_store(tmp_path))
+    paths = _make_photos(tmp_path, n=1)          # 400×200
+    w.append_photo(paths[0])
+    assert w.photos[-1].size == (400, 200)
+
+
+def test_rotate_keeps_thumbnail_unchanged(qapp, tmp_path):
+    """spec 决策 1：旋转只改文字 ↻ 后缀，不重生成/改动图标。"""
+    w = MainWindow(st=_store(tmp_path))
+    paths = _make_photos(tmp_path, n=1)
+    w.append_photo(paths[0])
+    w.photo_list.setCurrentRow(0)
+    before = w.photo_list.item(0).icon().pixmap(64, 64).toImage()
+    w._on_rotate()
+    assert "↻90°" in w.photo_list.item(0).text()
+    after = w.photo_list.item(0).icon().pixmap(64, 64).toImage()
+    assert before == after

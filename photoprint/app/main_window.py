@@ -17,7 +17,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDia
 
 from photoprint import jobs
 from photoprint.app import view, worker
-from photoprint.core import modes, specs, store
+from photoprint.app.preview_view import PreviewView
+from photoprint.core import modes, render, specs, store
 
 MODE_LABELS = (
     ("自动", None),
@@ -96,7 +97,6 @@ class MainWindow(QMainWindow):
         self._current_cell = None  # 预览选中的全局槽位
         self._count_last = None    # 上次每页格数（检测结构性布局变更）
         self.job = None
-        self._full_pm = None       # 未缩放整页 pixmap：resize 时据此重新适配预览
         self._thread = None
         self._task = None
         self._gen = 0
@@ -143,11 +143,16 @@ class MainWindow(QMainWindow):
         rotate_btn.setObjectName("rotate_btn")
         rotate_btn.clicked.connect(self._on_rotate)
         self.rotate_btn = rotate_btn
+        clear_cell_btn = QPushButton("清空格")
+        clear_cell_btn.setObjectName("clear_cell_btn")
+        clear_cell_btn.clicked.connect(self._on_clear_cell)
+        self.clear_cell_btn = clear_cell_btn
         btns = QHBoxLayout()
         btns.addWidget(add_btn)
         btns.addWidget(import_btn)
         btns.addWidget(clear_btn)
         btns.addWidget(rotate_btn)
+        btns.addWidget(clear_cell_btn)
         panel.addRow("", btns)
 
         # 纸张只列 role=paper；格子列 role=cell 加全部 role=paper（人设计 4.3）
@@ -191,9 +196,8 @@ class MainWindow(QMainWindow):
         panel.addRow("水平微调", _slider_row(self.h_slider, self.h_label))
         panel.addRow("垂直微调", _slider_row(self.v_slider, self.v_label))
 
-        self.preview = QLabel("（无预览）")
-        self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(360, 240)   # 只兜下限，随窗口自由伸展
+        self.preview = PreviewView()
+        self.preview.cellClicked.connect(self._on_cell_clicked)
         body.addWidget(self.preview, 1)
 
         nav = QHBoxLayout()
@@ -337,6 +341,10 @@ class MainWindow(QMainWindow):
             return
         self.page_index = min(self.page_index, self.job.page_count - 1)
         self.export_btn.setEnabled(self._has_any_photo())
+        img_wh, rects = render.page_cells_px(self.job.plan, self.job.sheet,
+                                              jobs.PREVIEW_DPI)
+        self.preview.set_geometry(rects, img_wh)
+        self._highlight_current_cell()
         if not cleared:                             # 结构性清空时保留“请重新摆放”引导，不被信息行覆盖
             self._set_status(f"每页 {self.job.count} 格 · 共 {self.job.page_count} 页 · "
                              f"{self.job.note}")
@@ -378,22 +386,31 @@ class MainWindow(QMainWindow):
     def _on_preview(self, image, gen):
         if gen != self._gen:
             return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
-        self._full_pm = view.to_pixmap(image)
-        self._rescale_preview()
+        self.preview.show_image(image)
 
-    def _rescale_preview(self):
-        """把整页 pixmap 等比缩到预览区当前尺寸；无图时什么都不做。"""
-        if self._full_pm is None or self._full_pm.isNull():
-            return
-        self.preview.setPixmap(self._full_pm.scaled(self.preview.size(),
-                                                    Qt.KeepAspectRatio,
-                                                    Qt.SmoothTransformation))
+    def _on_cell_clicked(self, position):
+        """统一入口：选库图 + 点格 → 放入；无选中 → 纯选中该格（供旋转/清空格）。"""
+        count = self._count_last or (self.job.count if self.job else 0)
+        slot = self.page_index * count + position
+        row = self.photo_list.currentRow()
+        if 0 <= row < len(self.pool):
+            self.place(slot, row)           # 选库图 + 点格 → 放入（与 2b 同入口）
+        else:
+            self._current_cell = slot       # 无选中 → 纯选中，供旋转/清空格
+        self._highlight_current_cell()
 
-    def resizeEvent(self, event):
-        """窗口尺寸变化（含最大化/还原）后重新适配预览：旧代码只在刷新时
-        缩放一次，拉窗后 pixmap 停在旧尺寸被裁/留白。"""
-        super().resizeEvent(event)
-        self._rescale_preview()
+    def _highlight_current_cell(self):
+        """当前选中格高亮：仅当选中格落在当前页才映射到页内序。"""
+        count = self._count_last or 0
+        pos = None
+        if self._current_cell is not None and count \
+                and self._current_cell // count == self.page_index:
+            pos = self._current_cell % count
+        self.preview.set_current_cell(pos)
+
+    def _on_clear_cell(self):
+        self.clear_cell(self._current_cell)
+        self._highlight_current_cell()
 
     def _on_render_failed(self, msg, gen):
         if gen == self._gen:

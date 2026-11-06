@@ -206,3 +206,59 @@ def test_migration_overlong_rotations_truncated(qapp, tmp_path):
     s.save()
     w = MainWindow(st=_store(tmp_path))
     assert w.cell_rot == {0: 90, 1: 180}
+
+
+def test_rebuild_injects_geometry(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    _settle(w, qapp)
+    assert len(w.preview._cell_rects_px) == w.job.count   # 预览拿到当页格框
+
+
+def test_click_places_selected_pool_photo(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(_make_photos(tmp_path, 1)[0])          # 库只 1 张，未放置
+    w._refresh()
+    w.photo_list.setCurrentRow(0)                          # 选中库图
+    count = w._count_last
+    w._on_cell_clicked(2)                                  # 第 1 页点第 3 格
+    assert w.placements == {2: 0}                          # 槽位 = 0*count+2
+    w.page_index = 1                                       # 翻到第 2 页再点：槽位须含页偏移
+    w._on_cell_clicked(2)
+    assert w.placements == {2: 0, count + 2: 0}            # 页内序 → 全局槽 = page*count+pos
+    assert w._current_cell == count + 2
+
+
+def test_click_without_selection_only_selects(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.photo_list.clearSelection()
+    assert w.photo_list.currentRow() == -1
+    before = dict(w.placements)
+    w._on_cell_clicked(1)
+    assert w.placements == before                          # 无库选中→不改放置
+    assert w._current_cell == 1
+
+
+def test_clear_cell_button_exists_and_clears(qapp, tmp_path):
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w._current_cell = 1
+    btn = w.findChild(type(w.export_btn), "clear_cell_btn")
+    assert btn is not None
+    btn.click()
+    assert 1 not in w.placements and 1 not in w.cell_rot
+
+
+def test_highlight_only_when_selected_cell_on_current_page(qapp, tmp_path):
+    """选中格不在当前页 → 不高亮（翻页会弃选中，此处直接置位验证映射护栏）。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)                       # count=4
+    count = w._count_last
+    w.page_index = 0
+    w._current_cell = count + 1              # 选中格在第 2 页
+    w._highlight_current_cell()
+    assert w.preview._current_cell is None   # 不在当前页 → 不高亮
+    w._current_cell = 1                      # 选中格回到当前页
+    w._highlight_current_cell()
+    assert w.preview._current_cell == 1

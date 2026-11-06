@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageOps
@@ -84,6 +86,9 @@ class Job:
     offset_pct: tuple[float, float] = (0.0, 0.0)
     borderless_active: bool = False
     rotations: tuple = ()   # 逐图顺时针角度，原样交 core 归一；短于 photos 缺位按 0
+    date_overlay: object = None
+    watermark_overlay: object = None
+    date_texts: tuple = ()
 
     @property
     def count(self) -> int:
@@ -124,17 +129,22 @@ class Job:
         # 角度与照片共用一个下标空间（第 i 张照片配 rotations[i]）：photos 按页
         # 切片后 rotations 必须同样切片，否则第 2 页起角度会错位到别的照片上
         rot_chunk = self.rotations[i:i + self.count]
+        dt_chunk = self.date_texts[i:i + self.count]
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
                                   offset_pct=self.offset_pct,
-                                  rotations=rot_chunk)
+                                  rotations=rot_chunk,
+                                  date_overlay=self.date_overlay,
+                                  watermark_overlay=self.watermark_overlay,
+                                  date_texts=dt_chunk)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               bleed_mm=modes.DEFAULT_BLEED_MM, mode=None,
               offset_pct=(0.0, 0.0), borderless_active=False,
-              rotations=()) -> Job:
+              rotations=(), date_overlay=None, watermark_overlay=None,
+              date_texts=()) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active)
     # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
@@ -143,9 +153,45 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
                photos=list(photos),
                offset_pct=tuple(float(v) for v in offset_pct),
                borderless_active=borderless_active,
-               rotations=tuple(rotations))
+               rotations=tuple(rotations),
+               date_overlay=date_overlay, watermark_overlay=watermark_overlay,
+               date_texts=tuple(date_texts))
 
 
 def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Image]:
     """CLI 用：等价于逐页调用 job.render，避免两边各写一套切页。"""
     return [job.render(i, dpi, show_mask) for i in range(job.page_count)]
+
+
+def _fmt_exif_dt(value):
+    """EXIF 'YYYY:MM:DD HH:MM:SS' → 'YYYY-MM-DD'；取不到日期段返回 None。"""
+    s = str(value).strip()
+    date_part = s.split(" ")[0].split("T")[0]
+    ymd = date_part.replace(":", "-").split("-")
+    if len(ymd) >= 3 and all(x.isdigit() for x in ymd[:3]):
+        return f"{int(ymd[0]):04d}-{int(ymd[1]):02d}-{int(ymd[2]):02d}"
+    return None
+
+
+def photo_date_text(path):
+    """逐张日期文本：EXIF DateTimeOriginal→DateTime→文件 mtime→None。绝不抛。"""
+    try:
+        with Image.open(path) as im:
+            exif = im.getexif()
+            raw = None
+            try:
+                ifd = exif.get_ifd(0x8769)             # ExifIFD
+                raw = ifd.get(36867) or ifd.get(306)   # DateTimeOriginal / DateTime
+            except Exception:
+                raw = None
+            raw = raw or exif.get(306)
+            if raw:
+                d = _fmt_exif_dt(raw)
+                if d:
+                    return d
+    except Exception:
+        pass
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return None

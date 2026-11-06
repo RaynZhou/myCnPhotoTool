@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
         self.photo_rotations = []  # 逐图顺时针角度，与 photos 严格等长同序
         self.page_index = 0
         self.job = None
+        self._full_pm = None      # 未缩放的整页 pixmap：resize 时据此重新适配预览
         self._thread = None
         self._task = None
         self._gen = 0
@@ -107,8 +108,7 @@ class MainWindow(QMainWindow):
         body.addLayout(panel)
 
         self.photo_list = QListWidget()
-        self.photo_list.setFixedWidth(260)
-        self.photo_list.setMaximumHeight(150)
+        self.photo_list.setFixedWidth(260)   # 只钉宽；高度不封顶，随窗口纵向伸展
         panel.addRow("照片", self.photo_list)
 
         add_btn = QPushButton("添加照片…")
@@ -168,7 +168,7 @@ class MainWindow(QMainWindow):
 
         self.preview = QLabel("（无预览）")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(360, 480)
+        self.preview.setMinimumSize(360, 240)   # 只兜下限，随窗口自由伸展
         body.addWidget(self.preview, 1)
 
         nav = QHBoxLayout()
@@ -267,9 +267,22 @@ class MainWindow(QMainWindow):
     def _on_preview(self, image, gen):
         if gen != self._gen:
             return                       # 被丢弃的慢线程迟到的旧帧，不覆盖当前页
-        pm = view.to_pixmap(image)
-        self.preview.setPixmap(pm.scaled(self.preview.size(), Qt.KeepAspectRatio,
-                                        Qt.SmoothTransformation))
+        self._full_pm = view.to_pixmap(image)
+        self._rescale_preview()
+
+    def _rescale_preview(self):
+        """把整页 pixmap 等比缩到预览区当前尺寸；无图时什么都不做。"""
+        if self._full_pm is None or self._full_pm.isNull():
+            return
+        self.preview.setPixmap(self._full_pm.scaled(self.preview.size(),
+                                                    Qt.KeepAspectRatio,
+                                                    Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        """窗口尺寸变化（含最大化/还原）后重新适配预览：旧代码只在刷新时
+        缩放一次，拉窗后 pixmap 停在旧尺寸被裁/留白。"""
+        super().resizeEvent(event)
+        self._rescale_preview()
 
     def _on_render_failed(self, msg, gen):
         if gen == self._gen:

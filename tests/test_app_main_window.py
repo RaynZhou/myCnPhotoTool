@@ -501,3 +501,37 @@ def test_rotations_out_of_range_still_renderable(qapp, tmp_path):
     assert w.photo_rotations == [-90]
     w._refresh()
     assert w.job is not None                              # 渲染路径不被坏角度打死
+
+
+def test_photo_list_stretches_vertically(qapp, tmp_path):
+    """照片列表只钉宽度，纵向必须可伸展：窗口拉高/最大化时列表随之变长，
+    而不是停在 150px 把空白全甩给下沿。断行为不断策略：旧代码 setFixedWidth
+    下 horizontalPolicy 仍是 Expanding，只有高度上限才是真正的 bug 根因。"""
+    w = MainWindow(st=_store(tmp_path))
+    w.resize(1400, 1000)
+    qapp.processEvents(QEventLoop.AllEvents, 50)
+    assert w.photo_list.width() <= 260        # 宽度仍受控（横向不随窗口无限拉）
+    assert w.photo_list.maximumHeight() >= w.photo_list.minimumHeight()
+    # 无高度封顶时才能吃到面板拉伸出的空间（旧代码上限 150 卡死）
+    assert w.photo_list.height() > 150
+
+
+def test_preview_rescales_on_window_resize(qapp, tmp_path):
+    """预览缩放必须在 resize 后重新适配：放大窗口后 pixmap 应填满新的
+    预览区高度（KeepAspectRatio 下以高为限），而不是停在旧尺寸被裁/留白。
+    牙在 resizeEvent 重缩放这一步——删掉它 pixmap 保持旧尺寸，断言转红。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    _settle(w, qapp)
+    w.showFullScreen()
+    qapp.processEvents(QEventLoop.AllEvents, 50)
+    w.showNormal()
+    qapp.processEvents(QEventLoop.AllEvents, 50)
+    w.resize(1400, 1000)
+    qapp.processEvents(QEventLoop.AllEvents, 50)
+    pm = w.preview.pixmap()
+    assert not pm.isNull()
+    avail = w.preview.size()
+    # 等比缩放后 pixmap 的长边（此处竖向：高）应贴合可用区，容差 1px
+    assert pm.height() == pytest.approx(avail.height(), abs=1)
+    assert pm.height() > 480        # 大于初始最小预览区，钉住“确实变大了”

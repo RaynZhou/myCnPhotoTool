@@ -1,0 +1,38 @@
+"""叠加文字的纯几何：字号 dpi 无关、四角锚点、内缩边距。"""
+import pytest
+
+pytest.importorskip("PIL", reason="需要 Pillow")
+
+from photoprint.core import units  # noqa: E402
+from photoprint.core.text_overlay import (Corner, TextSpec, FONT_TABLE,  # noqa: E402
+                                          size_px, inset_px, anchor_point)
+
+
+def test_size_px_scales_with_dpi():
+    # 同一 size_mm，dpi 越大像素越多（1px=1mm 时 size_mm 就是像素高）
+    assert size_px(4.0, 25.4) == 4
+    assert size_px(4.0, 25.4 * 3) == 12
+
+
+def test_size_px_never_zero():
+    assert size_px(0.0, 25.4) == 1
+
+
+def test_inset_px_is_pct_of_short_edge():
+    assert inset_px(10.0, (200, 100)) == 10          # 短边 100 的 10%
+    assert inset_px(4.0, (200, 250)) == 8            # 短边 200 的 4%
+
+
+def test_anchor_point_four_corners():
+    cw, ch, tw, th, ins = 100, 80, 30, 20, 4
+    assert anchor_point(Corner.TL, (cw, ch), (tw, th), ins) == (4, 4)
+    assert anchor_point(Corner.TR, (cw, ch), (tw, th), ins) == (100 - 30 - 4, 4)
+    assert anchor_point(Corner.BL, (cw, ch), (tw, th), ins) == (4, 80 - 20 - 4)
+    assert anchor_point(Corner.BR, (cw, ch), (tw, th), ins) == (100 - 30 - 4, 80 - 20 - 4)
+
+
+def test_textspec_defaults_and_font_table_shape():
+    s = TextSpec()
+    assert s.enabled is False and s.corner == Corner.BR and s.alpha == 255
+    for key, (reg, bold) in FONT_TABLE.items():
+        assert isinstance(reg, str) and (bold is None or isinstance(bold, str))

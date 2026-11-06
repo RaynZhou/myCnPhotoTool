@@ -471,13 +471,13 @@ def test_rotations_out_of_range_still_renderable(qapp, tmp_path):
 
 
 def test_photo_list_stretches_vertically(qapp, tmp_path):
-    """照片列表只钉宽度，纵向必须可伸展：窗口拉高/最大化时列表随之变长，
-    而不是停在 150px 把空白全甩给下沿。断行为不断策略：旧代码 setFixedWidth
-    下 horizontalPolicy 仍是 Expanding，只有高度上限才是真正的 bug 根因。"""
+    """照片库网格不钉死宽度、纵向可伸展：窗口拉高时列表随之变长（旧代码
+    高度上限 150 卡死才是 bug 根因）；宽度改为填满左侧字段列、与设置项对齐，
+    但仍限于左栏、不吃掉右侧预览区。"""
     w = MainWindow(st=_store(tmp_path))
     w.resize(1400, 1000)
     qapp.processEvents(QEventLoop.AllEvents, 50)
-    assert w.photo_list.width() <= 260        # 宽度仍受控（横向不随窗口无限拉）
+    assert w.photo_list.width() < w.width() // 2   # 仍在左栏，未吞掉预览区
     assert w.photo_list.maximumHeight() >= w.photo_list.minimumHeight()
     # 无高度封顶时才能吃到面板拉伸出的空间（旧代码上限 150 卡死）
     assert w.photo_list.height() > 150
@@ -532,3 +532,17 @@ def test_thumbnail_does_not_mutate_shared_photo(qapp, tmp_path):
     paths = _make_photos(tmp_path, n=1)          # 400×200
     w.append_photo(paths[0])
     assert w.pool[-1]["img"].size == (400, 200)
+
+
+def test_photo_list_is_wrapping_grid(qapp, tmp_path):
+    """照片库须是随栏宽换行的 IconMode 网格（图标在上、文字在下）。"""
+    from PySide6.QtWidgets import QListView
+    from photoprint.app.main_window import GALLERY_THUMB_PX
+    w = MainWindow(st=_store(tmp_path))
+    pl = w.photo_list
+    assert pl.viewMode() == QListView.IconMode
+    assert pl.isWrapping() is True
+    assert pl.movement() == QListView.Static
+    assert pl.wordWrap() is True
+    assert pl.iconSize().width() == GALLERY_THUMB_PX
+    assert pl.iconSize().height() == GALLERY_THUMB_PX

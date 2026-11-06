@@ -12,8 +12,8 @@ from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
-                               QSlider, QVBoxLayout, QWidget)
+                               QListView, QListWidgetItem, QMainWindow, QMessageBox,
+                               QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from photoprint import jobs
 from photoprint.app import view, worker
@@ -30,6 +30,7 @@ DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
 THUMB_PX = 40
+GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
@@ -129,8 +130,13 @@ class MainWindow(QMainWindow):
         body.addLayout(panel)
 
         self.photo_list = QListWidget()
-        self.photo_list.setFixedWidth(260)   # 只钉宽；高度不封顶，随窗口纵向伸展
-        self.photo_list.setIconSize(QSize(THUMB_PX, THUMB_PX))
+        self.photo_list.setViewMode(QListView.IconMode)   # 图标在上、文字在下、自动换行
+        self.photo_list.setMovement(QListView.Static)     # 格子固定不可拖拽重排
+        self.photo_list.setWrapping(True)                 # 随栏宽换行成多列
+        self.photo_list.setResizeMode(QListView.Adjust)   # 宽度变化时重排列数
+        self.photo_list.setWordWrap(True)                 # 长文件名换行
+        self.photo_list.setUniformItemSizes(True)         # 网格整齐 + 大数据性能
+        self.photo_list.setIconSize(QSize(GALLERY_THUMB_PX, GALLERY_THUMB_PX))
         self.photo_list.itemClicked.connect(self._on_photo_clicked)
         panel.addRow("照片", self.photo_list)
 

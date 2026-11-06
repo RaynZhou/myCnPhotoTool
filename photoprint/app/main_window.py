@@ -136,6 +136,8 @@ class MainWindow(QMainWindow):
         self.photo_list.setWordWrap(True)                 # 长文件名换行
         self.photo_list.setUniformItemSizes(True)         # 网格整齐 + 大数据性能
         self.photo_list.setIconSize(QSize(GALLERY_THUMB_PX, GALLERY_THUMB_PX))
+        self.photo_list.setStyleSheet(
+            "QListView::item:selected{background:#bcd4ff;border:2px solid #2b6cb0;}")
         self.photo_list.itemClicked.connect(self._on_photo_clicked)
         panel.addRow("照片", self.photo_list)
 

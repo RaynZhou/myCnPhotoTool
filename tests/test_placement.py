@@ -279,3 +279,16 @@ def test_reclick_selected_photo_deselects(qapp, tmp_path):
     w._on_cell_clicked(1)
     assert 1 not in w.placements                 # 不再放置
     assert w._current_cell == 1                  # 退化为纯选中
+
+
+def test_selected_photo_shows_visible_selection(qapp, tmp_path):
+    """选中态要看得出来：选中项须真正处于 selected 状态，且列表定义了
+    ::item:selected 样式（加深背景/边框）。再点取消后 selected 释放。"""
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(_make_photos(tmp_path, 1)[0])
+    item = w.photo_list.item(0)
+    assert "::item:selected" in w.photo_list.styleSheet()   # 有选中样式定义
+    w._on_photo_clicked(item)                    # 选中
+    assert item.isSelected() is True
+    w._on_photo_clicked(item)                    # 再点取消
+    assert item.isSelected() is False

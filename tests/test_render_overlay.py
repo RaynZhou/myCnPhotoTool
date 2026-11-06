@@ -76,3 +76,42 @@ def test_date_text_none_skips_that_photo(real_font):
     got = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
                   date_texts=[None] * plan.count)
     assert got.tobytes() == base.tobytes()
+
+
+def test_date_overrides_apply_per_cell(real_font):
+    a4, plan = _a4_id1()
+    ph = _photo()
+    spec = TextSpec(enabled=True, font_key="t", size_mm=6.0, corner=Corner.TL,
+                    rgb=(255, 255, 255), alpha=255)
+    # 同一份 spec（TL）：不带 override 画在 TL，带 override 逐格改 BR
+    at_tl = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                    date_texts=["2025-01-02"] * plan.count)
+    ov = [(Corner.BR, 0)] * plan.count
+    at_br = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                    date_texts=["2025-01-02"] * plan.count, date_overrides=ov)
+    assert at_br.tobytes() != at_tl.tobytes()            # 逐格覆盖真的挪了角
+
+
+def test_overrides_default_empty_equals_base(real_font):
+    a4, plan = _a4_id1()
+    ph = _photo()
+    spec = TextSpec(enabled=True, font_key="t", size_mm=6.0, corner=Corner.TL,
+                    rgb=(255, 255, 255), alpha=255)
+    none = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                   date_texts=["2025-01-02"] * plan.count)
+    empty = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                    date_texts=["2025-01-02"] * plan.count, date_overrides=())
+    assert none.tobytes() == empty.tobytes()             # 默认空＝向后兼容
+
+
+def test_override_none_element_uses_base(real_font):
+    a4, plan = _a4_id1()
+    ph = _photo()
+    spec = TextSpec(enabled=True, font_key="t", size_mm=6.0, corner=Corner.TL,
+                    rgb=(255, 255, 255), alpha=255)
+    ov = [None] * plan.count
+    got = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                  date_texts=["2025-01-02"] * plan.count, date_overrides=ov)
+    assert got.tobytes() == _render(a4, plan, [ph] * plan.count,
+                                    date_overlay=spec,
+                                    date_texts=["2025-01-02"] * plan.count).tobytes()

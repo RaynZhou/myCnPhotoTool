@@ -114,3 +114,59 @@ def test_draw_overlay_bold_stroke_fallback_when_no_bold_file(monkeypatch):
     page = Image.new("RGB", (200, 120), (0, 0, 0))
     to.draw_overlay(page, (0, 0, 200, 120), _spec(weight="bold"), "WWW", 25.4)
     assert max(p[0] for p in page.getdata()) == 255               # stroke 合成仍画出
+
+
+def test_textspec_rotation_default_and_presets():
+    assert TextSpec().rotation == 0
+    assert to.ROTATION_PRESETS == (0, 45, 90, 135, 180, 225, 270, 315)
+
+
+def test_draw_overlay_rotation_zero_equals_direct(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    a = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(a, (0, 0, 200, 120), _spec(rotation=0), "DATE", 25.4)
+    b = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(b, (0, 0, 200, 120), _spec(), "DATE", 25.4)
+    assert a.tobytes() == b.tobytes()                    # 0° 逐像素等于直绘
+
+
+def test_draw_overlay_rotation_90_changes_pixels(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    base = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(base, (0, 0, 200, 120), _spec(corner=Corner.TL), "WIDE", 25.4)
+    rot = Image.new("RGB", (200, 120), (0, 0, 0))
+    to.draw_overlay(rot, (0, 0, 200, 120),
+                    _spec(corner=Corner.TL, rotation=90), "WIDE", 25.4)
+    assert rot.tobytes() != base.tobytes()               # 非对称长文字：旋转有牙
+    assert max(p[0] for p in rot.getdata()) == 255       # 仍实心红
+
+
+def test_draw_overlay_rotation_clips_to_cell(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    page = Image.new("RGB", (300, 300), (0, 0, 0))
+    to.draw_overlay(page, (50, 50, 100, 100),
+                    _spec(corner=Corner.BR, rotation=45), "MD", 25.4)
+    assert page.crop((150, 150, 300, 300)).getbbox() is None
+    assert page.crop((0, 0, 50, 300)).getbbox() is None
+
+
+def test_draw_overlay_rotation_overflow_skips(monkeypatch):
+    arial = _arial()
+    if arial is None:
+        pytest.skip("无 arial 字体")
+    monkeypatch.setattr(to, "FONT_TABLE", {"t": (arial, None)})
+    ok = Image.new("RGB", (200, 60), (0, 0, 0))
+    to.draw_overlay(ok, (0, 0, 200, 60), _spec(rotation=0), "WATERMARK", 25.4)
+    assert ok.getbbox() is not None                      # 不旋转塞得下（对照）
+    page = Image.new("RGB", (200, 60), (0, 0, 0))
+    to.draw_overlay(page, (0, 0, 200, 60), _spec(rotation=45), "WATERMARK", 25.4)
+    assert page.getbbox() is None                        # 旋转后包围盒超格→不画不抛

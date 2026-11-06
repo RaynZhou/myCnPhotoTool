@@ -29,6 +29,7 @@ class TextSpec:
     corner: str = Corner.BR
     rgb: tuple = (255, 255, 255)
     alpha: int = 255               # 0–255；日期恒 255，水印按不透明度
+    rotation: int = 0          # 文字顺时针角度，八档预设之一；0＝不旋转
     margin_pct: float = 4.0
 
 
@@ -43,6 +44,8 @@ FONT_TABLE = {
     "songti": (_p("simsun.ttc"), None),
     "arial": (_p("arial.ttf"), _p("arialbd.ttf")),
 }
+
+ROTATION_PRESETS = (0, 45, 90, 135, 180, 225, 270, 315)
 
 
 def size_px(size_mm, dpi):
@@ -118,11 +121,24 @@ def draw_overlay(page, cell_rect_px, spec, text, dpi):
             return
     if tw > avail_w or th > avail_h:
         return
-    ax, ay = anchor_point(spec.corner, (cw, ch), (tw, th), inset)
-    layer = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     fill = tuple(spec.rgb)[:3] + (int(spec.alpha),)
-    ImageDraw.Draw(layer).text((ax - l, ay - t), text, font=font, fill=fill,
-                               stroke_width=stroke, stroke_fill=fill)
+    if spec.rotation:
+        text_img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        ImageDraw.Draw(text_img).text((-l, -t), text, font=font, fill=fill,
+                                      stroke_width=stroke, stroke_fill=fill)
+        rot = text_img.rotate(-int(spec.rotation), expand=True,
+                              resample=Image.BICUBIC)
+        rw, rh = rot.size
+        if rw > avail_w or rh > avail_h:                 # 旋转后放不下：降级不画
+            return
+        ax, ay = anchor_point(spec.corner, (cw, ch), (rw, rh), inset)
+        layer = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+        layer.alpha_composite(rot, (ax, ay))
+    else:
+        ax, ay = anchor_point(spec.corner, (cw, ch), (tw, th), inset)
+        layer = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((ax - l, ay - t), text, font=font, fill=fill,
+                                   stroke_width=stroke, stroke_fill=fill)
     region = page.crop((x, y, x + cw, y + ch)).convert("RGBA")
     region = Image.alpha_composite(region, layer)
     page.paste(region.convert("RGB"), (x, y))

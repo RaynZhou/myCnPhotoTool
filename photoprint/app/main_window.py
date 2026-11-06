@@ -131,6 +131,9 @@ class MainWindow(QMainWindow):
 
         add_btn = QPushButton("添加照片…")
         add_btn.clicked.connect(self._on_add_photos)
+        import_btn = QPushButton("导入文件夹…")
+        import_btn.setObjectName("import_btn")
+        import_btn.clicked.connect(self._on_import_folder)
         clear_btn = QPushButton("清空")
         clear_btn.clicked.connect(self._on_clear_photos)
         rotate_btn = QPushButton("旋转 90°")
@@ -139,6 +142,7 @@ class MainWindow(QMainWindow):
         self.rotate_btn = rotate_btn
         btns = QHBoxLayout()
         btns.addWidget(add_btn)
+        btns.addWidget(import_btn)
         btns.addWidget(clear_btn)
         btns.addWidget(rotate_btn)
         panel.addRow("", btns)
@@ -326,6 +330,29 @@ class MainWindow(QMainWindow):
         for p in paths:
             self.append_photo(p)
         self._debounce.start()
+
+    def _on_import_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "选择照片文件夹",
+                                             self._start_dir())
+        if not d:
+            return                      # 取消：零副作用
+        self.import_folder(d)
+
+    def import_folder(self, dir_path):
+        """把 dir_path 顶层图片按名排序逐张 append_photo，末尾单次 debounce。
+
+        复用 append_photo 的读图/标红容错：坏图不阻塞其余。空目录/无图不动列表、
+        不起 debounce，只给正常色提示（与“请先选中照片”同档）。返回识别张数。
+        """
+        paths = list_folder_images(dir_path)
+        if not paths:
+            self._set_status("该文件夹没有可导入的图片")
+            return 0
+        for p in paths:
+            self.append_photo(p)
+        self._debounce.start()
+        self._set_status(f"已导入 {len(paths)} 张图片")
+        return len(paths)
 
     def append_photo(self, path):
         """读图失败不阻塞其余：占位 None 进渲染当空格，列表标红。"""

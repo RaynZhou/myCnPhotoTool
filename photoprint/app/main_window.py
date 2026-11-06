@@ -29,7 +29,6 @@ MODE_LABELS = (
 DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
-THUMB_PX = 40
 GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
@@ -501,15 +500,15 @@ class MainWindow(QMainWindow):
             return
         self.pool.append({"path": str(path), "img": img})
         item = QListWidgetItem(self._photo_item_text(name, img))
-        item.setIcon(QIcon(view.to_thumbnail(img, THUMB_PX)))
+        item.setIcon(QIcon(view.to_thumbnail(img, GALLERY_THUMB_PX)))
         self.photo_list.addItem(item)
 
     @staticmethod
     def _photo_item_text(name, img):
-        """列表项文字：旋转已移到格上，不再有角度段。"""
+        """网格项文字两行：文件名 / 尺寸（或读取失败）。旋转在格上，不在此体现。"""
         if img is None:
-            return f"{name}（读取失败）"
-        return f"{name}  {img.width}×{img.height}px"
+            return f"{name}\n读取失败"
+        return f"{name}\n{img.width}×{img.height}px"
 
     def _on_rotate(self):
         self.rotate_cell(self._current_cell)

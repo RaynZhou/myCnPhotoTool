@@ -111,7 +111,7 @@ def test_import_folder_bad_image_flags_and_continues(qapp, tmp_path):
     assert n == 2                                  # 两张都识别入列
     assert sum(1 for e in w.pool if e["img"] is None) == 1   # 坏图为 None 占位
     assert w.photo_list.item(0).text().startswith("broken")   # broken < good
-    assert "（读取失败）" in w.photo_list.item(0).text()
+    assert "读取失败" in w.photo_list.item(0).text()
 
 
 def test_import_folder_empty_dir_no_change(qapp, tmp_path):

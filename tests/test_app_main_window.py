@@ -505,14 +505,15 @@ def test_preview_rescales_on_window_resize(qapp, tmp_path):
 
 
 def test_photo_list_has_thumbnail_icon(qapp, tmp_path):
-    """加载成功的条目须带非空缩略图图标，且长边 ≤ 40（删 setIcon 则转红）。"""
+    """加载成功的条目须带非空缩略图图标，且长边 ≤ GALLERY_THUMB_PX（删 setIcon 则转红）。"""
+    from photoprint.app.main_window import GALLERY_THUMB_PX
     w = MainWindow(st=_store(tmp_path))
     paths = _make_photos(tmp_path, n=1)          # 400×200 横图
     w.append_photo(paths[0])
     icon = w.photo_list.item(0).icon()
     assert not icon.isNull()
     sizes = icon.availableSizes()
-    assert sizes and max(max(s.width(), s.height()) for s in sizes) <= 40
+    assert sizes and max(max(s.width(), s.height()) for s in sizes) <= GALLERY_THUMB_PX
 
 
 def test_failed_photo_has_no_icon(qapp, tmp_path):
@@ -523,7 +524,7 @@ def test_failed_photo_has_no_icon(qapp, tmp_path):
     w.append_photo(str(bad))
     item = w.photo_list.item(0)
     assert item.icon().isNull()
-    assert "（读取失败）" in item.text()
+    assert "读取失败" in item.text()
 
 
 def test_thumbnail_does_not_mutate_shared_photo(qapp, tmp_path):
@@ -546,3 +547,25 @@ def test_photo_list_is_wrapping_grid(qapp, tmp_path):
     assert pl.wordWrap() is True
     assert pl.iconSize().width() == GALLERY_THUMB_PX
     assert pl.iconSize().height() == GALLERY_THUMB_PX
+
+
+def test_gallery_item_text_is_two_lines_with_size(qapp, tmp_path):
+    """网格项文字两行：第一行文件名，第二行像素尺寸。"""
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(_make_photos(tmp_path, 1)[0])   # 400×200 横图
+    text = w.photo_list.item(0).text()
+    lines = text.split("\n")
+    assert len(lines) == 2
+    assert lines[0].endswith(".jpg")
+    assert "400" in lines[1] and "200" in lines[1] and "px" in lines[1]
+
+
+def test_gallery_failed_item_text_marks_failure(qapp, tmp_path):
+    """读取失败项：第二行标“读取失败”，仍红字。"""
+    from PySide6.QtGui import QColor
+    from photoprint.app.main_window import ERROR_COLOR
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(str(tmp_path / "不存在.jpg"))
+    item = w.photo_list.item(0)
+    assert item.text().split("\n")[-1] == "读取失败"
+    assert item.foreground().color() == QColor(ERROR_COLOR)

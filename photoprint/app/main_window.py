@@ -95,6 +95,7 @@ class MainWindow(QMainWindow):
         self._pages = 1            # 当前总页数（派生 + 翻页增页）
         self.page_index = 0
         self._current_cell = None  # 预览选中的全局槽位
+        self._place_source = None  # 当前作为放置源的库下标（None=无选中，点格纯选中）
         self._count_last = None    # 上次每页格数（检测结构性布局变更）
         self.job = None
         self._thread = None
@@ -130,6 +131,7 @@ class MainWindow(QMainWindow):
         self.photo_list = QListWidget()
         self.photo_list.setFixedWidth(260)   # 只钉宽；高度不封顶，随窗口纵向伸展
         self.photo_list.setIconSize(QSize(THUMB_PX, THUMB_PX))
+        self.photo_list.itemClicked.connect(self._on_photo_clicked)
         panel.addRow("照片", self.photo_list)
 
         add_btn = QPushButton("添加照片…")
@@ -392,12 +394,27 @@ class MainWindow(QMainWindow):
         """统一入口：选库图 + 点格 → 放入；无选中 → 纯选中该格（供旋转/清空格）。"""
         count = self._count_last or (self.job.count if self.job else 0)
         slot = self.page_index * count + position
-        row = self.photo_list.currentRow()
-        if 0 <= row < len(self.pool):
+        row = self._place_source
+        if row is not None and 0 <= row < len(self.pool):
             self.place(slot, row)           # 选库图 + 点格 → 放入（与 2b 同入口）
         else:
             self._current_cell = slot       # 无选中 → 纯选中，供旋转/清空格
         self._highlight_current_cell()
+
+    def _on_photo_clicked(self, item):
+        """照片列表项点击：首次选中作为放置源；再次点同一张 → 取消。
+
+        QListWidget 无自带反选，靠 currentRow 会残留导致“选一次就停不下来”；
+        用 _place_source 作唯一真相，并同步清列表高亮。"""
+        row = self.photo_list.row(item)
+        if row == self._place_source:
+            self._place_source = None
+            self.photo_list.clearSelection()
+            self.photo_list.setCurrentRow(-1)      # 清当前行（高亮不再停留）
+            self._set_status("已取消选中：点版面格将选中格（供旋转/清空格）")
+        else:
+            self._place_source = row
+            self.photo_list.setCurrentRow(row)
 
     def _highlight_current_cell(self):
         """当前选中格高亮：仅当选中格落在当前页才映射到页内序。"""
@@ -498,6 +515,7 @@ class MainWindow(QMainWindow):
         self._pages = 1
         self.page_index = 0
         self._current_cell = None
+        self._place_source = None
         self.photo_list.clear()
         self._refresh()
 

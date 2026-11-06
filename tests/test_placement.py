@@ -219,7 +219,7 @@ def test_click_places_selected_pool_photo(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     w.append_photo(_make_photos(tmp_path, 1)[0])          # 库只 1 张，未放置
     w._refresh()
-    w.photo_list.setCurrentRow(0)                          # 选中库图
+    w._on_photo_clicked(w.photo_list.item(0))            # 点选库图作放置源
     count = w._count_last
     w._on_cell_clicked(2)                                  # 第 1 页点第 3 格
     assert w.placements == {2: 0}                          # 槽位 = 0*count+2
@@ -232,8 +232,7 @@ def test_click_places_selected_pool_photo(qapp, tmp_path):
 def test_click_without_selection_only_selects(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    w.photo_list.clearSelection()
-    assert w.photo_list.currentRow() == -1
+    assert w._place_source is None                     # 默认无放置源
     before = dict(w.placements)
     w._on_cell_clicked(1)
     assert w.placements == before                          # 无库选中→不改放置
@@ -262,3 +261,21 @@ def test_highlight_only_when_selected_cell_on_current_page(qapp, tmp_path):
     w._current_cell = 1                      # 选中格回到当前页
     w._highlight_current_cell()
     assert w.preview._current_cell == 1
+
+
+def test_reclick_selected_photo_deselects(qapp, tmp_path):
+    """照片列表无专门取消入口的补位：再次点已选中的那张 → 取消放置源，
+    此后点版面格从“放置”变回“纯选中”（供逐格旋转/清空格）。"""
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(_make_photos(tmp_path, 1)[0])
+    w._refresh()
+    item = w.photo_list.item(0)
+    w._on_photo_clicked(item)                    # 第一次点：选为放置源
+    assert w._place_source == 0
+    w._on_cell_clicked(2)
+    assert w.placements.get(2) == 0              # 放置生效
+    w._on_photo_clicked(item)                    # 再次点同一张：取消
+    assert w._place_source is None
+    w._on_cell_clicked(1)
+    assert 1 not in w.placements                 # 不再放置
+    assert w._current_cell == 1                  # 退化为纯选中

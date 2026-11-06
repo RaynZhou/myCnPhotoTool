@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import QPoint, Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QLabel, QListWidget,
-                               QListView, QListWidgetItem, QMainWindow, QMessageBox,
-                               QPushButton, QSlider, QVBoxLayout, QWidget)
+                               QListView, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QSlider, QVBoxLayout, QWidget)
 
 from photoprint import jobs
 from photoprint.app import view, worker
@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
 
         self.preview = PreviewView()
         self.preview.cellClicked.connect(self._on_cell_clicked)
+        self.preview.cellContextMenuRequested.connect(self._on_cell_context_menu)
         body.addWidget(self.preview, 1)
 
         nav = QHBoxLayout()
@@ -407,6 +408,23 @@ class MainWindow(QMainWindow):
         else:
             self._current_cell = slot       # 无选中 → 纯选中，供旋转/清空格
         self._highlight_current_cell()
+
+    def _on_cell_context_menu(self, position, global_pos):
+        """预览格右键：命中已放置的格 → 弹“移除/旋转”菜单，作用于该格全局槽位。"""
+        count = self._count_last or (self.job.count if self.job else 0)
+        if not count:
+            return
+        slot = self.page_index * count + position
+        if slot not in self.placements:
+            return                              # 空格不弹
+        menu = QMenu(self)
+        act_remove = menu.addAction("移除该照片")
+        act_rotate = menu.addAction("旋转 90°")
+        chosen = menu.exec(global_pos)
+        if chosen is act_remove:
+            self.clear_cell(slot)
+        elif chosen is act_rotate:
+            self.rotate_cell(slot)
 
     def _on_photo_clicked(self, item):
         """照片列表项点击：首次选中作为放置源；再次点同一张 → 取消。

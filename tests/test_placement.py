@@ -311,3 +311,82 @@ def test_preview_emits_context_menu_signal(qapp):
     pv.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse,
                                           QPoint(390, 290), QPoint(390, 290)))
     assert got == []                            # 空白区不发
+
+
+class _FakeAction:
+    def __init__(self, text):
+        self.text = text
+
+
+def _patch_menu(monkeypatch, pick, calls=None):
+    """用替身类替换 main_window 命名空间里的 QMenu。
+
+    PySide6 的 QMenu.exec 是 Shiboken 绑定的 C++ 方法，无法用 monkeypatch
+    在类上覆盖（实例调用仍打到真实现→弹模态卡死）；故直接替掉模块属性
+    QMenu，让 handler 里的 `QMenu(self)` 构造出可测的替身。
+    pick：exec 返回第 pick 个动作（None=不选）；calls：记录 exec 被调次数的列表。
+    """
+    from photoprint.app import main_window as mw
+
+    class FakeMenu:
+        def __init__(self, parent=None):
+            self._actions = []
+
+        def addAction(self, text):
+            act = _FakeAction(text)
+            self._actions.append(act)
+            return act
+
+        def exec(self, *args):
+            if calls is not None:
+                calls.append(1)
+            if pick is None:
+                return None
+            return self._actions[pick]
+
+    monkeypatch.setattr(mw, "QMenu", FakeMenu)
+
+
+def test_right_click_occupied_cell_removes_photo(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    _patch_menu(monkeypatch, 0)                   # 选“移除该照片”
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)                       # slot 0,1 已放置
+    w.preview.cellContextMenuRequested.emit(1, QPoint(0, 0))   # 走信号→槽位1
+    assert 1 not in w.placements
+
+
+def test_right_click_occupied_cell_rotates(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    _patch_menu(monkeypatch, 1)                   # 选“旋转 90°”
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)
+    w._on_cell_context_menu(1, QPoint(0, 0))
+    assert w.cell_rot.get(1) == 90
+
+
+def test_right_click_empty_cell_no_menu(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    called = []
+    _patch_menu(monkeypatch, 0, calls=called)     # 若弹菜单会记录
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)                       # slot 0,1 占；slot 2 空
+    before = dict(w.placements)
+    w._on_cell_context_menu(2, QPoint(0, 0))      # 空格
+    assert called == []                           # 未弹菜单
+    assert w.placements == before
+
+
+def test_right_click_uses_page_offset(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QPoint
+    _patch_menu(monkeypatch, 0)
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=1)                       # slot 0 占
+    count = w._count_last
+    w.place(2, 0)                                 # 第 1 页页内序 2
+    w.place(count + 2, 0)                         # 第 2 页页内序 2（全局槽 count+2）
+    w._refresh()
+    w.page_index = 1
+    w._on_cell_context_menu(2, QPoint(0, 0))      # 第 2 页 pos2 → 全局槽 count+2
+    assert count + 2 not in w.placements          # 移除的是第 2 页那格
+    assert 2 in w.placements                      # 第 1 页同页内序未误伤

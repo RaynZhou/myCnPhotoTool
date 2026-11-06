@@ -13,3 +13,15 @@ def to_pixmap(img):
     qimg = QImage(buf, img.width, img.height, img.width * 3,
                   QImage.Format_RGB888)
     return QPixmap.fromImage(qimg.copy())
+
+
+def to_thumbnail(img, px):
+    """PIL 图等比缩到 px×px 方框内转 QPixmap；不改动传入的 img。
+
+    先 convert("RGB") 兜住 to_pixmap 的 raw RGB 前提（调色板/灰度源不炸），
+    再 copy() 保证 thumbnail 的原地缩落在副本上——原图是渲染共享对象，
+    改了就污染导出。
+    """
+    small = img.convert("RGB").copy()
+    small.thumbnail((px, px))
+    return to_pixmap(small)

@@ -78,7 +78,8 @@ PAPER_PRESETS = [
     _paper("7R", "7R 10寸", 203.0, 254.0, "preset", True, "8x10"),
     # 驱动内置但不在无边距列表
     _paper("A5", "A5", 148.0, 210.0, "preset", False, "A5", 11),
-    _paper("B5", "B5", 176.0, 250.0, "preset", False, "B5", 13),
+    # B5 取向驱动实测：本机 G3800 的 B5 表单码 13 为 JIS 182×257（实测 181.99×256.96，官方规格同），不是 ISO 176×250。旧值差 6–7mm，足够让 verify_physical_size（0.5mm）每次判失败。
+    _paper("B5", "B5", 182.0, 257.0, "preset", False, "B5", 13),
     _paper("LGL", "Legal", 215.9, 355.6, "preset", False, "Legal", 5),
     _paper("ENV_DL", "信封 DL", 110.0, 220.0, "preset", False, "DL", 27),
     _paper("ENV_10", "信封 COM10", 105.0, 241.0, "preset", False, "COM10", 20),

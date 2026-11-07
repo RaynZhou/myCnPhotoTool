@@ -103,3 +103,14 @@ def test_12inch_is_not_a_preset():
     keys = {s.key for s in specs.ALL_PRESETS}
     assert not any(s.w_mm >= 254 for s in specs.ALL_PRESETS if s.role == "paper")
     assert "12INCH" not in keys
+
+
+def test_b5_matches_driver_jis_form():
+    """B5 必须取本机驱动的 JIS 值（实测 181.99×256.96，官方 182×257）。
+
+    ISO B5 是 176×250，与本机驱动差 6–7mm，远超 verify_physical_size 的
+    0.5mm 容差：旧值会让 B5 直打每次都判“物理尺寸不符”而中止（spec
+    2026-11-07 §0.2 第二条）。
+    """
+    s = specs.find_spec("B5")
+    assert (s.w_mm, s.h_mm) == (182.0, 257.0)

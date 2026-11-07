@@ -36,18 +36,27 @@ def pick_dpi(driver_dpi, cap=600):
     return max(DPI_FLOOR, min(int(driver_dpi), int(cap)))
 
 
-def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
+def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
     """打印多页。prompt=True 时弹驱动设置页让用户选介质（I-1 由 devmode 保证
     几何权威），交 `_emit` 建 DC 送图。返回 {'ok','pages','message'}，异常不外抛；
-    驱动页取消回 {'cancelled': True}，弹窗降级成功时回 {'degraded': True}。"""
+    驱动页取消回 {'cancelled': True}，弹窗降级成功时回 {'degraded': True}。
+
+    forms 是 forms.measure() 的实测表单清单（可为 None/空＝没探测到）：
+    命中则用驱动**自带表单码**建 DEVMODE，并把物理校验目标换为该表单实测尺寸。
+    未命中时一律沿用静态码与标称尺寸——与本功能上线前逐字一致。
+    """
     from photoprint.win import devmode as dm_mod
+    from photoprint.win import forms as forms_mod
     from photoprint.win.api import PromptCancelled
 
     if not images:
         return {"ok": False, "pages": 0, "message": "没有可打印的页面"}
+    form = forms_mod.find(forms, sheet.w_mm, sheet.h_mm) if forms else None
+    paper_code = form.code if form is not None else sheet.driver_paper_code
+    target_mm = (form.w_mm, form.h_mm) if form is not None else None
     try:
         dm_obj, _size, degraded = dm_mod.build_with_prompt(
-            api, printer, sheet.w_mm, sheet.h_mm, sheet.driver_paper_code,
+            api, printer, sheet.w_mm, sheet.h_mm, paper_code,
             prompt=prompt)
     except PromptCancelled:
         # W-1：用户在驱动页取消 → 放弃打印，不是错误（UI 走“已取消”非红字）
@@ -56,13 +65,33 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True):
         # CLI（prompt=False）文案逐字冻结为旧串；GUI 才用更准的分区前缀
         prefix = "读取打印机设置失败" if prompt else "打印失败"
         return {"ok": False, "pages": 0, "message": f"{prefix}：{exc}"}
-    res = _emit(api, printer, dm_obj, images, sheet, dpi)
+    # 仅在命中表单时才多传 target_mm：未命中时调用形状与返回值与旧版完全一致
+    if target_mm is None:
+        res = _emit(api, printer, dm_obj, images, sheet, dpi)
+    else:
+        res = _emit(api, printer, dm_obj, images, sheet, dpi,
+                    target_mm=target_mm)
+    if not res.get("ok") and forms_mod.custom_rejected(
+            paper_code, getattr(dm_obj, "PaperSize", None)):
+        res["message"] = res.get("message", "") + ("；本机驱动不接受程序化"
+                                                    "自定义尺寸，请改用驱动自带表单或导出 PDF")
+    if form is not None and res.get("ok"):
+        res["paper_form"] = form.as_dict()
     if degraded and res.get("ok"):
         res["degraded"] = True      # W-3：降级仍打成功，标记供 UI 附提示
     return res
 
 
-def _emit(api, printer, dm_obj, images, sheet, dpi):
+def _target_size(sheet, target_mm=None):
+    """物理尺寸校验的目标：命中驱动表单时用表单实测值，否则用标称值。
+
+    命中时以表单为准：驱动实际按该表单出纸，拿标称值去卡会在相差 0.4mm 的
+    同纸异名（如 4R 102×152 对 10x15cm 的 101.6×152.4）上误报失败。
+    """
+    return tuple(target_mm) if target_mm else (sheet.w_mm, sheet.h_mm)
+
+
+def _emit(api, printer, dm_obj, images, sheet, dpi, target_mm=None):
     """建 DC → 校验物理尺寸 → 逐页 StretchBlt。这是本模块唯一碰 win32 处。
     StartDoc 后异常经 EndDoc/DeleteDC 展开后统一转 message（打印不得崩）。"""
     from PIL import ImageWin
@@ -77,9 +106,10 @@ def _emit(api, printer, dm_obj, images, sheet, dpi):
         hdc = win32ui.CreateDCFromHandle(_as_dc_ref(_create_dc(printer, dm_obj)))
         try:
             result = probe.probe(api, printer, dc=_as_dc_ref(hdc))
+            tw, th = _target_size(sheet, target_mm)
             ok, msg = verify_physical_size(result.physical_w_mm,
                                            result.physical_h_mm,
-                                           sheet.w_mm, sheet.h_mm)
+                                           tw, th)
             if not ok:
                 return {"ok": False, "pages": 0, "message": msg}
             hdc.StartDoc(f"PhotoPrint {sheet.label}")
@@ -103,10 +133,11 @@ def _emit(api, printer, dm_obj, images, sheet, dpi):
         return {"ok": False, "pages": 0, "message": f"打印失败：{exc}"}
 
 
-def print_job(api, printer, port, images, sheet, dpi, dm=None):
+def print_job(api, printer, port, images, sheet, dpi, dm=None, forms=None):
     """CLI 冻结入口：等价 print_pages(prompt=False)。port/dm 为兼容旧签名保留，
     不参与建 DC（现代驱动走默认端口，CreateDC 只收 printer 名与 devmode）。"""
-    return print_pages(api, printer, images, sheet, dpi, prompt=False)
+    return print_pages(api, printer, images, sheet, dpi, prompt=False,
+                       forms=forms)
 
 
 def _create_dc(printer, dm_obj):

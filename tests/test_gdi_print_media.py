@@ -2,12 +2,18 @@
 _emit 被 monkeypatch，故本文件全程不 import win32（gdi_print 顶部也不 import）。"""
 import types
 
-from photoprint.win import devmode, gdi_print
+from photoprint.win import devmode, forms, gdi_print
 from photoprint.win.api import PromptCancelled
 
 
 class Sheet:
     w_mm, h_mm, label, driver_paper_code = 89.0, 127.0, "3R", None
+
+
+class SheetWithCode:
+    """带静态表单码的纸：用来证“无匹配表单时退回静态码”。"""
+
+    w_mm, h_mm, label, driver_paper_code = 152.0, 203.0, "6R", 42
 
 
 def _imgs(n):
@@ -124,3 +130,84 @@ def test_emit_and_module_never_use_win32print_create_dc():
     mod_src = inspect.getsource(gdi_print)
     assert "win32print.CreateDC" not in mod_src   # 不得走不存 win32print.CreateDC
     assert "import win32print" not in mod_src      # 模块不拉 win32print（docstring 叙事不算）
+
+
+# ---------- 驱动表单绑定（spec 2026-11-07） ----------
+
+L_89x127 = forms.PaperForm(126, "L 89x127mm", 88.98, 127.0)
+TEN_BY_FIFTEEN = forms.PaperForm(122, '10x15cm 4"x6"', 101.6, 152.4)
+
+
+def _capture(monkeypatch):
+    """替换 build 与 emit，只记录交接参数。"""
+    seen = {}
+
+    def fake_build(api, printer, w, h, code, prompt=False):
+        seen["code"] = code
+        return (types.SimpleNamespace(PaperSize=code or 259), 520, False)
+
+    def fake_emit(api, printer, dm, images, sheet, dpi, **kw):
+        seen["target"] = kw.get("target_mm")
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(devmode, "build_with_prompt", fake_build)
+    monkeypatch.setattr(gdi_print, "_emit", fake_emit)
+    return seen
+
+
+def test_matched_form_code_reaches_devmode_and_verify_target(monkeypatch):
+    """命中表单：DEVMODE 用真实表单码，物理校验目标取表单实测尺寸。"""
+    seen = _capture(monkeypatch)
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300,
+                                forms=[L_89x127])
+    assert seen["code"] == 126                 # 不是 None（旧行为是自定义尺寸）
+    assert seen["target"] == (88.98, 127.0)    # 不是标称 89×127
+    assert res["paper_form"] == {"code": 126, "name": "L 89x127mm",
+                                 "w_mm": 88.98, "h_mm": 127.0}
+
+
+def test_unmatched_form_falls_back_to_sheet_code(monkeypatch):
+    """无匹配：退回静态码，且调用形状/返回值与升级前逐字一致。"""
+    seen = _capture(monkeypatch)
+    res = gdi_print.print_pages(object(), "P", _imgs(1), SheetWithCode, 300,
+                                forms=[TEN_BY_FIFTEEN])
+    assert seen["code"] == 42
+    assert seen["target"] is None          # 不传 target_mm ⇒ 旧调用形状
+    assert "paper_form" not in res
+    assert res == {"ok": True, "pages": 1, "message": ""}
+
+
+def test_no_forms_keeps_today_behaviour(monkeypatch):
+    seen = _capture(monkeypatch)
+    res = gdi_print.print_pages(object(), "P", _imgs(2), Sheet, 300)
+    assert seen["code"] is None and seen["target"] is None
+    assert "paper_form" not in res
+
+
+def test_custom_size_reset_gets_explicit_reason(monkeypatch):
+    """驱动把自定义尺寸重置成别的表单时必须点名原因，而不是笼统说“忽略了尺寸”。"""
+    monkeypatch.setattr(devmode, "build_with_prompt",
+                        lambda *a, **k: (types.SimpleNamespace(PaperSize=9), 520, False))
+    monkeypatch.setattr(gdi_print, "_emit", lambda *a, **k: {
+        "ok": False, "pages": 0,
+        "message": "驱动忽略了自定义尺寸：请求 89.00×127.00mm，设备实际 209.97×296.97mm"})
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300)
+    assert res["ok"] is False
+    assert "不接受程序化自定义尺寸" in res["message"]
+    assert "导出 PDF" in res["message"]
+
+
+def test_custom_rejected_note_absent_when_form_used(monkeypatch):
+    """用了驱动表单就不该再提自定义尺寸被拒（避免误报）。"""
+    monkeypatch.setattr(devmode, "build_with_prompt",
+                        lambda *a, **k: (types.SimpleNamespace(PaperSize=126), 520, False))
+    monkeypatch.setattr(gdi_print, "_emit", lambda *a, **k: {
+        "ok": False, "pages": 0, "message": "纸没放好"})
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300,
+                                forms=[L_89x127])
+    assert "不接受程序化自定义尺寸" not in res["message"]
+
+
+def test_target_size_helper_defaults_to_nominal():
+    assert gdi_print._target_size(Sheet, None) == (89.0, 127.0)
+    assert gdi_print._target_size(Sheet, (88.98, 127.0)) == (88.98, 127.0)

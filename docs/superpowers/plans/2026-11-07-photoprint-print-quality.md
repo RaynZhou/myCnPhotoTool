@@ -119,16 +119,16 @@
 
 **Files:** Modify `photoprint/cli.py`；Test `tests/test_cli.py`
 
-- [ ] **Step 1** 追加失败测试：`--media-type 303`、`--media-type 高级光面照片纸 II`、
+- [x] **Step 1** 追加失败测试：`--media-type 303`、`--media-type 高级光面照片纸 II`、
   `--quality high` 分别/组合传到 `print_job`；`--quality` 只接受 `default|high`；
   不传时 stdout 与既有冻结断言逐字一致。
-- [ ] **Step 2** 跑测试确认红。
-- [ ] **Step 3** 实现：参数解析（`--media-type` 字符串→int 或名字，交给
+- [x] **Step 2** 跑测试确认红。
+- [x] **Step 3** 实现：参数解析（`--media-type` 字符串→int 或名字，交给
   `find_media`；`--quality` 映射 `default→None`、`high→QUALITY_HIGH`）；
   枚举失败/查不到→`None` + stderr 一行提示（stdout 不动）。
-- [ ] **Step 4** 跑 `tests/test_cli.py` 全绿。
-- [ ] **Step 5** 变异验牙：不传质量（丢弃参数）→ 对应用例红。
-- [ ] **Step 6** 提交（`cli: --media-type / --quality（不传时输出逐字不变）`）
+- [x] **Step 4** 跑 `tests/test_cli.py` 全绿。
+- [x] **Step 5** 变异验牙：不传质量（丢弃参数）→ 对应用例红。
+- [x] **Step 6** 提交（`cli: --media-type / --quality（不传时输出逐字不变）`）
 
 ---
 

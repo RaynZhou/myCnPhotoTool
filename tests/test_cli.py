@@ -269,3 +269,115 @@ def test_print_survives_form_probe_failure(tmp_path, monkeypatch, capsys):
                      "--dpi", "25.4", "--print", "--printer", "P"]) == 0
     assert seen["forms"] == []
     assert "已发送 1 页" in capsys.readouterr().out
+
+
+# ---------- 介质类型 / 打印质量（spec 2026-11-07）----------
+
+def _print_fixture(tmp_path):
+    from PIL import Image
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (10, 20, 30)).save(p)
+    return str(p)
+
+
+def _capture_job(monkeypatch):
+    """记录 print_job 收到的关键字；签名保持旧形状以锁定“不选就不传”。"""
+    from photoprint.win import gdi_print
+
+    seen = {}
+
+    def fake(api, printer, port, images, sheet, dpi, dm=None, forms=None, **kw):
+        seen["kw"] = kw
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_job", fake)
+    return seen
+
+
+def _stub_media(monkeypatch, options):
+    from photoprint.win import media
+
+    monkeypatch.setattr(media, "enumerate_media", lambda api, printer: options)
+
+
+NAMES = ("普通纸", "高级光面照片纸 II")
+
+
+def test_media_type_by_name_reaches_print_job(tmp_path, monkeypatch, capsys):
+    from photoprint.win import media
+
+    _stub_media(monkeypatch, [media.MediaOption(1, NAMES[0]),
+                             media.MediaOption(303, NAMES[1])])
+    seen = _capture_job(monkeypatch)
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P",
+                     "--media-type", NAMES[1]]) == 0
+    assert seen["kw"]["media"] == media.MediaOption(303, NAMES[1])
+
+
+def test_media_type_accepts_driver_value(tmp_path, monkeypatch):
+    """--media-type 303：数值写法也要能命中（先按值查，再按名字）。"""
+    from photoprint.win import media
+
+    _stub_media(monkeypatch, [media.MediaOption(1, NAMES[0]),
+                             media.MediaOption(303, NAMES[1])])
+    seen = _capture_job(monkeypatch)
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P", "--media-type", "303"]) == 0
+    assert seen["kw"]["media"].value == 303
+
+
+def test_unknown_media_type_warns_on_stderr_but_prints(tmp_path, monkeypatch, capsys):
+    from photoprint.win import media
+
+    _stub_media(monkeypatch, [media.MediaOption(1, NAMES[0])])
+    seen = _capture_job(monkeypatch)
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P", "--media-type", "无此纸"]) == 0
+    assert "media" not in seen["kw"]          # 查不到就按驱动默认打
+    out = capsys.readouterr()
+    assert "无此纸" in out.err and "已发送" in out.out   # stdout 不被污染
+
+
+def test_quality_high_maps_to_dmres_high(tmp_path, monkeypatch):
+    seen = _capture_job(monkeypatch)
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P", "--quality", "high"]) == 0
+    assert seen["kw"]["quality"] == -4
+
+
+def test_quality_default_is_no_intervention(tmp_path, monkeypatch):
+    seen = _capture_job(monkeypatch)
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P", "--quality", "default"]) == 0
+    assert "quality" not in seen["kw"]
+
+
+def test_quality_rejects_unknown_choice(tmp_path):
+    with pytest.raises(SystemExit):
+        cli.main(["--photos", _print_fixture(tmp_path), "--print",
+                  "--printer", "P", "--quality", "ultra"])
+
+
+def test_no_media_options_keeps_call_shape(tmp_path, monkeypatch, capsys):
+    """不传 --media-type/--quality 时不做枚举、不传参数、stdout 与历史一致。"""
+    seen = _capture_job(monkeypatch)
+    called = []
+    from photoprint.win import media
+
+    monkeypatch.setattr(media, "enumerate_media",
+                        lambda *a: called.append(1) or [])
+    assert cli.main(["--photos", _print_fixture(tmp_path), "--sheet", "3R",
+                     "--cell", "3R", "--dpi", "25.4", "--print",
+                     "--printer", "P"]) == 0
+    assert seen["kw"] == {}
+    assert not called            # 不选就不枚举（不额外扰动驱动）
+    out = capsys.readouterr()
+    assert out.out.endswith("已发送 1 页\n") and "提示：" not in out.err
+

@@ -17,6 +17,17 @@ def load_photo(path):
     return jobs.load_photo(path)
 
 
+# --quality 两档的常量在 win.media（唯一真相源），此处不重复写值。
+
+
+def _media_query(text):
+    """--media-type 既收驱动名也收裸数值：能转成 int 就按值查（-1 不适用）。"""
+    try:
+        return int(str(text).strip())
+    except (TypeError, ValueError):
+        return text
+
+
 def build_plan_jobs(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                     borderless_active):
     """薄转发：保持 7 个位置参数与 (plan, mode) 返回的历史形状。"""
@@ -37,6 +48,10 @@ def build_parser():
     ap.add_argument("--out", default=None, help="输出 PNG 路径（调试与验收用）")
     ap.add_argument("--pdf", default=None, help="兜底：输出等尺寸 PDF")
     ap.add_argument("--print", dest="do_print", action="store_true")
+    ap.add_argument("--media-type", default=None,
+                    help="介质类型：驱动给的名字（可只写一部分）或数值")
+    ap.add_argument("--quality", choices=("default", "high"), default=None,
+                    help="打印质量：default=驱动默认，high=DMRES_HIGH")
     ap.add_argument("--mask", action="store_true",
                     help="导出时保留不可印区灰遮罩（调试用，默认不导出）")
     ap.add_argument("--list-printers", action="store_true")
@@ -94,6 +109,7 @@ def main(argv=None):
         from photoprint.win import api as win_api
         from photoprint.win import forms as forms_mod
         from photoprint.win import gdi_print
+        from photoprint.win import media as media_mod
 
         if not args.printer:
             print("--print 需要 --printer 指定打印机名", file=sys.stderr)
@@ -106,8 +122,26 @@ def main(argv=None):
             measured = forms_mod.measure(api, args.printer)
         except Exception:
             measured = []
+        # 介质/质量同样只是增强：不传就不枚举、不写字段，调用形状与历史一致。
+        extra = {}
+        if args.media_type is not None:
+            found = media_mod.find_media(
+                media_mod.enumerate_media(api, args.printer),
+                _media_query(args.media_type))
+            if found is None:
+                # 提示走 stderr：stdout 的排版/页数文案是冻结的
+                print(f"提示：驱动未提供介质“{args.media_type}”，本次按驱动默认打印",
+                      file=sys.stderr)
+            else:
+                extra["media"] = found
+        if args.quality is not None:
+            quality = (media_mod.QUALITY_HIGH if args.quality == "high"
+                       else media_mod.QUALITY_DEFAULT)
+            if quality is not None:
+                extra["quality"] = quality
         res = gdi_print.print_job(api, args.printer, None,
-                                  pages, sheet, args.dpi, forms=measured)
+                                  pages, sheet, args.dpi, forms=measured,
+                                  **extra)
         print(res["message"] or f"已发送 {res['pages']} 页")
         return 0 if res["ok"] else 1
     return 0

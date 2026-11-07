@@ -266,6 +266,9 @@ if form:
 - [x] **Step 2: 残留自查**：`git status --short` 干净；`.superpowers/sdd/_dfb_*` 不入库。
 - [x] **Step 3: 真机只读复验**：跑 `_lab/app_path_check` 等价脚本（3R 现状 vs 表单 126），确认现状 False / 修复后 True（证据已在本 plan 落地前取得，复验一次留档）。
 - [x] **Step 4: 打印测试页（需用户批准）**：单页 3R 直打，确认不再报“驱动忽略了自定义尺寸”且实际出纸为 89×127。
+  - 用户已批准；作业 6 已下发并回读 `pDevMode`：`PaperSize=126`、`890×1270`(0.1mm)。
+  - 机器当时 `PaperOut`，未出纸；装 3R 相纸后保留中的作业会续打，待目视确认。
+  - 首打又抓出三处 `_emit` 缺陷（半色调 / Pillow `draw` / 驱动 dpi 缩放），已修并入 spec §0.3。
 - [ ] **Step 5: 交用户手测清单**：3R/4R/5R/7R/卡片 五种，各看“状态栏是否明示表单名”与出纸尺寸；6R 看是否给出“无匹配表单 + 导出 PDF”提示。
 
 ## Self-Review

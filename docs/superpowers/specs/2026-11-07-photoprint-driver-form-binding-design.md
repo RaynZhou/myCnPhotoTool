@@ -55,6 +55,21 @@ devmode.build(api, "Canon G3000 series Printer", 89.0, 127.0, None)
 `B5` 是第二处：预设 176×250（ISO B5）与驱动 182×257（JIS B5，即 G3800 官方规格）
 差 6–7mm，远超 `verify_physical_size` 的 0.5mm 容差。
 
+### 0.3 真机首打又抓出三处 emit 缺陷（本轮的副作用修复）
+
+表单绑定让 3R 终于过了物理校验，作业真正下发后暴露了 `_emit` 里三处从未在真机上
+跑过的代码（此前所有直打都在校验阶段就中止了）：
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | 对 `PyCDC` 调 `SetStretchBltMode`（win32ui 不转发该方法） | 首打直接 `AttributeError`，报“打印失败” | 改走 `win32gui.SetStretchBltMode(hdc.GetSafeHdc(), HALFTONE)` |
+| 2 | 调 `Dib.Draw`（Pillow ≥ 10 已改为小写 `draw`） | 同上，`'Dib' object has no attribute 'Draw'` | `_dib_draw` 兼容两种写法 |
+| 3 | 贴图矩形用**渲染** dpi 换算（300），而 DC 设备单位是**驱动** dpi（600） | 照片只占纸面四分之一，截图缩在左上角 | 目标矩形改按 `probe` 回读的 `dpi_x/dpi_y` 换算 |
+
+三处均补了脱机回归（`tests/test_gdi_print_emit.py`，桩掉 win32ui/ImageWin/probe），
+并用变异验牙确认能红。作业 6 的 `pDevMode` 回读为 `PaperSize=126`、
+`890×1270`(0.1mm) —— 下单纸张确为 89×127；机器当时 `PaperOut`，未实际出纸。
+
 ## 1. 范围
 
 做：

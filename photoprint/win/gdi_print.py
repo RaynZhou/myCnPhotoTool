@@ -91,12 +91,34 @@ def _target_size(sheet, target_mm=None):
     return tuple(target_mm) if target_mm else (sheet.w_mm, sheet.h_mm)
 
 
+def _set_halftone(hdc, set_mode=None):
+    """把 StretchBlt 的缩放算法设为 HALFTONE（平滑，照片必须用）。
+
+    PyCDC 没有 SetStretchBltMode（win32ui 不转发这个方法），真机首打就是
+    在这里抛 AttributeError。改走 win32gui.SetStretchBltMode（同一 gdi32）。
+    不设 HALFTONE 时驱动按最近邻放大，照片会出锯齿与色带。
+    """
+    import win32con
+
+    if set_mode is None:
+        import win32gui
+
+        set_mode = win32gui.SetStretchBltMode
+    return set_mode(hdc.GetSafeHdc(), win32con.HALFTONE)
+
+
+def _dib_draw(dib, handle, rect, draw=None):
+    """DIB 缩放贴图。Pillow ≥ 10 把 Dib.Draw 改成小写 draw，两者都认。"""
+    if draw is None:
+        draw = getattr(dib, "draw", None) or dib.Draw
+    return draw(handle, rect)
+
+
 def _emit(api, printer, dm_obj, images, sheet, dpi, target_mm=None):
     """建 DC → 校验物理尺寸 → 逐页 StretchBlt。这是本模块唯一碰 win32 处。
     StartDoc 后异常经 EndDoc/DeleteDC 展开后统一转 message（打印不得崩）。"""
     from PIL import ImageWin
 
-    import win32con
     import win32ui
 
     from photoprint.core import units
@@ -112,16 +134,21 @@ def _emit(api, printer, dm_obj, images, sheet, dpi, target_mm=None):
                                            tw, th)
             if not ok:
                 return {"ok": False, "pages": 0, "message": msg}
+            # 目标矩形必须按**驱动** dpi 换算：DC 的设备单位是驱动像素（本机
+            # 600dpi），用渲染 dpi 换算会只贴上四分之一的面积。dpi 参数只
+            # 决定源图分辨率，交给 StretchBlt 放大正是本函数存在的意义。
+            dev_dpi_x = getattr(result, "dpi_x", 0) or dpi
+            dev_dpi_y = getattr(result, "dpi_y", 0) or dpi
             hdc.StartDoc(f"PhotoPrint {sheet.label}")
             try:
                 for img in images:
                     hdc.StartPage()
                     try:
                         dib = ImageWin.Dib(img)
-                        w = units.mm_to_px(sheet.w_mm, dpi)
-                        h = units.mm_to_px(sheet.h_mm, dpi)
-                        hdc.SetStretchBltMode(win32con.HALFTONE)
-                        dib.Draw(hdc.GetHandleOutput(), (0, 0, w, h))
+                        w = units.mm_to_px(sheet.w_mm, dev_dpi_x)
+                        h = units.mm_to_px(sheet.h_mm, dev_dpi_y)
+                        _set_halftone(hdc)
+                        _dib_draw(dib, hdc.GetHandleOutput(), (0, 0, w, h))
                     finally:
                         hdc.EndPage()
             finally:

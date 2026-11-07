@@ -42,6 +42,26 @@ OFFSET_MAX_PCT = 50
 # 成立；统一叫“边距”，与纸边白边同一个概念（用户 2026-11-07 反馈）。
 MARGIN_ON_MM = 2.0
 MARGIN_ON_LABEL = "留边距 2mm"
+# 一页只有一格时，同一行变成另一层含义：四周等宽的留白。下限由驱动实测
+# 下边 5.04mm 决定（3R 取齐后 5.1），再小就必定有一边打不出来。
+UNIFORM_MARGIN_MM = 5.1
+SINGLE_MARGIN_LABEL = f"四周留白 ≥{UNIFORM_MARGIN_MM:g}mm"
+_GRID_MARGIN_TIP = (
+    "勾上：照片之间留 2mm，方便下刀\n"
+    "不勾：照片之间紧贴，尽量铺满可打印区\n"
+    "纸边的白边由打印机不可印区决定（约 3~5mm），本开关关不掉；\n"
+    "要真正无白边：模式选「出血拼版」，打后沿灰线裁切")
+_SINGLE_MARGIN_TIP = (
+    "勾上：照片四周至少各留 5.1mm（下边 5.04mm 是驱动物理极限）\n"
+    "想四边严格相等：模式选「铺满可打印区」，它会按内框裁齐\n"
+    "选「完整放入」则不裁画面，某一边可能比 5.1mm 更宽\n"
+    "不勾：上5.1/下5.1/左3.5/右3.5mm，左右不平")
+# 一页一格但纸比照片大（4R 纸打 3R 照片）：四周等宽与“照片保持 3R”无解，
+# 抬到等宽只能把照片放大（3R→92×142），那等于默默改了成品尺寸。
+_SINGLE_NO_TIP = (
+    "纸比照片大：四边完全等宽必须把照片放大（就不是你选的尺了），\n"
+    "所以这一档不生效。现在按标称尺寸居中：左右相等、上下相等。\n"
+    "要四边一样宽：纸与照片选同一规格，或模式选「出血拼版」打后裁。")
 GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
@@ -227,14 +247,11 @@ class MainWindow(QMainWindow):
 
         # 边距只给“有/无”：勾上照片之间留白，不勾紧贴铺满。出血量不再暴露，
         # 选出血拼版即用 modes.DEFAULT_BLEED_MM。
-        # 纸边那圈白边不归这个开关管——它是打印机不可印区，关不掉；
-        # 单张时没有相邻格，开关无效果，故 count==1 时置灰（见 _rebuild_job）。
+        # 纸边那圈白边不归这个开关管——它是打印机不可印区，关不掉。
+        # 一页多格时它管照片之间的缝；一页一格时它管四周等宽白边（文案跟
+        # 场景换，见 _rebuild_job 里的 setText）。
         self.margin_cb = QCheckBox(MARGIN_ON_LABEL)
-        self.margin_cb.setToolTip(
-            "勾上：照片之间留 2mm，方便下刀\n"
-            "不勾：照片之间紧贴，尽量铺满可打印区\n"
-            "纸边的白边由打印机不可印区决定（约 3~5mm），本开关关不掉；\n"
-            "要真正无白边：模式选「出血拼版」，打后沿灰线裁切")
+        self.margin_cb.setToolTip(_GRID_MARGIN_TIP)
         panel.addRow("边距", self.margin_cb)
 
         self.dpi_box = QComboBox()
@@ -369,6 +386,8 @@ class MainWindow(QMainWindow):
             "sheet_key": self.sheet_box.currentData(),
             "cell_key": self.cell_box.currentData(),
             "gap_mm": MARGIN_ON_MM if self.margin_cb.isChecked() else 0.0,
+            # 单格时 build_job 忽略 gap、改用这一档（四边等宽），多格时反之
+            "uniform_mm": UNIFORM_MARGIN_MM if self.margin_cb.isChecked() else None,
             "bleed_mm": modes.DEFAULT_BLEED_MM,
             "mode": MODE_LABELS[self.mode_box.currentIndex()][1],
             "dpi": float(self.dpi_box.currentData()),
@@ -400,7 +419,8 @@ class MainWindow(QMainWindow):
         try:
             plan, _ = jobs.build_layout(self.st, p["sheet_key"], p["cell_key"],
                                         p["gap_mm"], p["bleed_mm"], p["mode"],
-                                        borderless_active=False)
+                                        borderless_active=False,
+                                        uniform_mm=p["uniform_mm"])
         except ValueError:
             return self._count_last or 0
         self._count_last = plan.count
@@ -468,16 +488,27 @@ class MainWindow(QMainWindow):
         try:
             plan, _ = jobs.build_layout(self.st, p["sheet_key"], p["cell_key"],
                                         p["gap_mm"], p["bleed_mm"], p["mode"],
-                                        borderless_active=False)
+                                        borderless_active=False,
+                                        uniform_mm=p["uniform_mm"])
         except ValueError as exc:
             self.job = None
             self._set_status(str(exc), error=True)
             self.export_btn.setEnabled(False)
             return
+        # 同一行按场景换含义：单格=四周等宽白边（5.1mm），多格=照片之间的缝。
         count = plan.count
-        # 单张时没有相邻格，边距开关不改变出片（纸边白边由不可印区决定）：
-        # 置灰而非静默无效，避免“我勾了怎么没变化”（用户 2026-11-07 反馈）。
-        self.margin_cb.setEnabled(count > 1)
+        # “能不能真等宽”由 jobs 判定（与 build_job/render 同一个出处）：
+        # 框比照片大会把照片放大，那种组合不给勾，避免默默改成品尺寸。
+        single = count == 1 and jobs.uniform_applies(
+            self.st.resolve(p["sheet_key"]), self.st.resolve(p["cell_key"]),
+            UNIFORM_MARGIN_MM, mode=p["mode"])
+        self.margin_cb.setText(SINGLE_MARGIN_LABEL if single else MARGIN_ON_LABEL)
+        if single:
+            self.margin_cb.setToolTip(_SINGLE_MARGIN_TIP)
+        else:
+            self.margin_cb.setToolTip(_SINGLE_NO_TIP if count == 1
+                                      else _GRID_MARGIN_TIP)
+        self.margin_cb.setEnabled(count > 1 or single)
         cleared = False
         if count != self._count_last:
             if self._count_last is not None and self.placements:
@@ -507,6 +538,7 @@ class MainWindow(QMainWindow):
             self.job = jobs.build_job(self.st, photos, p["sheet_key"], p["cell_key"],
                                       gap_mm=p["gap_mm"], bleed_mm=p["bleed_mm"],
                                       mode=p["mode"], offset_pct=p["offset_pct"],
+                                      uniform_mm=p["uniform_mm"],
                                       rotations=rotations,
                                       date_overlay=p["date_overlay"],
                                       watermark_overlay=p["watermark_overlay"],

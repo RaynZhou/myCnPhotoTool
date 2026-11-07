@@ -93,20 +93,37 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
                 offset_pct=(0.0, 0.0), rotations=(),
                 date_overlay=None, watermark_overlay=None, date_texts=(),
-                date_overrides=(), wm_overrides=(), even_margins=False):
+                date_overrides=(), wm_overrides=(), even_margins=False,
+                uniform_mm=None):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。
 
     rotations 是逐图顺时针角度（短于 photos 缺位按 0）：生效照片在取尺寸之前
-    换好，其余几何一条规则不改——"渲染时转"与"读图时预转好"逐像素等价。"""
+    换好，其余几何一条规则不改——"渲染时转"与"读图时预转好"逐像素等价。
+
+    uniform_mm 非 None 且整页只有一格：四边按同一档留白（照片摆进这个内框，
+    裁切仍按当前模式）：铺满就是四边相等，完整放入就是“至少这么宽、不裁画面”。
+    框比标称照片大时不生效（会把照片放大）。"""
     px_w = units.mm_to_px(sheet.w_mm, dpi)
     px_h = units.mm_to_px(sheet.h_mm, dpi)
     page = Image.new("RGB", (px_w, px_h), (255, 255, 255))
     draw = ImageDraw.Draw(page, "RGBA")
+    # 等宽白边只对“整页一格”成立：多格时那是格间距的事，不能拿来当内容框。
+    # 框比标称照片大时不走这一支（会把照片放大，见 jobs.uniform_applies）：
+    # 直接调本函数的调用方也不会得到“默默改成品尺寸”的结果。
+    uniform = uniform_mm if (uniform_mm is not None
+                             and len(plan.cells) == 1
+                             and mode != modes.BLEED_TRIM) else None
+    if uniform is not None:
+        ubox = specs.printable_rect(sheet, borderless_active=borderless_active,
+                                    uniform_mm=uniform)
+        c0 = plan.cells[0]
+        if ubox.w_mm > c0.w_mm + 0.01 or ubox.h_mm > c0.h_mm + 0.01:
+            uniform = None
     cm = modes.crop_mode(mode)
     # 可打印矩形与装箱无关，始终由规格边距推出；无边距实测生效时它就是整张纸。
     # even_margins=True 时白边同轴取齐（照片当成品）：内容框与遮罩带用同一档。
     printable = specs.printable_rect(sheet, borderless_active=borderless_active,
-                                     even=even_margins)
+                                     even=even_margins, uniform_mm=uniform)
 
     for idx, cell in enumerate(plan.cells):
         photo = photos[idx] if idx < len(photos) else None
@@ -118,6 +135,11 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         # 其余用内框并与可打印矩形求交，处理“整纸只放一格”的退化情形
         if mode == modes.BLEED_TRIM:
             ox, oy, ow, oh = cell.x_mm, cell.y_mm, cell.w_mm, cell.h_mm
+        elif uniform is not None:
+            # 等宽白边：落位直接用内框，不跟格子求交——格子是整纸时求交
+            # 会把“等宽”退化成“同轴取齐”（比例不同就凑不出四边相等）
+            ox, oy, ow, oh = (printable.x_mm, printable.y_mm,
+                              printable.w_mm, printable.h_mm)
         else:
             got = intersect_mm(cell.inner_mm(),
                                (printable.x_mm, printable.y_mm,
@@ -172,7 +194,7 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
     # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；
     # 正常拼版下照片都在可打印区内，不会被遮罩压到
     if show_mask and not borderless_active:
-        used = specs.used_margins(sheet.margins, even_margins)
+        used = specs.used_margins(sheet.margins, even_margins, uniform)
         for bx, by, bw, bh in _mask_bands(sheet, used):
             draw.rectangle(
                 [units.mm_to_px(bx, dpi), units.mm_to_px(by, dpi),

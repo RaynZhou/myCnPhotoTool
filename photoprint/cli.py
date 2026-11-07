@@ -86,7 +86,7 @@ def main(argv=None):
     borderless = job.mode == modes.BLEED_TRIM
     # 排版用的是与作业同一档白边（成品照片才取齐），报数必须同一套，
     # 否则 stdout 上的数字与出片实物对不上（2026-11-07 修正）
-    m = jobs.margins_for(sheet, job.even_margins)
+    m = jobs.margins_for(sheet, job.even_margins, job.uniform_mm)
     note = ("需人工裁切：沿灰线切开后即为 "
             f"{job.plan.cells[0].inner_mm()[2]:.0f}×"
             f"{job.plan.cells[0].inner_mm()[3]:.0f}mm 成品"

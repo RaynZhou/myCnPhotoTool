@@ -47,9 +47,9 @@ def even_margins(sheet):
     return specs.even_margins(sheet.margins)
 
 
-def margins_for(sheet, even):
-    """本作业实际使用的白边：even 档取齐，其余沿用逐边原值。"""
-    return specs.used_margins(sheet.margins, even)
+def margins_for(sheet, even, uniform_mm=None):
+    """本作业实际使用的白边：等宽档优先，其次取齐，否则沿用逐边原值。"""
+    return specs.used_margins(sheet.margins, even, uniform_mm)
 
 
 def wants_even_margins(cell):
@@ -61,8 +61,25 @@ def wants_even_margins(cell):
     return cell.role == "paper"
 
 
+def uniform_applies(sheet, cell, mm, borderless_active=False, mode=None):
+    """单张能不能真的“四周等宽”：只有在**不会把照片放大**时才成立。
+
+    为什么：等宽是纸边上的框，照片铺满框。框比标称照片小 → 等比缩小（3R 纸
+    打 3R 照片：89×127 → 78.8×116.8，裁掉极窄一圈）；框比照片大 → 只能把照片
+    放大（4R 纸打 3R 照片会变成 92×142），那是默默改了成品尺寸，不干。
+    框比照片大时保持标称尺寸、由装箱居中：左右相等、上下相等（取齐档）。
+
+    判定只能有这一个出处：GUI 靠它决定文案/可用性，build_job 靠它决定
+    Job.uniform_mm，render 靠它决定落位——三处各算一次就会报一套写另一套。
+    """
+    if cell.role != "paper" or borderless_active or mode == modes.BLEED_TRIM:
+        return False
+    box = specs.printable_rect(sheet, uniform_mm=mm)
+    return box.w_mm <= cell.w_mm + 0.01 and box.h_mm <= cell.h_mm + 0.01
+
+
 def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
-                 borderless_active=False):
+                 borderless_active=False, uniform_mm=None):
     """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
 
     本函数是唯一真相源，cli.build_plan_jobs 只是它的薄转发（Task 4）。
@@ -97,6 +114,20 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                          allow_rotate=allow_rotate, printable=full)
     if plan.count == 0:
         raise ValueError(f"{sheet.label} 放不下 {cell.label}，请换大纸或改小格子")
+    # 单张成品照片要“四周一样宽”：格子与整纸同尺寸时，按原内框装箱会退化
+    # 成同轴取齐（左右窄、上下宽）。改按等宽内框重排；仍然装不下就是整纸
+    # 一格，最终由 render 用同一个内框求交缩小。只对 1 格生效：多格时内框
+    # 尺寸是所有照片共享的，拿它当“边距”会把整页拖小。
+    if (uniform_mm is not None and plan.count == 1
+            and uniform_applies(sheet, cell, uniform_mm,
+                               borderless_active=borderless_active, mode=mode)):
+        box = specs.printable_rect(sheet, uniform_mm=uniform_mm)
+        plan = pack.pack(sheet, cell, gap_mm=0.0, bleed_mm=0.0,
+                         allow_rotate=allow_rotate, printable=box)
+        if plan.count == 0:
+            full = specs.RectMM(0.0, 0.0, sheet.w_mm, sheet.h_mm)
+            plan = pack.pack(sheet, cell, gap_mm=0.0, bleed_mm=0.0,
+                             allow_rotate=allow_rotate, printable=full)
     return plan, mode
 
 
@@ -117,6 +148,7 @@ class Job:
     date_overrides: tuple = ()
     wm_overrides: tuple = ()
     even_margins: bool = False   # 成品照片档：白边同轴取齐（见 wants_even_margins）
+    uniform_mm: float | None = None   # 单张成品照片：四边等宽的留白（见 build_layout）
 
     @property
     def count(self) -> int:
@@ -146,7 +178,7 @@ class Job:
                     f"（边距{provenance}）")
         # 文案里的数字必须与排版用的一致（同一档白边，含取齐与否）：
         # 照逐边原值写，界面就是在报另一套数字。
-        m = margins_for(self.sheet, self.even_margins)
+        m = margins_for(self.sheet, self.even_margins, self.uniform_mm)
         return (f"将保留白边：上{m.top}/下{m.bottom}/左{m.left}/右{m.right}mm"
                 f"（边距{provenance}）")
 
@@ -172,17 +204,34 @@ class Job:
                                   date_texts=dt_chunk,
                                   date_overrides=do_chunk,
                                   wm_overrides=wo_chunk,
-                                  even_margins=self.even_margins)
+                                  even_margins=self.even_margins,
+                                  uniform_mm=self.uniform_mm)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               bleed_mm=modes.DEFAULT_BLEED_MM, mode=None,
               offset_pct=(0.0, 0.0), borderless_active=False,
               rotations=(), date_overlay=None, watermark_overlay=None,
-              date_texts=(), date_overrides=(), wm_overrides=()) -> Job:
+              date_texts=(), date_overrides=(), wm_overrides=(),
+              uniform_mm=None) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
-                                  mode, borderless_active=borderless_active)
-    # 百分比原样交给 core：同一页可能两种朝向混排，"按哪个尺寸换算"是逐格
+                                  mode, borderless_active=borderless_active,
+                                  uniform_mm=uniform_mm)
+    cell = st.resolve(cell_key)
+    # 只在真正生效的那一种组合下把值交给 Job：多格、证件照拼版、出血档
+    # 都不算“单张四周等宽”，否则状态栏会报一套根本没用的数字。
+    uniform = (uniform_mm if (uniform_mm is not None
+                              and plan.count == 1
+                              and uniform_applies(st.resolve(sheet_key), cell,
+                                                 uniform_mm,
+                                                 borderless_active=borderless_active,
+                                                 mode=mode_eff)) else None)
+    # 存生效值而不是用户填的值：不足物理下限时（如要 4mm）要被抬到 5.1。
+    # 抬的值只能有一个出处，否则 Job.uniform_mm 与 note/render 各算各的。
+    if uniform is not None:
+        uniform = specs.uniform_margins(st.resolve(sheet_key).margins,
+                                        uniform).top
+    # 百分比原样交给 core：同一页可能两种朝向混排，“按哪个尺寸换算”是逐格
     # 决策（T3 评审 I-1），本层若先按首格换算成 mm，其余格的 ±50% 就失真
     return Job(plan=plan, mode=mode_eff, sheet=st.resolve(sheet_key),
                photos=list(photos),
@@ -193,7 +242,8 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
                date_texts=tuple(date_texts),
                date_overrides=tuple(date_overrides),
                wm_overrides=tuple(wm_overrides),
-               even_margins=wants_even_margins(st.resolve(cell_key)))
+               even_margins=wants_even_margins(cell),
+               uniform_mm=uniform)
 
 
 def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Image]:

@@ -169,6 +169,72 @@ def test_single_cell_on_same_size_paper_stays_inside_printable():
     assert img.getpixel((45, 63)) == (255, 0, 0)  # 可打印区中心有画面
 
 
+def test_uniform_border_is_equal_on_all_four_sides():
+    """单张四周等宽白边：1px=1mm，四边逐像素量出来必须一样宽（用户 2026-11-07）。
+
+    落位不得再与格子求交：格子是整纸时求交会把等宽退化成同轴取齐（左3.5、
+    上5.1），肉眼一眼看出左右比上下窄。5.1mm 取整后是 5px。
+    """
+    r3 = specs.find_spec("3R")
+    # 纸与格子同尺寸：装箱只能得“整纸一格”，等宽内框由 render 自己收紧
+    plan = pack.pack(r3, r3, printable=specs.RectMM(0, 0, 89.0, 127.0))
+    assert plan.count == 1
+    img = render.render_page(plan, _photos(1, (255, 0, 0)), r3, DPI,
+                             modes.FILL_PRINTABLE, show_mask=False,
+                             show_cut_lines=False, uniform_mm=5.1)
+    assert img.size == (89, 127)
+    px = img.load()
+    cols = [x for x in range(89) if any(px[x, y] != (255, 255, 255)
+                                        for y in range(127))]
+    rows = [y for y in range(127) if any(px[x, y] != (255, 255, 255)
+                                        for x in range(89))]
+    assert (min(cols), 88 - max(cols)) == (5, 5)     # 左右各 5mm
+    assert (min(rows), 126 - max(rows)) == (5, 5)    # 上下各 5mm
+
+
+def test_uniform_border_respects_fit_mode_without_cropping():
+    """完整放入 + 四周留白：不裁画面，只是“至少留 5.1mm”。
+
+    横图（200×100）放 3R 纸：按内框等比装入 → 宽度铺满内框（左右各 5px），
+    上下留得更多。如果这里为了凑“四边等宽”而裁成竖构图，就是在用户选了
+    “完整放入”的情况下偷改画面。
+    """
+    r3 = specs.find_spec("3R")
+    plan = pack.pack(r3, r3, printable=specs.RectMM(0, 0, 89.0, 127.0))
+    img = render.render_page(plan, _photos(1, (255, 0, 0)), r3, DPI,
+                             modes.FIT_TO_PRINTABLE, show_mask=False,
+                             show_cut_lines=False, uniform_mm=5.1)
+    px = img.load()
+    cols = [x for x in range(89) if any(px[x, y] != (255, 255, 255)
+                                        for y in range(127))]
+    rows = [y for y in range(127) if any(px[x, y] != (255, 255, 255)
+                                         for x in range(89))]
+    assert min(cols) >= 5 and 88 - max(cols) >= 5      # 左右不低于 5.1
+    assert min(rows) >= 5 and 126 - max(rows) >= 5     # 上下不低于 5.1
+    assert min(rows) > min(cols)                       # 横图：上下留得更多，未裁画面
+
+
+def test_uniform_border_does_not_enlarge_smaller_photo():
+    """4R 纸打 3R 照片：等宽框比照片大，render 必须拒绝放大（直接调也不许）。
+
+    框 91.8×141.8 > 照片 89×127，若照样铺满就把 3R 打成 92×142。此时退回
+    格子矩形 + 取齐白边：照片尺寸不变，左右各有白边（不是四边等宽）。
+    """
+    r4 = specs.find_spec("4R")
+    plan = pack.pack(r4, specs.find_spec("3R"),
+                     printable=specs.printable_rect(r4, even=True))
+    assert plan.count == 1
+    img = render.render_page(plan, _photos(1, (255, 0, 0)), r4, DPI,
+                             modes.FILL_PRINTABLE, show_mask=False,
+                             show_cut_lines=False, even_margins=True,
+                             uniform_mm=5.1)
+    px = img.load()
+    cols = [x for x in range(102) if any(px[x, y] != (255, 255, 255)
+                                         for y in range(152))]
+    # 照片宽度必须仍是 3R 的 89mm，而不是等宽框的 91.8mm
+    assert max(cols) - min(cols) + 1 == 89
+
+
 def test_intersect_mm():
     a = (0.0, 0.0, 89.0, 127.0)
     b = (3.4, 3.0, 82.2, 119.0)

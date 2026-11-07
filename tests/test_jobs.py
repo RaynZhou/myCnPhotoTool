@@ -128,6 +128,65 @@ def test_photo_grid_on_a4_uses_even_box(st):
     assert plan.printable.h_mm == pytest.approx(286.8)
 
 
+def test_uniform_margin_makes_four_sides_equal_on_single_photo(st):
+    """单张（3R 纸 + 3R 照片）勾「四周等宽白边」：报数是四边同一档。
+
+    不加这一档时是“同轴取齐”（上5.1/下5.1/左3.5/右3.5）；用户 2026-11-07
+    要的是“四周一样宽”。多格不生效：内框是所有照片共享的，拿它当边距
+    会把整页拖小。
+    """
+    job = jobs.build_job(st, _photos(1), "3R", "3R",
+                         mode=modes.FILL_PRINTABLE, uniform_mm=5.1)
+    assert job.count == 1
+    assert job.uniform_mm == 5.1
+    assert "上5.1/下5.1/左5.1/右5.1mm" in job.note
+
+    # 多格时 uniform_mm 必须失效，格数不能因此少（A4 一寸仍是 72）
+    mult = jobs.build_job(st, _photos(1), "A4", "ID1", uniform_mm=5.1)
+    assert mult.count == 72
+    assert mult.uniform_mm is None
+    assert "左3.4/右3.4mm" in mult.note
+
+
+def test_uniform_margin_is_lifted_to_physical_floor(st):
+    """要 4mm 会被抬到物理下限 5.1mm：下边 5.04mm 打不到，不是可以商量的。
+
+    纸与格子同尺寸时（3R/3R）等宽内框装不下原尺寸照片，build_layout 退成
+    “整纸一格”，实际落位交给 render 用同一个内框求交缩小（见
+    test_render_geometry.test_uniform_border_is_equal_on_all_four_sides）。
+    这里钉两件事：格数不丢，报数是四边 5.1 而不是逐边原值。
+    """
+    job = jobs.build_job(st, _photos(1), "3R", "3R",
+                         mode=modes.FILL_PRINTABLE, uniform_mm=4.0)
+    assert job.count == 1
+    assert job.uniform_mm == 5.1          # 4.0 被抬到物理下限
+    assert "上5.1/下5.1/左5.1/右5.1mm" in job.note
+
+
+def test_uniform_margin_never_enlarges_the_photo(st):
+    """4R 纸打 3R 照片：等宽框比照片大，勾等宽会把 3R 放大成 92×142。
+
+    那是默默改了成品尺寸，所以这一档直接不生效（`uniform_applies` 一处判定），
+    照片保持标称 89×127、由装箱居中（左右相等、上下相等）。
+    """
+    job = jobs.build_job(st, _photos(1), "4R", "3R",
+                         mode=modes.FILL_PRINTABLE, uniform_mm=5.1)
+    assert job.count == 1
+    assert job.uniform_mm is None
+    assert job.plan.cells[0].w_mm == pytest.approx(89.0)
+    assert job.plan.cells[0].h_mm == pytest.approx(127.0)
+    assert "左3.5/右3.5mm" in job.note      # 退回取齐档，不谎报四边 5.1
+
+    # 纸与照片同规格时才成立：框比照片小，只能缩不能放
+    assert jobs.uniform_applies(st.resolve("3R"), st.resolve("3R"), 5.1)
+    assert not jobs.uniform_applies(st.resolve("4R"), st.resolve("3R"), 5.1)
+    # 出血档与无边距生效时也不成立
+    assert not jobs.uniform_applies(st.resolve("3R"), st.resolve("3R"), 5.1,
+                                    mode=modes.BLEED_TRIM)
+    assert not jobs.uniform_applies(st.resolve("3R"), st.resolve("3R"), 5.1,
+                                    borderless_active=True)
+
+
 def test_note_probed_source_says_driver_measured(st):
     st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "probed")
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)

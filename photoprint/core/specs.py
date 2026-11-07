@@ -51,8 +51,26 @@ def even_margins(m: Margins) -> Margins:
     return Margins(top=dy, bottom=dy, left=dx, right=dx)
 
 
-def used_margins(m: Margins, even: bool = False) -> Margins:
-    """排版实际使用的一档白边：even=True 同轴取齐，否则沿用逐边原值。"""
+def uniform_margins(m: Margins, mm: float) -> Margins:
+    """四边等宽白边：取 max(要的值, 物理下限)。
+
+    物理下限 = 两轴取齐后的较大者（3R 为 5.1mm）——比它更窄，就必定有某
+    一边落在不可印区里、打不出来。用于“单张照片四周留一样宽的白”。
+    """
+    low = max(even_margins(m).top, even_margins(m).left)
+    v = round(max(float(mm), low), 2)
+    return Margins(top=v, bottom=v, left=v, right=v)
+
+
+def used_margins(m: Margins, even: bool = False,
+                 uniform_mm: Optional[float] = None) -> Margins:
+    """排版实际使用的一档白边。
+
+    uniform_mm 优先（四边等宽，单张成品照片用）；否则 even=True 同轴取齐，
+    否则沿用逐边原值。三档互斥，避免出现“遮罩按一套、内容按另一套”。
+    """
+    if uniform_mm is not None:
+        return uniform_margins(m, uniform_mm)
     return even_margins(m) if even else m
 
 
@@ -139,7 +157,8 @@ def find_spec(key: str) -> SizeSpec:
 
 
 def printable_rect(spec: SizeSpec, borderless_active: bool = False,
-                   even: bool = False) -> RectMM:
+                   even: bool = False,
+                   uniform_mm: Optional[float] = None) -> RectMM:
     """可打印矩形。
 
     borderless_active 只有在驱动探测或真机校准实测到无边距已生效时才可为 True；
@@ -149,6 +168,9 @@ def printable_rect(spec: SizeSpec, borderless_active: bool = False,
     场景（3R 纸打 3R 照片、4R 纸打 3R 照片）。证件照拼版不传：那类白边只是
     废料、要裁掉，换成取齐会把 A4 的一整排（一寸照 9 排→8 排）白丢。
 
+    uniform_mm 非 None：四边都按这一档留白（不足物理下限时自动抬到下限）。
+    这是“单张四周留一样宽白边”的唯一入口；与 even 同时传时以它为准。
+
     守卫：官方无边距清单之外的纸张（含一切自定义尺寸）传 True 直接报错。
     宁可当场报错也不能静默按整纸排版——后者就是规格 7.3 禁止的谎报。
     """
@@ -156,7 +178,7 @@ def printable_rect(spec: SizeSpec, borderless_active: bool = False,
         raise ValueError(f"{spec.key} 不支持无边距，borderless_active 不得为 True")
     if borderless_active:
         return RectMM(0.0, 0.0, spec.w_mm, spec.h_mm)
-    m = used_margins(spec.margins, even)
+    m = used_margins(spec.margins, even, uniform_mm)
     return RectMM(m.left, m.top, spec.w_mm - m.left - m.right,
                   spec.h_mm - m.top - m.bottom)
 

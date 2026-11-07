@@ -198,6 +198,48 @@
 - [x] 新增 1 条用例（单格置灰 / 多格可用），改名 2 条旧用例；变异验牙：
   `setEnabled(True)` 写死 → 新用例转红，已还原。
 
+### 补丁：单张四周等宽白边（2026-11-07，用户：“单张如果需要留四周的边距，四周留等宽度白边”）
+
+- [x] 先算物理边界再动手：3R 不可印区 左3.4/上3.0/右3.4/下5.0，同轴取齐后
+  上下 5.1／左右 3.5；**四边完全等宽的下限 = 5.1mm**（下边 5.04mm 打不到），
+  所以用户说的 4mm 物理不可能，只能在 5.1/6/8/10 里选。用户选 5.1。
+- [x] 新增 `specs.uniform_margins(m, mm)`（取 `max(要的值, 物理下限)`）与
+  `specs.used_margins(m, even, uniform_mm)`（单点裁决等宽/取齐/逐边三档互斥）；
+  `printable_rect` 加 `uniform_mm` 参数。
+- [x] `jobs.build_layout`：仅当 `role=="paper"`、`count==1`、非出血、非无边距时
+  按等宽内框重排（多格不生效，否则整页被拖小）。
+- [x] `render.render_page`：`uniform` 生效时落位直接用可打印框（不与格求交，
+  求交会把等宽退化成同轴取齐）、裁切按当前模式（见下方“修正一个危险实现”）、
+  遮罩同档。
+- [x] `Job.uniform_mm` + `build_job(uniform_mm=…)`；`Job.note` 与 `cli` 都走
+  `margins_for(..., uniform_mm)`，报数与出片同源。
+- [x] GUI 同一行按场景换文案：1 格 → 「四周留白 ≥5.1mm」（不置灰），
+  多格 → 「留边距 2mm」；`_params()` 同时给 `gap_mm` 与 `uniform_mm`。
+- [x] 离屏实测（150dpi，3R 纸 + 3R 照片，用户实拍图，`_lab/out/make_uniform_compare.py`）：
+  完整放入 不勾 上9.1/下9.0/左3.6/右3.6；勾上 上11.2/下11.2/左5.1/右5.2；
+  铺满 不勾 上5.1/下5.1/左3.6/右3.6；勾上 **上5.1/下5.1/左5.1/右5.2（真等宽）**。
+  对照图：`_lab/out/uniform_compare.png`。
+- [x] 修正一个危险实现：初版在 uniform 档强制走 `crop.FILL`，横图勾上后被裁成
+  竖构图一大块（对照图实测）——那是在用户选了“完整放入”的情况下偷改画面。
+  改为裁切仍按当前模式：铺满 → 四边严格相等；完整放入 → 至少 5.1、不裁画面。
+  文案相应从“四周等宽白边 5.1mm”改成“四周留白 ≥5.1mm”（不承诺做不到的事）。
+- [x] 用例：`test_single_cell_margin_turns_into_uniform_border`（文案/参数/切回多格
+  回落）；旧用例 `test_margin_switch_is_greyed_out_on_single_cell` 已作废删除。
+- [x] 发现的坑：4R 纸 + 3R 照片勾等宽时，框（91.8×141.8）比照片（89×127）大，
+  `crop.FILL` 会把 3R 打成 **92×142**（纵向 +12%）——默默改了成品尺寸，不可接受。
+  改为 `jobs.uniform_applies` 单点判定“框不得大于标称照片”，不满足就不生效、
+  按钮置灰并说明原因（`_SINGLE_NO_TIP`）。
+- [x] 新增用例：`test_uniform_margin_never_enlarges_the_photo`（jobs）、
+  `test_uniform_border_does_not_enlarge_smaller_photo`（render 宽度仍 89mm）、
+  `test_uniform_border_is_equal_on_all_four_sides`（1px=1mm 四边逐像素 5/5/5/5）、
+  `test_uniform_margin_is_lifted_to_physical_floor`（4.0 → 5.1）。
+- [x] 变异验牙：`uniform_applies` 改成永远 `True` → `never_enlarges` 转红；已还原，
+  `MUTATION-TEMP` 计数 0。全量 **482 passed**。
+- 已知：不改 `Job.uniform_mm` 的意图时 4mm 会被抬到 5.1，且抬的值存在
+  `Job.uniform_mm` 里（不在调用方各算一遍）。
+- 未覆盖：白边宽度不给用户填（只此一档 5.1mm）。要 6/8/10mm 需再加控件，
+  按“面板不再加数值框”的既有裁决暂不做。
+
 ## Self-Review
 
 - 向后兼容：`media=None, quality=None` 时 update 次数、DEVMODE 内容、CLI stdout、

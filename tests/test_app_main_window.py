@@ -230,23 +230,36 @@ def test_margin_is_a_switch_not_a_number(qapp, tmp_path):
     assert 0 < w.job.count < full               # 有边距：必然少几格
 
 
-def test_margin_switch_is_greyed_out_on_single_cell(qapp, tmp_path):
-    """单张（3R 纸打 3R 照片）没有相邻格：开关置灰，白边由不可印区决定。
+def test_single_cell_margin_turns_into_uniform_border(qapp, tmp_path):
+    """一页只有一格时，“边距”那一行变成“四周留白 ≥5.1mm”。
 
-    置灰而不是静默无效，是为了不让用户以为“勾了没反应”（用户 2026-11-07）。
+    单张没有相邻格，间距无从谈起；但四周白边是真实需求（用户 2026-11-07）。
+    切回多格时文案与含义都回到“留边距 2mm”，留白值不生效。
+    文案用“≥”而不是“等宽”：铺满档才是严格相等，完整放入档某边会更宽。
     """
     w = MainWindow(st=_store(tmp_path))
     w.sheet_box.setCurrentIndex(w.sheet_box.findData("3R"))
     w.cell_box.setCurrentIndex(w.cell_box.findData("3R"))
     w._refresh()
     assert w.job.count == 1
-    assert w.margin_cb.isEnabled() is False
-    assert "不可印" in w.margin_cb.toolTip()
+    assert w.margin_cb.isEnabled() is True       # 不置灰：这一档现在真有用
+    assert "四周留白" in w.margin_cb.text()
+    assert "物理极限" in w.margin_cb.toolTip()
+    assert "铺满可打印区" in w.margin_cb.toolTip()   # 要严格等宽指路模式下拉
+    assert w.margin_cb.isChecked() is False
+    assert w._params()["uniform_mm"] is None
+
+    w.margin_cb.setChecked(True)
+    w._refresh()
+    assert w._params()["uniform_mm"] == main_window.UNIFORM_MARGIN_MM == 5.1
+    assert w.job.uniform_mm == 5.1
+    assert "上5.1/下5.1/左5.1/右5.1mm" in w.job.note
 
     w.sheet_box.setCurrentIndex(w.sheet_box.findData("A4"))
     w._refresh()
     assert w.job.count > 1
-    assert w.margin_cb.isEnabled() is True
+    assert "留边距" in w.margin_cb.text()
+    assert w.job.uniform_mm is None       # 多格：留白值不生效，留给格间缝
 
 
 def test_bleed_is_fixed_at_default(qapp, tmp_path):

@@ -240,6 +240,31 @@
 - 未覆盖：白边宽度不给用户填（只此一档 5.1mm）。要 6/8/10mm 需再加控件，
   按“面板不再加数值框”的既有裁决暂不做。
 
+### 补丁：预览不可印区改斜纹（2026-11-07，用户：“都是灰色底板，根本看不出白边”）
+
+- 现象：预览把 `margins` 那圈整条涂 `MASK_RGB@110`。单张四周留白时，这圈白边
+  正好被灰盖住——用户要看的“白边多宽”被遮死；截图里只剩一块灰底板。
+- 决定（回到 2026-11-03 设计 L1 的原意“半透明斜纹带”）：
+  - 带子 = 白纸 + 45° 浅灰斜纹（`HATCH_RGB=(200,200,200)`、`HATCH_MM=2.0`），
+    只压线不铺底 → 白纸仍是白的，宽度一眼能量出来。
+  - 实心灰只画在「`placed` 落位与带子的交叠处」（`intersect_mm`，<0.05mm 不算）
+    → 只要看到实心灰，就一定在丢画面。正常拼版（含出血居中）都没有交叠。
+  - 斜纹用 L 通道当蒙版 paste，不用“先填白再画线”：出血档带子里可能已有画面，
+    填白会把内容挖掉。
+- 被推翻的旧用例（都钉“整圈 = 合成灰 210”）：
+  `test_render_geometry::test_mask_covers_physical_margin_band`、
+  `test_cli::test_main_mask_flag_keeps_mask`、
+  `test_app_main_window::test_exported_page_has_no_unprintable_mask`。
+  改为按 **带内像素占比** 断言（有墨、但 <40%，且 `(210,210,210)` 不得回来）。
+  第一版探针写到带外（x=3 已越过 3.4mm 带），“实心块”也能过——已改为只在带内取样。
+- 新增 `test_mask_goes_solid_only_where_photo_is_at_risk`：手搭 `pack.LayoutPlan`，
+  格从 -2mm 起画（画面压进左带），断言实心灰只在那里出现。
+- 变异验牙：`_hatch` 里加一行实心 paste → 上面两条转红（`(255,255,255) in band`
+  失败）；已还原，`MUTATION-TEMP` 计数 0。全量 **484 passed**。
+- 导出侧不变：`show_mask=False` 四边仍纯白（同一条用例的 `ink(page) == 0` 钉住）。
+- 未覆盖：斜纹深浅（`200`、每 2mm 一条）只按截图目测调过，未经真机比对；
+  若打出来觉得脏，可只改 `HATCH_RGB` / `HATCH_MM` 两个常量。
+
 ## Self-Review
 
 - 向后兼容：`media=None, quality=None` 时 update 次数、DEVMODE 内容、CLI stdout、

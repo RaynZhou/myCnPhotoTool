@@ -166,7 +166,11 @@ def test_main_out_png_has_no_unprintable_mask(tmp_path):
 
 
 def test_main_mask_flag_keeps_mask(tmp_path):
-    """默认关不等于删功：调试时 `--mask` 必须还能把遮罩拿回来。"""
+    """默认关不等于删功：调试时 `--mask` 必须还能把遮罩拿回来。
+
+    带子自 2026-11-07 起是「白纸 + 浅灰斜纹」（实心灰会把整圈白边遮死，
+    用户无法目测留多宽），所以探针改为“带内既有斜纹也有白纸”。
+    """
     from PIL import Image
 
     out = tmp_path / "page.png"
@@ -176,9 +180,12 @@ def test_main_mask_flag_keeps_mask(tmp_path):
     assert code == 0
     img = Image.open(out)
     w, h = img.size
-    # (210, 210, 210) = MASK_RGB(150) 以 alpha 110 压在白纸上的合成值
-    assert img.getpixel((1, h // 4)) == (210, 210, 210)
-    assert img.getpixel((w // 4, 1)) == (210, 210, 210)
+    left = [img.getpixel((x, h // 4)) for x in range(0, 3)]   # 左带 0..2px
+    top = [img.getpixel((w // 4, y)) for y in range(0, 3)]    # 上带 0..2px
+    for band in (left, top):
+        assert (200, 200, 200) in band        # 斜纹画了
+        assert (255, 255, 255) in band        # 但不是实心块：白边还看得见
+        assert (210, 210, 210) not in band    # 旧实心灰不得回来
 
 
 def test_build_plan_jobs_is_still_positional(st):

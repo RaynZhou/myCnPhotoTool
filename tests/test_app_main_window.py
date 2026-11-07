@@ -121,12 +121,15 @@ def test_ui_defaults_match_shared_constants(qapp, tmp_path):
 
 
 def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
-    """导出（show_mask=False）产物四边必须纯白——不可印区灰遮罩只属于预览。
+    """导出（show_mask=False）产物四边必须纯白——不可印区标记只属于预览。
 
     旧版在 dpi 25.4 下用负断言 `!= (210,210,210)`：A4 遮罩带在该 dpi 只覆盖 0..2px，
     探针 (3, ·) 落带外 → 导出即使误开遮罩也报不了（恒真零牙）。改用与界面导出同源的
-    `DEFAULT_OUTPUT_DPI`（遮罩带 0..39px 把四边探针包住），四边正断言纯白，并加一层
-    `show_mask=True` 正对照先钉四边确为合成灰，断言才有牙。
+    `DEFAULT_OUTPUT_DPI`，整条左带逐像素比对，纯白断言才有牙。
+
+    带子自 2026-11-07 起是「白纸 + 浅灰斜纹」而不是实心块（实心灰会把整圈白边
+    遮死，用户无法目测留多宽），所以正对照改为“预览在带内确实有墨、且占比远小于
+    一半”。
     """
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
@@ -135,9 +138,19 @@ def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
     wpx, hpx = page.size
     probes = [(3, hpx // 2), (wpx // 2, 3), (wpx - 4, hpx // 2), (wpx // 2, hpx - 4)]
     assert [page.getpixel(xy) for xy in probes] == [(255, 255, 255)] * 4
-    # 正对照：同图开遮罩必须先看到灰遮罩色，否则上面的纯白可能因整体渲染坏掉而恒真。
+
+    band_w = int(3.4 * dpi / 25.4)          # 左带 3.4mm 宽
+    rows = range(0, hpx, 7)
+
+    def ink(img):
+        return sum(1 for x in range(1, band_w) for y in rows
+                   if img.getpixel((x, y)) != (255, 255, 255))
+
+    total = (band_w - 1) * len(list(rows))
+    assert ink(page) == 0                    # 导出：带内一尘不染
     masked = jobs.render_all(w.job, dpi, show_mask=True)[0]
-    assert [masked.getpixel(xy) for xy in probes] == [(210, 210, 210)] * 4
+    assert ink(masked) > 0                   # 正对照：预览确实做了标记
+    assert ink(masked) < total * 0.4         # 但是斜纹不是实心块：白边看得见
 
 
 def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):

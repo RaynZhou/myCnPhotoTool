@@ -72,13 +72,43 @@ def test_bleed_mode_overlays_inner_trim_guides():
     assert img.getpixel((x_mid, int(iy) - 1)) == (0, 255, 0)
 
 
-def test_mask_covers_physical_margin_band():
-    plan, img = _a4_3r(photos=_photos(4, (0, 0, 255)))
+def test_margin_band_is_hatch_so_border_stays_visible():
+    """保留边画斜纹、不铺实心灰：白边必须能目测（2026-11-07 用户反馈）。
+
+    旧版把四条带子整条涂 (150,150,150)@110：单张四周留白时，那圈白边正好被
+    盖成一整块灰，用户看不出留了多宽。现在带子是「白纸 + 浅灰斜纹」：既有
+    “这圈不可印”的标记，又能直接量出白边宽度。
+    取样只在带内：抄到带外的白纸像素会让“实心块”也能通过（实测过一次）。
+    """
     a4 = specs.find_spec("A4")
-    # 左边缘 3.4mm 内属不可印区，应被遮罩压暗，不得是纯白也不是照片色
-    px = img.getpixel((1, 150))
+    dpi = 96.0
+    plan = pack.pack(a4, specs.find_spec("3R"),
+                     printable=specs.RectMM(0.0, 0.0, 210.0, 297.0))
+    img = render.render_page(plan, _photos(plan.count, (0, 0, 255)), a4, dpi,
+                             modes.FILL_PRINTABLE, show_cut_lines=False)
+    band = int(3.4 * dpi / 25.4)            # 左带 3.4mm
+    px = [img.getpixel((x, y)) for x in range(0, band) for y in range(0, 200)]
+    ink = sum(1 for c in px if c != (255, 255, 255))
+    assert ink > 0                          # 带子确实做了标记
+    assert ink < len(px) * 0.4              # 但不是实心块：白边仍看得见
+    assert (210, 210, 210) not in px        # 旧实心灰不得回来
+
+
+# 画面真压进不可印区（出血格越过纸边）时，必须给实心灰告警：没有这条正对照，
+# 把上面那条“看得见白边”靠着把带子整个删掉也能通过。
+def test_mask_goes_solid_only_where_photo_is_at_risk():
+    r3 = specs.find_spec("3R")
+    cell = pack.Cell(x_mm=-2.0, y_mm=-2.0, w_mm=89.0, h_mm=127.0,
+                     rotated=False, bleed_mm=0.0)
+    plan = pack.LayoutPlan(cells=[cell], cuts=[], count=1, waste_mm2=0.0,
+                           strategy="test",
+                           printable=specs.RectMM(0.0, 0.0, 89.0, 127.0))
+    img = render.render_page(plan, _photos(1, (0, 0, 255)), r3, DPI,
+                             modes.BLEED_TRIM, show_mask=True,
+                             show_cut_lines=False)
+    px = img.getpixel((1, 60))          # 左带里、下面有照片
+    assert px != (0, 0, 255)            # 被实心灰压过
     assert px != (255, 255, 255)
-    assert px != (0, 0, 255)
 
 
 def test_cut_lines_are_drawn_and_light_gray():

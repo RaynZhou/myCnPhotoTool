@@ -16,6 +16,10 @@ CUT_LINE_GRAY = 217  # 15% 灰：不抢画面，又能在照片上看见
 CUT_LINE_MM = 0.35
 MASK_RGB = (150, 150, 150)
 _MASK_ALPHA = 110
+# 保留边（不可印区）画成斜纹而不是实心块：实心灰会把整圈白边遮死，用户
+# 无法目测留多宽（2026-11-07 反馈）。斜纹只压线，纸还是白的。
+HATCH_RGB = (200, 200, 200)
+HATCH_MM = 2.0
 
 # 逐图旋转（M3-GUI 增量）：顺时针角度 → PIL transpose 操作。
 # PIL 的 ROTATE_270 是顺时针 90°，与旋转格既有用法同口径。
@@ -63,6 +67,23 @@ def offset_mm_for_cell(offset_pct, w_mm, h_mm):
     算出的那一格成立（T3 评审 I-1）。
     """
     return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
+
+
+def _hatch(page, box_px, step_px):
+    """在 box_px（含端点像素）内画 45° 斜纹，只压线不铺底。
+
+    用 L 通道当蒙版 paste，而不是先填白再画线：带子里可能已经有照片内容
+    （出血档），填白会把画面挖掉。
+    """
+    x0, y0, x1, y1 = box_px
+    w, h = x1 - x0 + 1, y1 - y0 + 1
+    if w <= 0 or h <= 0:
+        return
+    lines = Image.new("L", (w, h), 0)
+    ld = ImageDraw.Draw(lines)
+    for k in range(-h, w + h, step_px):
+        ld.line([(k, h - 1), (k + h, 0)], fill=255, width=1)
+    page.paste(HATCH_RGB, (x0, y0, x0 + w, y0 + h), lines)
 
 
 def _mask_bands(sheet, margins):
@@ -124,6 +145,7 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
     # even_margins=True 时白边同轴取齐（照片当成品）：内容框与遮罩带用同一档。
     printable = specs.printable_rect(sheet, borderless_active=borderless_active,
                                      even=even_margins, uniform_mm=uniform)
+    placed: list[tuple[float, float, float, float]] = []   # 每张照片的真实落位（mm）
 
     for idx, cell in enumerate(plan.cells):
         photo = photos[idx] if idx < len(photos) else None
@@ -177,6 +199,10 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
         paste_x = units.mm_to_px(ox + dx, dpi)
         paste_y = units.mm_to_px(oy + dy, dpi)
         page.paste(piece, (paste_x, paste_y))
+        # 记录真实落位（mm）：遮罩只画“会盖掉画面”的那几块（见下方）
+        placed.append((ox + dx, oy + dy,
+                       piece.width / units.ppmm(dpi),
+                       piece.height / units.ppmm(dpi)))
 
         # 逐张叠加文字（日期/水印）：落位矩形为贴图区，逐格 clip 不溢邻格
         rect_px = (paste_x, paste_y, piece.width, piece.height)
@@ -191,15 +217,26 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 spec = _with_corner_rot(date_overlay, d_ov)
                 text_overlay.draw_overlay(page, rect_px, spec, dt, dpi)
 
-    # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；
-    # 正常拼版下照片都在可打印区内，不会被遮罩压到
+    # 保留边（不可印区）画斜纹：纸仍是白的，能直接目测白边多宽；实心灰只在
+    # 「画面真会被裁」的交叠处出现，所以只要看到实心灰，就一定在丢画面。
     if show_mask and not borderless_active:
         used = specs.used_margins(sheet.margins, even_margins, uniform)
-        for bx, by, bw, bh in _mask_bands(sheet, used):
-            draw.rectangle(
-                [units.mm_to_px(bx, dpi), units.mm_to_px(by, dpi),
-                 units.mm_to_px(bx + bw, dpi) - 1, units.mm_to_px(by + bh, dpi) - 1],
-                fill=MASK_RGB + (_MASK_ALPHA,))
+        step = max(2, int(round(HATCH_MM * units.ppmm(dpi))))
+        for band in _mask_bands(sheet, used):
+            bx, by, bw, bh = band
+            _hatch(page, (units.mm_to_px(bx, dpi), units.mm_to_px(by, dpi),
+                          units.mm_to_px(bx + bw, dpi) - 1,
+                          units.mm_to_px(by + bh, dpi) - 1), step)
+            for rect in placed:
+                got = intersect_mm(band, rect)
+                if got is None or got[2] < 0.05 or got[3] < 0.05:
+                    continue
+                gx, gy, gw, gh = got
+                draw.rectangle(
+                    [units.mm_to_px(gx, dpi), units.mm_to_px(gy, dpi),
+                     units.mm_to_px(gx + gw, dpi) - 1,
+                     units.mm_to_px(gy + gh, dpi) - 1],
+                    fill=MASK_RGB + (_MASK_ALPHA,))
 
     if show_cut_lines and len(plan.cells) >= 2:
         lw = max(1, units.mm_to_px(CUT_LINE_MM, dpi))

@@ -2,7 +2,7 @@
 _emit 被 monkeypatch，故本文件全程不 import win32（gdi_print 顶部也不 import）。"""
 import types
 
-from photoprint.win import devmode, forms, gdi_print
+from photoprint.win import devmode, forms, gdi_print, media
 from photoprint.win.api import PromptCancelled
 
 
@@ -211,3 +211,55 @@ def test_custom_rejected_note_absent_when_form_used(monkeypatch):
 def test_target_size_helper_defaults_to_nominal():
     assert gdi_print._target_size(Sheet, None) == (89.0, 127.0)
     assert gdi_print._target_size(Sheet, (88.98, 127.0)) == (88.98, 127.0)
+
+
+# ---- 介质类型 / 打印质量透传（spec 2026-11-07）--------------------------
+
+def _capture_build(monkeypatch):
+    """记录 build_with_prompt 收到的全部参数，并让 _emit 成功。"""
+    seen = {}
+
+    def fake_build(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return ("DM", 520, False)
+
+    monkeypatch.setattr(devmode, "build_with_prompt", fake_build)
+    monkeypatch.setattr(gdi_print, "_emit", lambda *a, **k: {
+        "ok": True, "pages": 1, "message": ""})
+    return seen
+
+
+def test_media_and_quality_reach_build(monkeypatch):
+    seen = _capture_build(monkeypatch)
+    opt = media.MediaOption(303, "高级光面照片纸 II")
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300,
+                                media=opt, quality=media.QUALITY_HIGH)
+    assert seen["kwargs"]["media"] is opt
+    assert seen["kwargs"]["quality"] == -4
+    assert res["media_note"] == "介质 高级光面照片纸 II · 质量 高"
+
+
+def test_default_call_shape_is_unchanged(monkeypatch):
+    """不传 media/quality 时不得把它们作为 None 塞给 build（调用形状冻住）。"""
+    seen = _capture_build(monkeypatch)
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300, prompt=False)
+    assert set(seen["kwargs"]) == {"prompt"}
+    assert len(seen["args"]) == 5, "位置参数仍是 api/printer/w/h/code，未增"
+    assert "media_note" not in res      # 返回值形状也不变
+
+
+def test_media_note_absent_when_only_defaults(monkeypatch):
+    _capture_build(monkeypatch)
+    res = gdi_print.print_pages(object(), "P", _imgs(1), Sheet, 300)
+    assert "media_note" not in res
+
+
+def test_print_job_forwards_media_and_quality(monkeypatch):
+    seen = _capture_build(monkeypatch)
+    gdi_print.print_job(object(), "P", None, _imgs(1), Sheet, 300,
+                        media=303, quality=-4)
+    assert seen["kwargs"]["media"] == 303
+    assert seen["kwargs"]["quality"] == -4
+    assert seen["kwargs"]["prompt"] is False
+

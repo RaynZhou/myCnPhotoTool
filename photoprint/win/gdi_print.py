@@ -36,7 +36,8 @@ def pick_dpi(driver_dpi, cap=600):
     return max(DPI_FLOOR, min(int(driver_dpi), int(cap)))
 
 
-def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
+def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None,
+                media=None, quality=None):
     """打印多页。prompt=True 时弹驱动设置页让用户选介质（I-1 由 devmode 保证
     几何权威），交 `_emit` 建 DC 送图。返回 {'ok','pages','message'}，异常不外抛；
     驱动页取消回 {'cancelled': True}，弹窗降级成功时回 {'degraded': True}。
@@ -44,9 +45,13 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
     forms 是 forms.measure() 的实测表单清单（可为 None/空＝没探测到）：
     命中则用驱动**自带表单码**建 DEVMODE，并把物理校验目标换为该表单实测尺寸。
     未命中时一律沿用静态码与标称尺寸——与本功能上线前逐字一致。
+
+    media/quality 是介质与质量档（win.media）：只透传，不在这里解释数值。
+    两者都不传时调用形状与返回值形状与旧版逐字一致（不塞 media=None）。
     """
     from photoprint.win import devmode as dm_mod
     from photoprint.win import forms as forms_mod
+    from photoprint.win import media as media_mod
     from photoprint.win.api import PromptCancelled
 
     if not images:
@@ -54,10 +59,15 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
     form = forms_mod.find(forms, sheet.w_mm, sheet.h_mm) if forms else None
     paper_code = form.code if form is not None else sheet.driver_paper_code
     target_mm = (form.w_mm, form.h_mm) if form is not None else None
+    opts = {}
+    if media is not None:
+        opts["media"] = media
+    if quality is not None:
+        opts["quality"] = quality
     try:
         dm_obj, _size, degraded = dm_mod.build_with_prompt(
             api, printer, sheet.w_mm, sheet.h_mm, paper_code,
-            prompt=prompt)
+            prompt=prompt, **opts)
     except PromptCancelled:
         # W-1：用户在驱动页取消 → 放弃打印，不是错误（UI 走“已取消”非红字）
         return {"ok": False, "cancelled": True, "pages": 0, "message": "已取消"}
@@ -79,6 +89,9 @@ def print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
         res["paper_form"] = form.as_dict()
     if degraded and res.get("ok"):
         res["degraded"] = True      # W-3：降级仍打成功，标记供 UI 附提示
+    note = media_mod.note(media, quality)
+    if note and res.get("ok"):
+        res["media_note"] = note    # 只在真选了东西时多这个键（形状不变）
     return res
 
 
@@ -160,11 +173,12 @@ def _emit(api, printer, dm_obj, images, sheet, dpi, target_mm=None):
         return {"ok": False, "pages": 0, "message": f"打印失败：{exc}"}
 
 
-def print_job(api, printer, port, images, sheet, dpi, dm=None, forms=None):
+def print_job(api, printer, port, images, sheet, dpi, dm=None, forms=None,
+              media=None, quality=None):
     """CLI 冻结入口：等价 print_pages(prompt=False)。port/dm 为兼容旧签名保留，
     不参与建 DC（现代驱动走默认端口，CreateDC 只收 printer 名与 devmode）。"""
     return print_pages(api, printer, images, sheet, dpi, prompt=False,
-                       forms=forms)
+                       forms=forms, media=media, quality=quality)
 
 
 def _create_dc(printer, dm_obj):

@@ -81,6 +81,23 @@ def test_prompt_devmode_inspects_return_for_cancel():
     assert "if ret == 0" in src                         # 钉住取消码判定这一行
 
 
+def test_devmode_dmfields_bits_match_win32con():
+    """§0.4：仓库的 dmFields 位常量曾整体错位一位（旧值恰是相邻字段的位）。
+
+    本机 G3800 驱动不看 dmFields，所以一直无症状；但别的驱动会看，且新字段
+    （DM_MEDIATYPE / DM_PRINTQUALITY）必须在正确的位上，否则就是“在错误的位
+    上表达正确的意图”。故以 win32con 对拍钉住。
+    """
+    from photoprint.win import devmode
+
+    for name in ("DM_PAPERSIZE", "DM_PAPERLENGTH", "DM_PAPERWIDTH",
+                 "DM_SCALE", "DM_DEFAULTSOURCE", "DM_PRINTQUALITY",
+                 "DM_MEDIATYPE"):
+        assert getattr(devmode, name) == getattr(win32con, name), name
+    # 旧值 4 是 DMBIN_MANUAL（手动进纸），真实的 DMBIN_USER 是 256
+    assert devmode.DMBIN_USER == win32con.DMBIN_USER == 256
+
+
 def test_get_default_printer_routes_through_win32print():
     """W-4：默认打印机取 win32print.GetDefaultPrinter（真实 API），方法体内 import。"""
     import inspect

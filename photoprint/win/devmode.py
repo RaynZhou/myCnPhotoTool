@@ -17,13 +17,21 @@ from photoprint.win.api import PromptCancelled
 
 DMPAPER_USER = 259
 
-DM_PAPERSIZE = 0x00000200
-DM_PAPERLENGTH = 0x00000400
-DM_PAPERWIDTH = 0x00000800
-DM_DEFAULTSOURCE = 0x00001000
-DM_SCALE = 0x00000001
+# dmFields 位（与 win32con 同名常量逐一相等，tests/test_win32_contract.py 对拍）。
+# 旧值（0x200/0x400/0x800/0x1000/0x1）整体错位一位，恰好都是相邻字段的位；
+# 本机 G3800 驱动不看 dmFields，所以一直无症状，但别的驱动会看，新字段
+# （DM_MEDIATYPE / DM_PRINTQUALITY）也必须在正确的位上。
+DM_PAPERSIZE = 0x00000002
+DM_PAPERLENGTH = 0x00000004
+DM_PAPERWIDTH = 0x00000008
+DM_DEFAULTSOURCE = 0x00000200
+DM_SCALE = 0x00000010
+DM_PRINTQUALITY = 0x00000400
+DM_MEDIATYPE = 0x02000000
 
-DMBIN_USER = 4
+# 256 = DMBIN_USER（旧值 4 是 DMBIN_MANUAL 手动进纸，画错了纸盒语义）。
+# 本驱动只有一个纸盒（7），写真值同样被驱动归一，行为不变。
+DMBIN_USER = 256
 
 
 def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):

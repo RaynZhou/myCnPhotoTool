@@ -8,6 +8,7 @@ pytest.importorskip("PIL", reason="需要 Pillow")
 from PIL import Image  # noqa: E402
 
 from photoprint.core import modes, pack, render, specs, text_overlay as to  # noqa: E402
+from photoprint.core import units  # noqa: E402
 from photoprint.core.text_overlay import Corner, TextSpec  # noqa: E402
 
 DPI = 25.4
@@ -115,3 +116,50 @@ def test_override_none_element_uses_base(real_font):
     assert got.tobytes() == _render(a4, plan, [ph] * plan.count,
                                     date_overlay=spec,
                                     date_texts=["2025-01-02"] * plan.count).tobytes()
+
+
+def test_date_cells_gate_each_cell(real_font):
+    """逐格开关：只给打了勾的格加字，其余格逐像素等于基线。
+
+    界面层“只对蓝框那张生效”最终就落在这一层：光标对不代表没写错，
+    所以这里按格子外框逐区比对（字若溢出到邻格也会被抓到）。
+    """
+    a4, plan = _a4_id1()
+    ph = _photo()
+    spec = TextSpec(enabled=True, font_key="t", size_mm=6.0, corner=Corner.TL,
+                    rgb=(255, 255, 255), alpha=255)
+    base = _render(a4, plan, [ph] * plan.count)
+    flags = [True] + [False] * (plan.count - 1)
+    got = _render(a4, plan, [ph] * plan.count, date_overlay=spec,
+                  date_texts=["2025-01-02"] * plan.count, date_cells=flags)
+    assert got.tobytes() != base.tobytes()               # 第 1 格真多出了字
+    px_w, px_h = got.size
+    for c in plan.cells[1:4]:                           # 关掉的那几格：一尘不染
+        box = (max(0, units.mm_to_px(c.x_mm, DPI)),
+               max(0, units.mm_to_px(c.y_mm, DPI)),
+               min(px_w, units.mm_to_px(c.x_mm + c.w_mm, DPI)),
+               min(px_h, units.mm_to_px(c.y_mm + c.h_mm, DPI)))
+        assert got.crop(box).tobytes() == base.crop(box).tobytes()
+
+
+def test_wm_cells_gate_is_independent_from_date(real_font):
+    """日期与水印各有一套逐格开关：只勾水印不会把日期也带上。"""
+    a4, plan = _a4_id1()
+    ph = _photo()
+    d_spec = TextSpec(enabled=True, font_key="t", size_mm=6.0, corner=Corner.TL,
+                      rgb=(255, 255, 255), alpha=255)
+    w_spec = TextSpec(enabled=True, text="W", font_key="t", size_mm=6.0,
+                      corner=Corner.BR, rgb=(255, 255, 255), alpha=255)
+    only_wm = _render(a4, plan, [ph] * plan.count, date_overlay=d_spec,
+                      watermark_overlay=w_spec,
+                      date_texts=["2025-01-02"] * plan.count,
+                      wm_cells=[True] + [False] * (plan.count - 1))
+    neither = _render(a4, plan, [ph] * plan.count, date_overlay=d_spec,
+                      watermark_overlay=w_spec,
+                      date_texts=["2025-01-02"] * plan.count,
+                      date_cells=[False] * plan.count,
+                      wm_cells=[False] * plan.count)
+    assert only_wm.tobytes() != neither.tobytes()
+    assert only_wm.tobytes() != _render(
+        a4, plan, [ph] * plan.count, date_overlay=d_spec,
+        watermark_overlay=w_spec, date_texts=["2025-01-02"] * plan.count).tobytes()

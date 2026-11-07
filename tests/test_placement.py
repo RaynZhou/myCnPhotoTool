@@ -239,13 +239,13 @@ def test_click_without_selection_only_selects(qapp, tmp_path):
     assert w._current_cell == 1
 
 
-def test_clear_cell_button_exists_and_clears(qapp, tmp_path):
+def test_clear_cell_button_removed_right_click_still_clears(qapp, tmp_path):
+    """「清空格」按钮已删（用户 2026-11-07：基本没用）：预览右键「移除该照片」
+    仍能清格，且面板上不再有同名按钮。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    w._current_cell = 1
-    btn = w.findChild(type(w.export_btn), "clear_cell_btn")
-    assert btn is not None
-    btn.click()
+    assert w.findChild(type(w.export_btn), "clear_cell_btn") is None
+    w.clear_cell(1)
     assert 1 not in w.placements and 1 not in w.cell_rot
 
 

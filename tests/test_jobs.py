@@ -9,7 +9,7 @@ pytest.importorskip("PIL", reason="需要 Pillow")
 from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
-from photoprint.core import modes, render, specs, store  # noqa: E402
+from photoprint.core import modes, render, specs, store, text_overlay  # noqa: E402
 
 
 @pytest.fixture
@@ -218,32 +218,49 @@ def test_render_out_of_range_raises(st):
         job.render(1, 25.4)
 
 
-def test_offset_changes_rendered_pixels(st):
-    a = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
-    b = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
-                       offset_pct=(0.0, 50.0))
-    assert a.render(0, 25.4).tobytes() != b.render(0, 25.4).tobytes()
+def test_date_cells_gate_which_cells_get_overlay(st):
+    """逐格开关：同一张纸、同一套叠加，只给打了勾的格加字。
 
-
-def test_build_job_passes_percentage_through_without_converting(st, monkeypatch):
-    """编排层不得自己换算成 mm：±50% 必须原样送到 core，逐格按本格尺寸换算。
-
-    本层只按首格换算的话，混合朝向页上其余格的偏移会失真（T3 评审 I-1），
-    而界面交来的百分比本身是与格子无关的量。 spy 只拦一层，真渲染照跑。
+    界面层“只对蓝框那张叠加”全靠这两个参数落到像素；空列表（CLI 老行为）
+    则整页全加。
     """
-    seen = {}
-    real = render.render_page
+    ov = text_overlay.TextSpec(enabled=True, text="", size_mm=4.0)
+    base = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
+                          date_overlay=ov,
+                          date_texts=("2026-11-07",) * 4,
+                          date_cells=[True, False, False, False])
+    got = base.render(0, 25.4)
+    # 同样的日期文本、不传 date_cells：四格全加 → 像素必然不同
+    every = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
+                           date_overlay=ov,
+                           date_texts=("2026-11-07",) * 4)
+    assert every.render(0, 25.4).tobytes() != got.tobytes()
+    # 开关全关＝与不开叠加逐像素相同（不会“偷偷全页生效”）
+    off = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
+                         date_overlay=ov,
+                         date_texts=("2026-11-07",) * 4,
+                         date_cells=[False] * 4)
+    plain = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
+    assert off.render(0, 25.4).tobytes() == plain.render(0, 25.4).tobytes()
 
-    def spy(*args, **kwargs):
-        seen.update(kwargs)
-        return real(*args, **kwargs)
 
-    monkeypatch.setattr(render, "render_page", spy)
-    job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0,
-                         offset_pct=(50.0, -50.0))
-    job.render(0, 25.4)
-    assert job.offset_pct == (50.0, -50.0)
-    assert seen["offset_pct"] == (50.0, -50.0)
+def test_cell_flags_are_sliced_per_page(st):
+    """逐格开关与照片共用一个下标空间：第 2 页必须拿到自己那一段，
+
+    否则第 1 页的勾选会“滩”到第 2 页的其他照片上。
+    """
+    ov = text_overlay.TextSpec(enabled=True, text="", size_mm=4.0)
+    job = jobs.build_job(st, _photos(5), "A4", "3R", bleed_mm=3.0,
+                         date_overlay=ov,
+                         date_texts=("2026-11-07",) * 5,
+                         date_cells=[False, False, False, False, True])
+    assert job.page_count == 2
+    only_last = job.render(1, 25.4)
+    all_off = jobs.build_job(st, _photos(5), "A4", "3R", bleed_mm=3.0,
+                             date_overlay=ov,
+                             date_texts=("2026-11-07",) * 5,
+                             date_cells=[False] * 5)
+    assert only_last.tobytes() != all_off.render(1, 25.4).tobytes()
 
 
 def test_render_all_covers_every_page(st):

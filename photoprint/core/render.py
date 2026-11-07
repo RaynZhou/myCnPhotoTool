@@ -59,14 +59,12 @@ def place_rotated_dest(dest_mm, target_h_mm):
     return ((target_h_mm - dh) - dy, dx, dh, dw)
 
 
-def offset_mm_for_cell(offset_pct, w_mm, h_mm):
-    """百分比偏移 → 该格的 mm 偏移：±50% 即最多挪半格。
+def _cell_on(flags, idx):
+    """逐格叠加开关：flags 为空＝全部生效（CLI/旧调用方不看这个参数）。
 
-    换算本体留在 core：界面层禁做几何，而「按哪个尺寸换算」本身就是几何决策。
-    必须逐格调用（拿本格尺寸），同一页两种朝向的格子若不逐格算，±50% 就只对
-    算出的那一格成立（T3 评审 I-1）。
+    界面层的“只对蓝框那张叠加”就靠它落到像素：每格一个 bool，缺位按关。
     """
-    return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
+    return True if not flags else (idx < len(flags) and bool(flags[idx]))
 
 
 def _hatch(page, box_px, step_px):
@@ -112,14 +110,17 @@ def _with_corner_rot(spec, ov):
 
 def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
-                offset_pct=(0.0, 0.0), rotations=(),
+                rotations=(),
                 date_overlay=None, watermark_overlay=None, date_texts=(),
-                date_overrides=(), wm_overrides=(), even_margins=False,
-                uniform_mm=None):
+                date_overrides=(), wm_overrides=(), date_cells=(), wm_cells=(),
+                even_margins=False, uniform_mm=None):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。
 
     rotations 是逐图顺时针角度（短于 photos 缺位按 0）：生效照片在取尺寸之前
     换好，其余几何一条规则不改——"渲染时转"与"读图时预转好"逐像素等价。
+
+    date_cells / wm_cells 是逐格是否叠加文字（短/空＝全部叠加）：界面层“只对
+    选中的那张加字”靠它，CLI 不传就是老行为。
 
     uniform_mm 非 None 且整页只有一格：四边按同一档留白（照片摆进这个内框，
     裁切仍按当前模式）：铺满就是四边相等，完整放入就是“至少这么宽、不裁画面”。
@@ -171,17 +172,8 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
             ox, oy, ow, oh = got
         # 旋转格：先把原图按未旋转的目标比例裁，再转 90°，尺寸正好对上外框
         target_w, target_h = (oh, ow) if cell.rotated else (ow, oh)
-        # 偏移是纸面语义且按本格尺寸逐格换算；旋转格还要再换算到旋转前坐标
-        cell_dx, cell_dy = offset_mm_for_cell(offset_pct, ow, oh)
-        in_dx, in_dy = crop.rotate_offset(cell_dx, cell_dy) if cell.rotated \
-            else (cell_dx, cell_dy)
-        if cm == crop.FILL:
-            # FILL 的 dx/dy 挪的是取景窗，画面在纸面上会反向；fit 挪的是
-            # 落位矩形，本身已是纸面语义，故只在 fill 档补一次反号
-            in_dx, in_dy = -in_dx, -in_dy
         pl = crop.cell_crop_box(photo.width, photo.height, target_w, target_h,
-                               cm, dx_mm=in_dx, dy_mm=in_dy,
-                               ppmm=units.ppmm(dpi))
+                               cm, ppmm=units.ppmm(dpi))
         piece = photo.crop(pl.crop_px)
         # 旋转格还要把落位换轴：照片转 90° 后宽高互换，若沿用旋转前的
         # (dx, dy)，尺寸检查会拿错轴、缩放补偿到错误的 (w, h)，画面会撑出
@@ -204,13 +196,16 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                        piece.width / units.ppmm(dpi),
                        piece.height / units.ppmm(dpi)))
 
-        # 逐张叠加文字（日期/水印）：落位矩形为贴图区，逐格 clip 不溢邻格
+        # 逐张叠加文字（日期/水印）：落位矩形为贴图区，逐格 clip 不溢邻格。
+        # date_cells/wm_cells 决定这一格是否叠加（界面层只给选中的那张打勾）。
         rect_px = (paste_x, paste_y, piece.width, piece.height)
-        if watermark_overlay is not None and watermark_overlay.enabled:
+        if (watermark_overlay is not None and watermark_overlay.enabled
+                and _cell_on(wm_cells, idx)):
             wm_ov = wm_overrides[idx] if idx < len(wm_overrides) else None
             spec = _with_corner_rot(watermark_overlay, wm_ov)
             text_overlay.draw_overlay(page, rect_px, spec, spec.text, dpi)
-        if date_overlay is not None and date_overlay.enabled:
+        if (date_overlay is not None and date_overlay.enabled
+                and _cell_on(date_cells, idx)):
             dt = date_texts[idx] if idx < len(date_texts) else None
             if dt:
                 d_ov = date_overrides[idx] if idx < len(date_overrides) else None

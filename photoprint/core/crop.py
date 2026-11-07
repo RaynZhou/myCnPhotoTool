@@ -79,14 +79,3 @@ def cell_crop_box(photo_w_px, photo_h_px, target_w_mm, target_h_mm, mode,
     y = _clamp((target_h_mm - dest_h) / 2.0 + dy_mm, 0.0, target_h_mm - dest_h)
     return Placement((0, 0, int(photo_w_px), int(photo_h_px)),
                      (x, y, dest_w, dest_h))
-
-
-def rotate_offset(ox_mm, oy_mm):
-    """纸面方向偏移 → 旋转前坐标系偏移，返回 (dx_pre, dy_pre)。
-
-    旋转格按顺时针 90°（Image.ROTATE_270）落位，纸面与旋转前满足
-    x' = H-(y+h)、y' = x：纸面向右对应旋转前 y 轴负方向，纸面向下对应
-    旋转前 x 轴正方向。界面上的偏移是纸面语义，必须在进 cell_crop_box
-    之前换算，否则旋转格的水平微调会整体反号。
-    """
-    return float(oy_mm), -float(ox_mm)

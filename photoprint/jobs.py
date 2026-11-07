@@ -133,13 +133,12 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
 
 @dataclass
 class Job:
-    """一次排版的完整结果：照片 + 方案 + 偏移，按页渲染。"""
+    """一次排版的完整结果：照片 + 方案，按页渲染。"""
 
     plan: pack.LayoutPlan
     mode: str
     sheet: specs.SizeSpec
     photos: list = field(default_factory=list)
-    offset_pct: tuple[float, float] = (0.0, 0.0)
     borderless_active: bool = False
     rotations: tuple = ()   # 逐图顺时针角度，原样交 core 归一；短于 photos 缺位按 0
     date_overlay: object = None
@@ -147,6 +146,9 @@ class Job:
     date_texts: tuple = ()
     date_overrides: tuple = ()
     wm_overrides: tuple = ()
+    # 逐格是否叠加文字（空＝全部叠加）：界面只给选中的那张打勾，CLI 不传就是老行为
+    date_cells: tuple = ()
+    wm_cells: tuple = ()
     even_margins: bool = False   # 成品照片档：白边同轴取齐（见 wants_even_margins）
     uniform_mm: float | None = None   # 单张成品照片：四边等宽的留白（见 build_layout）
 
@@ -194,25 +196,29 @@ class Job:
         dt_chunk = self.date_texts[i:i + self.count]
         do_chunk = self.date_overrides[i:i + self.count]
         wo_chunk = self.wm_overrides[i:i + self.count]
+        dc_chunk = self.date_cells[i:i + self.count]
+        wc_chunk = self.wm_cells[i:i + self.count]
         return render.render_page(self.plan, chunk, self.sheet, dpi, self.mode,
                                   show_mask=show_mask,
                                   borderless_active=self.borderless_active,
-                                  offset_pct=self.offset_pct,
                                   rotations=rot_chunk,
                                   date_overlay=self.date_overlay,
                                   watermark_overlay=self.watermark_overlay,
                                   date_texts=dt_chunk,
                                   date_overrides=do_chunk,
                                   wm_overrides=wo_chunk,
+                                  date_cells=dc_chunk,
+                                  wm_cells=wc_chunk,
                                   even_margins=self.even_margins,
                                   uniform_mm=self.uniform_mm)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
               bleed_mm=modes.DEFAULT_BLEED_MM, mode=None,
-              offset_pct=(0.0, 0.0), borderless_active=False,
+              borderless_active=False,
               rotations=(), date_overlay=None, watermark_overlay=None,
               date_texts=(), date_overrides=(), wm_overrides=(),
+              date_cells=(), wm_cells=(),
               uniform_mm=None) -> Job:
     plan, mode_eff = build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm,
                                   mode, borderless_active=borderless_active,
@@ -231,17 +237,15 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
     if uniform is not None:
         uniform = specs.uniform_margins(st.resolve(sheet_key).margins,
                                         uniform).top
-    # 百分比原样交给 core：同一页可能两种朝向混排，“按哪个尺寸换算”是逐格
-    # 决策（T3 评审 I-1），本层若先按首格换算成 mm，其余格的 ±50% 就失真
     return Job(plan=plan, mode=mode_eff, sheet=st.resolve(sheet_key),
                photos=list(photos),
-               offset_pct=tuple(float(v) for v in offset_pct),
                borderless_active=borderless_active,
                rotations=tuple(rotations),
                date_overlay=date_overlay, watermark_overlay=watermark_overlay,
                date_texts=tuple(date_texts),
                date_overrides=tuple(date_overrides),
                wm_overrides=tuple(wm_overrides),
+               date_cells=tuple(date_cells), wm_cells=tuple(wm_cells),
                even_margins=wants_even_margins(cell),
                uniform_mm=uniform)
 

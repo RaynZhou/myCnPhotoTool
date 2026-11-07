@@ -179,16 +179,20 @@ def test_export_passes_selected_dpi_and_no_mask(qapp, tmp_path, monkeypatch):
 def test_export_syncs_pending_debounce_before_render(qapp, tmp_path):
     """B-1：导出前必须把挂着的防抖控件值同步进 job，否则拿陈旧 job 配新参数导出。
 
-    _fill 同步刷一次（offset 0）；随后拖 h_slider 只起 debounce、不即时重排（offscreen
-    不泵事件、定时器不会 fire）。export_to 顶部那次 _rebuild_job 才把偏移落成 (30,0)。
-    删那两行同步→ self.job 仍是陈旧的 (0,0)，导出后的断言当场变红（实测验过牙）。
+    _fill 同步刷一次（水印开着、文字还是空的）；随后往输入框里打字只起
+    debounce、不即时重排（offscreen 不泵事件、定时器不会 fire）。export_to 顶部
+    那次 _rebuild_job 才把新文案落进 job。删那两行同步 → self.job 仍是空文案，
+    导出的 PDF 里就少了一个水印。
     """
     w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path)
-    w.h_slider.setValue(30)                       # 防抖挂着：self.job 仍 (0,0)
-    assert w.job.offset_pct == (0.0, 0.0)
+    _fill(w, tmp_path, n=2)
+    w.wm_enabled.setChecked(True)                 # 防抖挂着
+    w._rebuild_job()                              # 手动同步一次作为基线
+    assert w.job.watermark_overlay.text == ""
+    w.wm_text.setText("样片")                    # 防抖挂着：self.job 仍是旧文案
+    assert w.job.watermark_overlay.text == ""
     w.export_to(str(tmp_path / "sync.pdf"))
-    assert w.job.offset_pct == (30.0, 0.0)        # 导出前已把待防抖值同步进 job
+    assert w.job.watermark_overlay.text == "样片"  # 导出前已把待防抖值同步进 job
 
 
 def test_too_big_cell_reports_instead_of_crashing(qapp, tmp_path):
@@ -291,25 +295,6 @@ def test_legacy_gap_mm_restores_as_checked(qapp, tmp_path):
     assert w.margin_cb.isChecked() is True
 
 
-def test_bad_offset_pct_in_config_does_not_block_startup(qapp, tmp_path):
-    """坏配置不得卡住启动（与 store 自己的降级原则一致）：offset_pct 元素不可
-    转 int 时静默保持默认 0，不让 ValueError 抛出 __init__。"""
-    s = _store(tmp_path)
-    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
-                    "offset_pct": ["a", None]})
-    s.save()
-    w = MainWindow(st=_store(tmp_path))       # 不应抛
-    assert w.h_slider.value() == 0 and w.v_slider.value() == 0
-
-
-def test_offset_sliders_reach_jobs(qapp, tmp_path):
-    w = MainWindow(st=_store(tmp_path))
-    _fill(w, tmp_path)
-    w.h_slider.setValue(50)
-    w._refresh()
-    assert w.job.offset_pct == (50.0, 0.0)
-
-
 def test_page_navigation_extends_forward_and_clamps_backward(qapp, tmp_path):
     """增量②：末页点“下一页”自动增页；越向前仍夹在第一页。"""
     w = MainWindow(st=_store(tmp_path))
@@ -333,13 +318,13 @@ def test_close_event_stops_debounce(qapp, tmp_path):
     的全部收尾 → 退出时残留线程被析构硬崩（round-1 评审 C1）。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path)
-    w.h_slider.setValue(10)          # 触发 debounce，还没到期
+    w.margin_cb.setChecked(True)     # 触发 debounce，还没到期
     w.close()
     assert not w._debounce.isActive()
 
 
 def test_bad_photo_paths_and_out_dir_do_not_block_startup(qapp, tmp_path):
-    """I5：与 offset_pct 同函数、同全局约束（异常一律收敛不外抛）——坏
+    """I5：与 dpi 同函数、同全局约束（异常一律收敛不外抛）——坏
     photo_paths（不可迭代）不卡 __init__；坏 out_dir（非字符串）不卡写回。"""
     s = _store(tmp_path)
     s.set_last_job({"sheet_key": "A4", "cell_key": "3R", "photo_paths": 5,
@@ -350,39 +335,30 @@ def test_bad_photo_paths_and_out_dir_do_not_block_startup(qapp, tmp_path):
     w.save_last_job()                          # 坏 out_dir 走 _last_out_dir 降级，不应抛
 
 
-def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
-    """I5：store.save 默认 allow_nan，offset_pct=[Infinity, 0] 能落盘；
-    int(inf) 抛 OverflowError，必须在 (TypeError, ValueError, OverflowError) 里兼到。"""
-    s = _store(tmp_path)
-    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
-                    "offset_pct": [float("inf"), 0]})
-    s.save()
-    w = MainWindow(st=_store(tmp_path))       # 不应抛
-    assert w.h_slider.value() == 0 and w.v_slider.value() == 0
+def test_huge_dpi_in_config_does_not_block_startup(qapp, tmp_path):
+    """I5/W1：数值字段超大值一律不得卡启动。
 
-
-@pytest.mark.parametrize("key,value", [
-    ("dpi", int("9" * 400)),
-    ("offset_pct", [1e19, 0]),         # setValue(int(1e19)) → shiboken 抛 OverflowError
-])
-def test_bad_numeric_configs_do_not_block_startup(qapp, tmp_path, key, value):
-    """I5/W1：数值字段超大值一律不得卡启动——写入控件的 OverflowError 必须被
-    _restore_last_job 的降级护栏接住。删护栏则本用例在 __init__ 抛。
-
-    实测（PySide6 6.12）：`slider.setValue(int(1e19))` 会让 shiboken 同时
-    发一条 RuntimeWarning 且抛出 OverflowError（“int too big to convert”），后者被
-    _safe 的 (TypeError, ValueError, OverflowError) 接住——护栏的承重来自 OverflowError
-    本身，删护栏则 4 条全红（含 offset_pct）。不加 filterwarnings mark：该路径不是
-    “只告警不抛”，mark 对本用例零作用（inert），反而会把无关 RuntimeWarning 升 error。
+    store.save 默认 allow_nan，所以 JSON 里能落个 400 位整数；`float(10**400)`
+    抛 OverflowError，必须被 _restore_last_job 的降级护栏接住。删护栏则本条在
+    __init__ 直接抛（窗口化 exe 就是静默闪退）。
     """
     s = _store(tmp_path)
-    s.set_last_job({"sheet_key": "A4", "cell_key": "3R", key: value})
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R", "dpi": int("9" * 400)})
     s.save()
     w = MainWindow(st=_store(tmp_path))       # 不应抛
-    if key == "offset_pct":
-        assert w.h_slider.value() == 0 and w.v_slider.value() == 0
-    else:
-        assert w.dpi_box.currentIndex() == 1   # 保持默认 300
+    assert w.dpi_box.currentIndex() == 1      # 保持默认 300
+
+
+def test_huge_overlay_alpha_in_config_does_not_block_startup(qapp, tmp_path):
+    """I5/W1：alpha_pct=1e19 → QSlider.setValue(int(1e19)) 让 shiboken 抛
+    OverflowError（而不是 ValueError）；_safe 必须兼到 OverflowError，
+    删掉它这条就变红。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
+                    "watermark_overlay": {"enabled": True, "alpha_pct": 1e19}})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))       # 不应抛
+    assert w.wm_alpha.value() == 50           # 默认值没被顶坏
 
 
 def test_stale_generation_preview_frame_is_dropped(qapp, tmp_path):
@@ -664,12 +640,16 @@ def test_params_builds_two_text_specs(qapp, tmp_path):
 
 
 def test_enabling_watermark_reaches_job(qapp, tmp_path):
+    """勾「文字水印」只改蓝框那张：job.enabled 由逐张开关派生。"""
     w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=1)
+    assert w._current_cell == 0            # place 留下的蓝框
     w.wm_enabled.setChecked(True)
     w.wm_text.setText("样片")
     w._rebuild_job()
     assert w.job.watermark_overlay.enabled is True
     assert w.job.watermark_overlay.text == "样片"
+    assert w.job.wm_cells[0] is True
 
 
 def test_append_photo_stores_date_text(qapp, tmp_path):
@@ -683,24 +663,30 @@ def test_append_photo_stores_date_text(qapp, tmp_path):
 
 
 def test_rebuild_materializes_date_texts(qapp, tmp_path):
+    """日期文本与逐格开关同时物化：勾上之后 date_cells 才为 True。"""
     w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)                # 覆盖后蓝框＝槽 1
     w.date_enabled.setChecked(True)
-    _fill(w, tmp_path, n=2)
+    w._rebuild_job()
     assert w.job.date_texts[0] is not None
     assert w.job.date_overlay.enabled is True
+    assert w.job.date_cells[:2] == (False, True)   # 只给蓝框那张
 
 
 def test_overlay_persist_roundtrip(qapp, tmp_path):
     st = _store(tmp_path)
     w = MainWindow(st=st)
+    _fill(w, tmp_path, n=1)
     w.date_enabled.setChecked(True)
     w.date_size.setValue(9.0)
     w.date_corner.setCurrentIndex(1)                     # 右上
     w.save_last_job()
     w2 = MainWindow(st=_store(tmp_path))                 # 同 store 路径
-    assert w2.date_enabled.isChecked() is True
+    assert w2.pool[0]["date_on"] is True                 # 开关逐张落盘（pool_on）
     assert abs(w2.date_size.value() - 9.0) < 1e-6
-    assert w2.date_corner.currentIndex() == 1
+    w2._on_cell_clicked(0)                               # 点蓝框 → 面板回灌那张
+    assert w2.date_enabled.isChecked() is True
+    assert w2.date_corner.currentData() == "tr"
 
 
 def test_new_photo_seeds_overlay_from_base(qapp, tmp_path):
@@ -712,52 +698,76 @@ def test_new_photo_seeds_overlay_from_base(qapp, tmp_path):
     assert w.pool[0]["date_rot"] == 45
 
 
-def test_select_photo_loads_its_overlay(qapp, tmp_path):
+def test_clicking_cell_loads_that_photo_overlay(qapp, tmp_path):
+    """点预览格（蓝框）：面板回灌那张照片的勾选、角标与角度。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path, n=2)
     w.pool[1]["date_corner"] = "bl"
-    w._on_photo_clicked(w.photo_list.item(1))
-    assert w._ov_editing == 1
+    w.pool[1]["date_on"] = True
+    w._on_cell_clicked(1)
+    assert w._current_cell == 1
     assert w.date_corner.currentData() == "bl"
+    assert w.date_enabled.isChecked() is True
+    assert w.overlay_group.isEnabled() is True
 
 
 def test_editing_selected_photo_writes_only_that_photo(qapp, tmp_path):
+    """默认只影响蓝框那张；另一张不动（用户 2026-11-07：去掉全局开关语义）。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path, n=2)
-    w._on_photo_clicked(w.photo_list.item(0))
-    base_before = dict(w._ov_base)
+    w._on_cell_clicked(0)
     w.date_corner.setCurrentIndex(3)                    # 右下
     assert w.pool[0]["date_corner"] == "br"
-    assert w._ov_base == base_before                    # base 不动
-    assert w.pool[1]["date_corner"] != "br"
+    assert w.pool[1]["date_corner"] != "br"             # 另一张不动
+    assert w._ov_base["date_corner"] == "br"            # 新增照片仍继承最近这套
 
 
-def test_deselect_restores_base(qapp, tmp_path):
-    w = MainWindow(st=_store(tmp_path))
-    w.date_corner.setCurrentIndex(3)                    # base=br（无选中）
-    _fill(w, tmp_path, n=1)
-    w.pool[0]["date_corner"] = "tl"                     # 令照片≠base
-    item = w.photo_list.item(0)
-    w._on_photo_clicked(item)                           # 选中→tl
-    assert w.date_corner.currentData() == "tl"
-    w._on_photo_clicked(item)                           # 再点取消→回 base
-    assert w._ov_editing is None
-    assert w.date_corner.currentData() == "br"
-
-
-def test_apply_overlay_to_all(qapp, tmp_path):
+def test_no_blue_frame_disables_overlay_panel(qapp, tmp_path):
+    """没蓝框：整组置灰 + 提示，且勾选不写进任何照片（不偷偷全页生效）。"""
     w = MainWindow(st=_store(tmp_path))
     _fill(w, tmp_path, n=2)
-    w.date_corner.setCurrentIndex(3)                    # 右下（写 base）
-    w._apply_overlay_to_all()
-    assert w.pool[0]["date_corner"] == "br"
+    w._current_cell = None                              # 模拟翻页丢弃选中
+    w._highlight_current_cell()
+    assert w.overlay_group.isEnabled() is False
+    assert "蓝框" in w.overlay_group.toolTip()
+    w.date_enabled.setChecked(True)                     # 程序化勾选：无目标
+    assert [e["date_on"] for e in w.pool] == [False, False]
+    w._rebuild_job()
+    assert w.job.date_overlay.enabled is False          # 派生口径：没人勾就没开
+    w._on_cell_clicked(1)                               # 点选一格 → 面板复活
+    assert w.overlay_group.isEnabled() is True
+    assert w.overlay_group.toolTip() == ""
+
+
+def test_apply_all_checkbox_covers_current_page(qapp, tmp_path):
+    """勾「文字叠加效果应用到所有照片」：本页已放的照片全套这套值与开关。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=2)
+    w._on_cell_clicked(0)
+    w.date_enabled.setChecked(True)
+    w.date_corner.setCurrentIndex(3)                    # 右下
+    w.apply_all_cb.setChecked(True)
+    assert [e["date_on"] for e in w.pool] == [True, True]
     assert w.pool[1]["date_corner"] == "br"
+    w._rebuild_job()
+    assert w.job.date_cells[:2] == (True, True)
+
+
+def test_apply_all_does_not_touch_other_pages(qapp, tmp_path):
+    """勾选框只覆盖当前预览页：第 2 页的照片保持原样（用户裁决：范围＝当前页）。"""
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path, n=5)                             # A4+3R 每页 4 格
+    assert w.job.page_count == 2
+    w._on_cell_clicked(0)
+    w.date_enabled.setChecked(True)
+    w.apply_all_cb.setChecked(True)
+    assert [e["date_on"] for e in w.pool] == [True, True, True, True, False]
 
 
 def test_rebuild_materializes_overrides(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
-    w.date_enabled.setChecked(True)
     _fill(w, tmp_path, n=2)
+    w.date_enabled.setChecked(True)
     w.pool[0]["date_corner"] = "br"
     w._rebuild_job()
     assert w.job.date_overrides[0] == ("br", w.pool[0]["date_rot"])
@@ -768,7 +778,7 @@ def test_overlay_per_photo_persist_roundtrip(qapp, tmp_path):
     st = _store(tmp_path)
     w = MainWindow(st=st)
     _fill(w, tmp_path, n=2)
-    w._on_photo_clicked(w.photo_list.item(1))
+    w._on_cell_clicked(1)                              # 点第 2 格（库 1）
     w.date_corner.setCurrentIndex(3)                    # photo1→右下
     w.date_rot.setCurrentIndex(2)                       # 90°
     w.save_last_job()

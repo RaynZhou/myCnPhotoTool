@@ -144,6 +144,8 @@ needed_sheets(count, _pages*count) = _pages`，页数自洽；空槽 `None` 由 
   不再读 `photo_list.currentRow()`；无当前格→状态栏引导"请先点选版面中的格"。
   旋转不改库图，直接 `_debounce.start()` 重渲。
 - **新增"清空格"按钮**：`placements.pop(slot)`、`cell_rot.pop(slot)` → 该格留白，
+  （2026-11-07 补丁：该按钮已删，用户反馈“基本没用到”；清格改由预览右键
+  「移除该照片」单一入口负责，`clear_cell()` 本身不变）
   触发收缩/重渲。
 - 列表项文字：库图不再有逐图角度，`_photo_item_text` 去掉 `↻{angle}°` 段（旋转已移到格上）。
 

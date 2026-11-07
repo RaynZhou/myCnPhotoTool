@@ -1,8 +1,8 @@
 """单窗口表单界面：选图 → 选纸/格/模式 → 预览 → 导出等尺寸 PDF。
 
-本层不含 mm/像素换算与裁切几何（全局约束）：百分比偏移、页码切分、
-格子尺寸一律交 jobs/core。异常一律收敛成状态栏文字，不得外抛——
-窗口化 exe 没有控制台，抛出去就是静默闪退。
+本层不含 mm/像素换算与裁切几何（全局约束）：页码切分、格子尺寸一律交
+jobs/core。异常一律收敛成状态栏文字，不得外抛——窗口化 exe 没有控制台，
+抛出去就是静默闪退。
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from PySide6.QtCore import QPoint, Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListView,
+                               QHBoxLayout, QLineEdit, QListWidget, QListView,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSlider, QVBoxLayout, QWidget)
 
@@ -35,7 +35,6 @@ DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
 QUALITY_CHOICES = (("驱动默认", None), ("高", media_mod.QUALITY_HIGH))
 MEDIA_DEFAULT_LABEL = "驱动默认"
 DEBOUNCE_MS = 250
-OFFSET_MAX_PCT = 50
 # 边距只有两档：不勾＝0（照片与照片紧贴、尽量铺满），勾上＝2mm（够下刀分开
 # 照片，又不白费纸）。具体毫米数属于会漂的细节，摆在面板上只会增加认知负担。
 # 面板上不再出现“间距”这个词：单张照片根本没有相邻格，那个属性只在一页多格时
@@ -74,6 +73,7 @@ CORNER_CHOICES = (("左上", Corner.TL), ("右上", Corner.TR),
 ROTATION_LABELS = (("0°", 0), ("45°", 45), ("90°", 90), ("135°", 135),
                    ("180°", 180), ("225°", 225), ("270°", 270), ("315°", 315))
 OVERLAY_DEFAULT_RGB = (255, 255, 255)
+_OV_NO_TARGET_TIP = "先在预览里点选一张照片（蓝框），文字叠加只对那张生效"
 
 
 def list_folder_images(dir_path):
@@ -98,13 +98,6 @@ def _spin(lo, hi, value=0.0):
     box.setSingleStep(0.5)
     box.setValue(value)
     return box
-
-
-def _slider_row(slider, label):
-    row = QHBoxLayout()
-    row.addWidget(slider, 1)
-    row.addWidget(label)
-    return row
 
 
 def _connect_param_changed(widget, handler):
@@ -137,8 +130,7 @@ class MainWindow(QMainWindow):
         self.page_index = 0
         self._current_cell = None  # 预览选中的全局槽位
         self._place_source = None  # 当前作为放置源的库下标（None=无选中，点格纯选中）
-        self._ov_base = None       # 全局默认（未选中时面板编辑它），_build_ui 后初始化
-        self._ov_editing = None    # 当前编辑的 pool 下标（None＝编辑默认）
+        self._ov_base = None       # 全局默认（新增照片继承它），_build_ui 后初始化
         self._ov_loading = False   # 载入照片值时阻断回写
         self._count_last = None    # 上次每页格数（检测结构性布局变更）
         self.job = None
@@ -158,8 +150,7 @@ class MainWindow(QMainWindow):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(self._refresh)
-        for w in (self.sheet_box, self.cell_box, self.mode_box,
-                  self.dpi_box, self.h_slider, self.v_slider):
+        for w in (self.sheet_box, self.cell_box, self.mode_box, self.dpi_box):
             _connect_param_changed(w, self._debounce.start)
         for w in (self.date_font, self.date_size, self.date_weight,
                   self.wm_font, self.wm_size,
@@ -167,8 +158,13 @@ class MainWindow(QMainWindow):
             _connect_param_changed(w, self._debounce.start)
         for cb in (self.date_corner, self.date_rot, self.wm_corner, self.wm_rot):
             cb.currentIndexChanged.connect(self._on_overlay_widget_changed)
-        for cb in (self.date_enabled, self.wm_enabled, self.margin_cb):
-            cb.toggled.connect(lambda _: self._debounce.start())
+        # 叠加开关是逐张的（见 _on_ov_enabled_toggled），不能只挂 debounce
+        self.date_enabled.toggled.connect(
+            lambda on: self._on_ov_enabled_toggled("date_on", on))
+        self.wm_enabled.toggled.connect(
+            lambda on: self._on_ov_enabled_toggled("wm_on", on))
+        self.apply_all_cb.toggled.connect(self._on_apply_all_toggled)
+        self.margin_cb.toggled.connect(lambda _: self._debounce.start())
         self.wm_text.textChanged.connect(lambda _: self._debounce.start())
         self._restore_last_job()
         self._refresh()
@@ -209,16 +205,11 @@ class MainWindow(QMainWindow):
         rotate_btn.setObjectName("rotate_btn")
         rotate_btn.clicked.connect(self._on_rotate)
         self.rotate_btn = rotate_btn
-        clear_cell_btn = QPushButton("清空格")
-        clear_cell_btn.setObjectName("clear_cell_btn")
-        clear_cell_btn.clicked.connect(self._on_clear_cell)
-        self.clear_cell_btn = clear_cell_btn
         btns = QHBoxLayout()
         btns.addWidget(add_btn)
         btns.addWidget(import_btn)
         btns.addWidget(clear_btn)
         btns.addWidget(rotate_btn)
-        btns.addWidget(clear_cell_btn)
         panel.addRow("", btns)
 
         # 纸张只列 role=paper；格子列 role=cell 加全部 role=paper（人设计 4.3）
@@ -270,17 +261,6 @@ class MainWindow(QMainWindow):
             self.quality_box.addItem(label, value)
         panel.addRow("打印质量", self.quality_box)
         self._media_options = []       # 驱动给的介质项（枚举失败时为空）
-
-        self.h_slider = QSlider(Qt.Horizontal)
-        self.h_slider.setRange(-OFFSET_MAX_PCT, OFFSET_MAX_PCT)
-        self.v_slider = QSlider(Qt.Horizontal)
-        self.v_slider.setRange(-OFFSET_MAX_PCT, OFFSET_MAX_PCT)
-        self.h_label = QLabel("0%")
-        self.v_label = QLabel("0%")
-        self.h_slider.valueChanged.connect(lambda v: self.h_label.setText(f"{v}%"))
-        self.v_slider.valueChanged.connect(lambda v: self.v_label.setText(f"{v}%"))
-        panel.addRow("水平微调", _slider_row(self.h_slider, self.h_label))
-        panel.addRow("垂直微调", _slider_row(self.v_slider, self.v_label))
 
         overlay = QGroupBox("文字叠加")
         ovl = QVBoxLayout(overlay)
@@ -337,11 +317,16 @@ class MainWindow(QMainWindow):
         ovl.addWidget(self.wm_enabled)
         ovl.addWidget(self.wm_text)
         ovl.addLayout(wrow)
+        # 勾选框＝“把这套叠加同时套到本页所有照片”的批量开关：以前那个按钮
+        # 只是把角标补写一遍，而开关本身是全局的，看着像没作用（用户 2026-11-07）。
+        self.apply_all_cb = QCheckBox("文字叠加效果应用到所有照片")
+        self.apply_all_cb.setToolTip(
+            "不勾：只对预览里蓝框选中的那张照片生效\n"
+            "勾上：当前预览页里已放的照片全部套用这套叠加\n"
+            "（只作用于这一页，不跨页）")
+        ovl.addWidget(self.apply_all_cb)
+        self.overlay_group = overlay
         panel.addRow(overlay)
-
-        self.apply_overlay_btn = QPushButton("应用到所有照片")
-        self.apply_overlay_btn.clicked.connect(self._apply_overlay_to_all)
-        panel.addRow("", self.apply_overlay_btn)
 
         self._refresh_overlay_btn_colors()
 
@@ -391,10 +376,10 @@ class MainWindow(QMainWindow):
             "bleed_mm": modes.DEFAULT_BLEED_MM,
             "mode": MODE_LABELS[self.mode_box.currentIndex()][1],
             "dpi": float(self.dpi_box.currentData()),
-            "offset_pct": (float(self.h_slider.value()),
-                           float(self.v_slider.value())),
+            # enabled 一律从库里的逐张开关派生：面板上那个勾选框只代表“当前选中
+            # 的那张”，拿它当全局开关会把已勾上的别的照片一并抿掉。
             "date_overlay": TextSpec(
-                enabled=self.date_enabled.isChecked(),
+                enabled=self._any_on("date_on"),
                 font_key=self.date_font.currentData(),
                 size_mm=float(self.date_size.value()),
                 weight=self.date_weight.currentData(),
@@ -402,7 +387,7 @@ class MainWindow(QMainWindow):
                 rotation=self.date_rot.currentData(),
                 rgb=self._date_rgb, alpha=255),
             "watermark_overlay": TextSpec(
-                enabled=self.wm_enabled.isChecked(),
+                enabled=self._any_on("wm_on"),
                 text=self.wm_text.text(),
                 font_key=self.wm_font.currentData(),
                 size_mm=float(self.wm_size.value()),
@@ -412,6 +397,10 @@ class MainWindow(QMainWindow):
                 rgb=self._wm_rgb,
                 alpha=int(round(self.wm_alpha.value() / 100.0 * 255))),
         }
+
+    def _any_on(self, key):
+        """库里是否至少有一张已勾上某项叠加（TextSpec.enabled 的派生口径）。"""
+        return any(bool(e.get(key)) for e in self.pool)
 
     def _ensure_count(self):
         """不依赖 job 拿当前每页格数：恢复/迁移在首刷前也要用它算页数。"""
@@ -527,6 +516,10 @@ class MainWindow(QMainWindow):
                 date_texts[slot] = self.pool[pi].get("date")
         date_over = [None] * n
         wm_over = [None] * n
+        # 逐格开关与角标同一个循环物化：面板只管“这些照片的开关怎么变”，
+        # 落到哪个格由 placements 决定（一张图摆两次自然是两格都按它的开关）。
+        date_cells = [False] * n
+        wm_cells = [False] * n
         for slot, pi in self.placements.items():
             if 0 <= slot < n and 0 <= pi < len(self.pool):
                 e = self.pool[pi]
@@ -534,17 +527,21 @@ class MainWindow(QMainWindow):
                                    e.get("date_rot", self._ov_base["date_rot"]))
                 wm_over[slot] = (e.get("wm_corner", self._ov_base["wm_corner"]),
                                  e.get("wm_rot", self._ov_base["wm_rot"]))
+                date_cells[slot] = bool(e.get("date_on"))
+                wm_cells[slot] = bool(e.get("wm_on"))
         try:
             self.job = jobs.build_job(self.st, photos, p["sheet_key"], p["cell_key"],
                                       gap_mm=p["gap_mm"], bleed_mm=p["bleed_mm"],
-                                      mode=p["mode"], offset_pct=p["offset_pct"],
+                                      mode=p["mode"],
                                       uniform_mm=p["uniform_mm"],
                                       rotations=rotations,
                                       date_overlay=p["date_overlay"],
                                       watermark_overlay=p["watermark_overlay"],
                                       date_texts=date_texts,
                                       date_overrides=date_over,
-                                      wm_overrides=wm_over)
+                                      wm_overrides=wm_over,
+                                      date_cells=date_cells,
+                                      wm_cells=wm_cells)
         except ValueError as exc:
             self.job = None
             self._set_status(str(exc), error=True)
@@ -600,7 +597,7 @@ class MainWindow(QMainWindow):
         self.preview.show_image(image)
 
     def _on_cell_clicked(self, position):
-        """统一入口：选库图 + 点格 → 放入；无选中 → 纯选中该格（供旋转/清空格）。"""
+        """统一入口：选库图 + 点格 → 放入；无选中 → 纯选中该格（供旋转/叠加）。"""
         count = self._count_last or (self.job.count if self.job else 0)
         slot = self.page_index * count + position
         row = self._place_source
@@ -637,27 +634,23 @@ class MainWindow(QMainWindow):
             self._place_source = None
             self.photo_list.clearSelection()
             self.photo_list.setCurrentRow(-1)      # 清当前行（高亮不再停留）
-            self._set_status("已取消选中：点版面格将选中格（供旋转/清空格）")
-            self._ov_editing = None
-            self._load_overlay_widgets_from_base()
+            self._set_status("已取消选中：点版面格将选中格（供旋转）")
         else:
             self._place_source = row
             self.photo_list.setCurrentRow(row)
-            self._ov_editing = row
-            self._load_overlay_widgets_for(row)
 
     def _highlight_current_cell(self):
-        """当前选中格高亮：仅当选中格落在当前页才映射到页内序。"""
+        """当前选中格高亮：仅当选中格落在当前页才映射到页内序。
+
+        蓝框同时是文字叠加的作用对象，所以高亮之后要按新目标回灌面板。
+        """
         count = self._count_last or 0
         pos = None
         if self._current_cell is not None and count \
                 and self._current_cell // count == self.page_index:
             pos = self._current_cell % count
         self.preview.set_current_cell(pos)
-
-    def _on_clear_cell(self):
-        self.clear_cell(self._current_cell)
-        self._highlight_current_cell()
+        self._sync_overlay_widgets()
 
     def _on_render_failed(self, msg, gen):
         if gen == self._gen:
@@ -701,43 +694,86 @@ class MainWindow(QMainWindow):
                 "wm_corner": self.wm_corner.currentData(),
                 "wm_rot": self.wm_rot.currentData()}
 
-    def _load_overlay_widgets_for(self, pi):
-        e = self.pool[pi]
-        self._ov_loading = True
-        try:
-            self._select_by_data(self.date_corner, e.get("date_corner", self._ov_base["date_corner"]))
-            self._select_by_data(self.date_rot, e.get("date_rot", self._ov_base["date_rot"]))
-            self._select_by_data(self.wm_corner, e.get("wm_corner", self._ov_base["wm_corner"]))
-            self._select_by_data(self.wm_rot, e.get("wm_rot", self._ov_base["wm_rot"]))
-        finally:
-            self._ov_loading = False
+    def _ov_targets(self):
+        """文字叠加此刻作用于哪些库下标：蓝框那张，或（勾选框）当前页全部已放图。
 
-    def _load_overlay_widgets_from_base(self):
+        范围只到当前预览页：翻到别的页想接着套就再勾一次——跨页批量属于
+        “一页做完就打印”的用法，界面上不给全局开关，避免误伤别的页。
+        """
+        count = self._count_last or 0
+        if not count:
+            return []
+        base = self.page_index * count
+        if self.apply_all_cb.isChecked():
+            slots = [s for s in range(base, base + count) if s in self.placements]
+        else:
+            slot = self._current_cell
+            if slot is None or slot not in self.placements \
+                    or slot // count != self.page_index:
+                return []                      # 没蓝框，或蓝框在别的页 → 无对象
+            slots = [slot]
+        out = []
+        for s in slots:
+            pi = self.placements[s]
+            if 0 <= pi < len(self.pool) and pi not in out:
+                out.append(pi)                  # 同一张图摆两格只算一次
+        return out
+
+    def _sync_overlay_widgets(self):
+        """按当前目标回灌面板：勾选状态跟着那张照片走，角标/角度同左。
+
+        无目标（没蓝框）时整组置灰并给提示：面板上每一个控件都只代表“某张
+        照片”，没对象可编辑时亮着只会让人以为它还是全局开关。
+        """
+        targets = self._ov_targets()
         self._ov_loading = True
         try:
-            for key, cb in (("date_corner", self.date_corner), ("date_rot", self.date_rot),
-                            ("wm_corner", self.wm_corner), ("wm_rot", self.wm_rot)):
-                self._select_by_data(cb, self._ov_base[key])
+            e = self.pool[targets[0]] if targets else None
+            self.date_enabled.setChecked(bool(e.get("date_on")) if e else False)
+            self.wm_enabled.setChecked(bool(e.get("wm_on")) if e else False)
+            for key, cb in (("date_corner", self.date_corner),
+                            ("date_rot", self.date_rot),
+                            ("wm_corner", self.wm_corner),
+                            ("wm_rot", self.wm_rot)):
+                val = e.get(key, self._ov_base[key]) if e else self._ov_base[key]
+                self._select_by_data(cb, val)
         finally:
             self._ov_loading = False
+        self.overlay_group.setEnabled(bool(targets))
+        self.overlay_group.setToolTip(_OV_NO_TARGET_TIP if not targets else "")
+
+    def _on_ov_enabled_toggled(self, key, on):
+        """勾日期/水印：只改当前目标（蓝框那张，或勾选框下的整页）。"""
+        if self._ov_loading:
+            return
+        for pi in self._ov_targets():
+            self.pool[pi][key] = bool(on)
+        self._debounce.start()
+
+    def _on_apply_all_toggled(self, on):
+        """勾/取消“应用到所有照片”：勾上即刻把面板这套值套到当前页全部照片。"""
+        if self._ov_loading:
+            return
+        if on:
+            vals = self._read_overlay_widgets()
+            state = {"date_on": self.date_enabled.isChecked(),
+                     "wm_on": self.wm_enabled.isChecked()}
+            self._ov_base.update(vals)
+            for pi in self._ov_targets():
+                self.pool[pi].update(vals)
+                self.pool[pi].update(state)
+        else:
+            self._sync_overlay_widgets()
+        self._debounce.start()
 
     def _on_overlay_widget_changed(self, *_):
         if self._ov_loading:
             return
         vals = self._read_overlay_widgets()
-        pi = self._ov_editing
-        if pi is not None and 0 <= pi < len(self.pool):
+        self._ov_base.update(vals)             # 新增照片继承这一套
+        for pi in self._ov_targets():
             self.pool[pi].update(vals)
-        else:
-            self._ov_base.update(vals)
         self._debounce.start()
-
-    def _apply_overlay_to_all(self):
-        vals = self._read_overlay_widgets()
-        self._ov_base.update(vals)
-        for e in self.pool:
-            e.update(vals)
-        self._rebuild_job()
 
     def _set_status(self, text, error=False):
         self.statusBar().setStyleSheet(f"color:{ERROR_COLOR}" if error else "")
@@ -782,6 +818,7 @@ class MainWindow(QMainWindow):
             img = jobs.load_photo(path)
         except Exception as exc:      # IO 边界什么都可能抛，全部收敛
             self.pool.append({"path": str(path), "img": None, "date": None,
+                              "date_on": False, "wm_on": False,
                               "date_corner": self._ov_base["date_corner"],
                               "date_rot": self._ov_base["date_rot"],
                               "wm_corner": self._ov_base["wm_corner"],
@@ -793,6 +830,7 @@ class MainWindow(QMainWindow):
             return
         self.pool.append({"path": str(path), "img": img,
                           "date": jobs.photo_date_text(path),
+                          "date_on": False, "wm_on": False,
                           "date_corner": self._ov_base["date_corner"],
                           "date_rot": self._ov_base["date_rot"],
                           "wm_corner": self._ov_base["wm_corner"],
@@ -819,8 +857,6 @@ class MainWindow(QMainWindow):
         self.page_index = 0
         self._current_cell = None
         self._place_source = None
-        self._ov_editing = None
-        self._load_overlay_widgets_from_base()
         self.photo_list.clear()
         self._refresh()
 
@@ -982,19 +1018,18 @@ class MainWindow(QMainWindow):
             "mode_index": self.mode_box.currentIndex(),
             "gap_mm": p["gap_mm"], "bleed_mm": p["bleed_mm"], "dpi": p["dpi"],
             "driver_page": self.driver_page_cb.isChecked(),
-            "offset_pct": [self.h_slider.value(), self.v_slider.value()],
             "out_dir": out_dir or self._last_out_dir(),
             "pool_paths": [e["path"] for e in self.pool],
             "placements": {str(s): pi for s, pi in self.placements.items()},
             "cell_rot": {str(s): a for s, a in self.cell_rot.items() if a},
-            "date_overlay": {"enabled": self.date_enabled.isChecked(),
+            "date_overlay": {"enabled": self._any_on("date_on"),
                              "font_key": self.date_font.currentData(),
                              "size_mm": float(self.date_size.value()),
                              "weight": self.date_weight.currentData(),
                              "corner": self.date_corner.currentData(),
                              "rotation": self.date_rot.currentData(),
                              "rgb": list(self._date_rgb)},
-            "watermark_overlay": {"enabled": self.wm_enabled.isChecked(),
+            "watermark_overlay": {"enabled": self._any_on("wm_on"),
                                   "text": self.wm_text.text(),
                                   "font_key": self.wm_font.currentData(),
                                   "size_mm": float(self.wm_size.value()),
@@ -1006,6 +1041,10 @@ class MainWindow(QMainWindow):
             "ov_base": dict(self._ov_base),
             "pool_ov": [[e.get("date_corner"), e.get("date_rot"),
                          e.get("wm_corner"), e.get("wm_rot")] for e in self.pool],
+            # 逐张叠加开关：旧版本没有这个键，恢复时回退到旧的全局 enabled
+            "pool_on": [[bool(e.get("date_on")), bool(e.get("wm_on"))]
+                        for e in self.pool],
+            "ov_apply_all": self.apply_all_cb.isChecked(),
             "pages": self._pages})
         if not self.st.save():
             self._set_status("本次设置未持久化（写入失败）", error=True)
@@ -1039,9 +1078,6 @@ class MainWindow(QMainWindow):
             self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
         if isinstance(job.get("driver_page"), bool):
             self.driver_page_cb.setChecked(job["driver_page"])
-        pct = job.get("offset_pct")
-        if isinstance(pct, (list, tuple)) and len(pct) == 2:
-            self._safe(lambda: self._apply_offset(pct))
         new_shape = ("placements" in job) or ("pool_paths" in job)
         paths = job.get("pool_paths") if new_shape else job.get("photo_paths")
         for pth in (paths if isinstance(paths, (list, tuple)) else []):
@@ -1060,19 +1096,42 @@ class MainWindow(QMainWindow):
             self._safe(lambda: self._migrate_sequential(job))
         self._restore_overlay(job.get("date_overlay"), is_date=True)
         self._restore_overlay(job.get("watermark_overlay"), is_date=False)
+        self._restore_pool_on(job)
         saved_base = job.get("ov_base")
         if isinstance(saved_base, dict):
             self._ov_base.update({k: saved_base[k] for k in
                                   ("date_corner", "date_rot", "wm_corner", "wm_rot")
                                   if k in saved_base})
-        self._ov_editing = None
-        self._load_overlay_widgets_from_base()
+        self._ov_loading = True
+        try:
+            self.apply_all_cb.setChecked(bool(job.get("ov_apply_all")))
+        finally:
+            self._ov_loading = False
+        self._sync_overlay_widgets()
+
+    def _restore_pool_on(self, job):
+        """逐张叠加开关：新 schema 读 pool_on，旧配置回退到旧的全局 enabled。
+
+        旧版本那两个勾选框是全局的（勾上就等于每张照片都有），所以没有
+        pool_on 时整库按 enabled 铺开，行为与升级前逐像素一致。
+        """
+        d_leg = job.get("date_overlay")
+        w_leg = job.get("watermark_overlay")
+        legacy_date = bool(d_leg.get("enabled")) if isinstance(d_leg, dict) else False
+        legacy_wm = bool(w_leg.get("enabled")) if isinstance(w_leg, dict) else False
+        po = job.get("pool_on")
+        for i, e in enumerate(self.pool):
+            on = (legacy_date, legacy_wm)
+            if isinstance(po, (list, tuple)) and i < len(po):
+                pair = po[i]
+                if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                    on = (bool(pair[0]), bool(pair[1]))
+            e["date_on"], e["wm_on"] = on
 
     def _restore_overlay(self, d, is_date):
+        """回灌字体/字号/颜色等全局参数；开关不在这里（它逐张，见 _restore_pool_on）。"""
         if not isinstance(d, dict):
             return
-        box = self.date_enabled if is_date else self.wm_enabled
-        self._safe(lambda: box.setChecked(bool(d.get("enabled", False))))
         for key, cb in (("font_key", self.date_font if is_date else self.wm_font),
                         ("weight", self.date_weight if is_date else self.wm_weight),
                         ("corner", self.date_corner if is_date else self.wm_corner),
@@ -1157,10 +1216,6 @@ class MainWindow(QMainWindow):
         idx = box.findData(value)
         if idx >= 0:
             box.setCurrentIndex(idx)
-
-    def _apply_offset(self, pct):
-        self.h_slider.setValue(int(pct[0]))
-        self.v_slider.setValue(int(pct[1]))
 
     def _last_out_dir(self):
         d = self.st.get_last_job().get("out_dir")

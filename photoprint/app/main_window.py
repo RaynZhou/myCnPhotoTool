@@ -36,10 +36,12 @@ QUALITY_CHOICES = (("驱动默认", None), ("高", media_mod.QUALITY_HIGH))
 MEDIA_DEFAULT_LABEL = "驱动默认"
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
-# 间距只有两档：不勾＝0（自动铺满），勾上＝2mm（够下刀分开照片，又不白费纸）。
-# 具体毫米数属于会漂的细节，摆在面板上只会增加认知负担（用户 2026-11-07 反馈）。
-GAP_ON_MM = 2.0
-GAP_ON_LABEL = "格间留白 2mm"
+# 边距只有两档：不勾＝0（照片与照片紧贴、尽量铺满），勾上＝2mm（够下刀分开
+# 照片，又不白费纸）。具体毫米数属于会漂的细节，摆在面板上只会增加认知负担。
+# 面板上不再出现“间距”这个词：单张照片根本没有相邻格，那个属性只在一页多格时
+# 成立；统一叫“边距”，与纸边白边同一个概念（用户 2026-11-07 反馈）。
+MARGIN_ON_MM = 2.0
+MARGIN_ON_LABEL = "留边距 2mm"
 GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
@@ -145,7 +147,7 @@ class MainWindow(QMainWindow):
             _connect_param_changed(w, self._debounce.start)
         for cb in (self.date_corner, self.date_rot, self.wm_corner, self.wm_rot):
             cb.currentIndexChanged.connect(self._on_overlay_widget_changed)
-        for cb in (self.date_enabled, self.wm_enabled, self.gap_cb):
+        for cb in (self.date_enabled, self.wm_enabled, self.margin_cb):
             cb.toggled.connect(lambda _: self._debounce.start())
         self.wm_text.textChanged.connect(lambda _: self._debounce.start())
         self._restore_last_job()
@@ -223,12 +225,17 @@ class MainWindow(QMainWindow):
             f"出血拼版：固定出血 {modes.DEFAULT_BLEED_MM:g}mm，打后沿灰线裁开")
         panel.addRow("模式", self.mode_box)
 
-        # 间距只给“有/无”：勾上才留白，不勾就紧密铺满。出血量不再暴露，
+        # 边距只给“有/无”：勾上照片之间留白，不勾紧贴铺满。出血量不再暴露，
         # 选出血拼版即用 modes.DEFAULT_BLEED_MM。
-        self.gap_cb = QCheckBox(GAP_ON_LABEL)
-        self.gap_cb.setToolTip("不勾：格与格紧贴，自动铺满可打印区\n"
-                               "勾上：格间留 2mm 白边，方便下刀")
-        panel.addRow("间距", self.gap_cb)
+        # 纸边那圈白边不归这个开关管——它是打印机不可印区，关不掉；
+        # 单张时没有相邻格，开关无效果，故 count==1 时置灰（见 _rebuild_job）。
+        self.margin_cb = QCheckBox(MARGIN_ON_LABEL)
+        self.margin_cb.setToolTip(
+            "勾上：照片之间留 2mm，方便下刀\n"
+            "不勾：照片之间紧贴，尽量铺满可打印区\n"
+            "纸边的白边由打印机不可印区决定（约 3~5mm），本开关关不掉；\n"
+            "要真正无白边：模式选「出血拼版」，打后沿灰线裁切")
+        panel.addRow("边距", self.margin_cb)
 
         self.dpi_box = QComboBox()
         for value, label in DPI_CHOICES:
@@ -361,7 +368,7 @@ class MainWindow(QMainWindow):
         return {
             "sheet_key": self.sheet_box.currentData(),
             "cell_key": self.cell_box.currentData(),
-            "gap_mm": GAP_ON_MM if self.gap_cb.isChecked() else 0.0,
+            "gap_mm": MARGIN_ON_MM if self.margin_cb.isChecked() else 0.0,
             "bleed_mm": modes.DEFAULT_BLEED_MM,
             "mode": MODE_LABELS[self.mode_box.currentIndex()][1],
             "dpi": float(self.dpi_box.currentData()),
@@ -468,6 +475,9 @@ class MainWindow(QMainWindow):
             self.export_btn.setEnabled(False)
             return
         count = plan.count
+        # 单张时没有相邻格，边距开关不改变出片（纸边白边由不可印区决定）：
+        # 置灰而非静默无效，避免“我勾了怎么没变化”（用户 2026-11-07 反馈）。
+        self.margin_cb.setEnabled(count > 1)
         cleared = False
         if count != self._count_last:
             if self._count_last is not None and self.placements:
@@ -987,11 +997,12 @@ class MainWindow(QMainWindow):
         mode_index = job.get("mode_index")
         if isinstance(mode_index, int) and 0 <= mode_index < self.mode_box.count():
             self._safe(lambda: self.mode_box.setCurrentIndex(mode_index))
-        # 旧配置里可能存着任意毫米数（如 2.5）：非 0 一律归为“有间距”那一档。
+        # 旧配置里可能存着任意毫米数（如 2.5）：非 0 一律归为“留边距”那一档。
+        # 键名仍是 gap_mm（旧版本要读得动），语义已统一为边距。
         # 出血量不再落盘，旧值忽略（现固定用 modes.DEFAULT_BLEED_MM）。
         gap = job.get("gap_mm")
         if isinstance(gap, (int, float)):
-            self.gap_cb.setChecked(bool(gap))
+            self.margin_cb.setChecked(bool(gap))
         if isinstance(job.get("dpi"), (int, float)):
             self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
         if isinstance(job.get("driver_page"), bool):

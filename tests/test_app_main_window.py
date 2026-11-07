@@ -199,33 +199,54 @@ def test_unreadable_photo_is_marked_and_does_not_block(qapp, tmp_path):
 
 def test_last_job_roundtrip_through_two_windows(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
-    w.gap_cb.setChecked(True)
+    w.margin_cb.setChecked(True)
     w.cell_box.setCurrentIndex(w.cell_box.findData("ID1"))
     w.save_last_job(out_dir=str(tmp_path))
 
     again = MainWindow(st=_store(tmp_path))
-    assert again.gap_cb.isChecked() is True
+    assert again.margin_cb.isChecked() is True
     assert again.cell_box.currentData() == "ID1"
 
 
-def test_gap_is_a_switch_not_a_number(qapp, tmp_path):
-    """间距只给有/无：不勾=0（自动铺满），勾上=2.0mm（够下刀）。
+def test_margin_is_a_switch_not_a_number(qapp, tmp_path):
+    """边距只给有/无：不勾=0（照片之间紧贴、自动铺满），勾上=2.0mm（够下刀）。
 
-    面板不得再出现毫米数值框（用户 2026-11-07：设置过于复杂）。
+    面板不得再出现毫米数值框，也不得再用“间距”这个词——单张照片没有相邻格，
+    那个属性只在多格时成立（用户 2026-11-07：统一为边距）。
     """
     w = MainWindow(st=_store(tmp_path))
     assert not hasattr(w, "gap_box") and not hasattr(w, "bleed_box")
+    assert not hasattr(w, "gap_cb")
     w.sheet_box.setCurrentIndex(w.sheet_box.findData("A4"))
     w.cell_box.setCurrentIndex(w.cell_box.findData("ID1"))
     w._refresh()
-    assert w.gap_cb.isChecked() is False       # 默认无间距
+    assert w.margin_cb.isChecked() is False     # 默认无额外边距
     assert w._params()["gap_mm"] == 0.0
-    full = w.job.count                          # 无间距：铺满
+    full = w.job.count                          # 无边距：铺满
 
-    w.gap_cb.setChecked(True)
+    w.margin_cb.setChecked(True)
     w._refresh()
-    assert w._params()["gap_mm"] == main_window.GAP_ON_MM == 2.0
-    assert 0 < w.job.count < full               # 有间距：必然少几格
+    assert w._params()["gap_mm"] == main_window.MARGIN_ON_MM == 2.0
+    assert 0 < w.job.count < full               # 有边距：必然少几格
+
+
+def test_margin_switch_is_greyed_out_on_single_cell(qapp, tmp_path):
+    """单张（3R 纸打 3R 照片）没有相邻格：开关置灰，白边由不可印区决定。
+
+    置灰而不是静默无效，是为了不让用户以为“勾了没反应”（用户 2026-11-07）。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    w.sheet_box.setCurrentIndex(w.sheet_box.findData("3R"))
+    w.cell_box.setCurrentIndex(w.cell_box.findData("3R"))
+    w._refresh()
+    assert w.job.count == 1
+    assert w.margin_cb.isEnabled() is False
+    assert "不可印" in w.margin_cb.toolTip()
+
+    w.sheet_box.setCurrentIndex(w.sheet_box.findData("A4"))
+    w._refresh()
+    assert w.job.count > 1
+    assert w.margin_cb.isEnabled() is True
 
 
 def test_bleed_is_fixed_at_default(qapp, tmp_path):
@@ -235,13 +256,13 @@ def test_bleed_is_fixed_at_default(qapp, tmp_path):
 
 
 def test_legacy_gap_mm_restores_as_checked(qapp, tmp_path):
-    """旧配置里的任意毫米数（如 2.5）按“有间距”一档恢复，不得卡启动。"""
+    """旧配置里的任意毫米数（如 2.5）按“留边距”一档恢复，不得卡启动。"""
     s = _store(tmp_path)
     s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
                     "gap_mm": 2.5, "bleed_mm": 5.0})
     s.save()
     w = MainWindow(st=_store(tmp_path))
-    assert w.gap_cb.isChecked() is True
+    assert w.margin_cb.isChecked() is True
 
 
 def test_bad_offset_pct_in_config_does_not_block_startup(qapp, tmp_path):

@@ -36,6 +36,10 @@ QUALITY_CHOICES = (("驱动默认", None), ("高", media_mod.QUALITY_HIGH))
 MEDIA_DEFAULT_LABEL = "驱动默认"
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
+# 间距只有两档：不勾＝0（自动铺满），勾上＝2mm（够下刀分开照片，又不白费纸）。
+# 具体毫米数属于会漂的细节，摆在面板上只会增加认知负担（用户 2026-11-07 反馈）。
+GAP_ON_MM = 2.0
+GAP_ON_LABEL = "格间留白 2mm"
 GALLERY_THUMB_PX = 120
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
@@ -132,8 +136,8 @@ class MainWindow(QMainWindow):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(self._refresh)
-        for w in (self.sheet_box, self.cell_box, self.mode_box, self.gap_box,
-                  self.bleed_box, self.dpi_box, self.h_slider, self.v_slider):
+        for w in (self.sheet_box, self.cell_box, self.mode_box,
+                  self.dpi_box, self.h_slider, self.v_slider):
             _connect_param_changed(w, self._debounce.start)
         for w in (self.date_font, self.date_size, self.date_weight,
                   self.wm_font, self.wm_size,
@@ -141,7 +145,7 @@ class MainWindow(QMainWindow):
             _connect_param_changed(w, self._debounce.start)
         for cb in (self.date_corner, self.date_rot, self.wm_corner, self.wm_rot):
             cb.currentIndexChanged.connect(self._on_overlay_widget_changed)
-        for cb in (self.date_enabled, self.wm_enabled):
+        for cb in (self.date_enabled, self.wm_enabled, self.gap_cb):
             cb.toggled.connect(lambda _: self._debounce.start())
         self.wm_text.textChanged.connect(lambda _: self._debounce.start())
         self._restore_last_job()
@@ -212,12 +216,19 @@ class MainWindow(QMainWindow):
         self.mode_box = QComboBox()
         for label, _value in MODE_LABELS:
             self.mode_box.addItem(label)
+        self.mode_box.setToolTip(
+            "自动：按纸张/格子给默认档\n"
+            "完整放入：整张照片放进格子，多出的是白边\n"
+            "铺满可打印区：裁到格子大小，四周留不可印白边\n"
+            f"出血拼版：固定出血 {modes.DEFAULT_BLEED_MM:g}mm，打后沿灰线裁开")
         panel.addRow("模式", self.mode_box)
 
-        self.gap_box = _spin(0.0, 50.0)
-        panel.addRow("格间距 mm", self.gap_box)
-        self.bleed_box = _spin(0.0, 20.0, modes.DEFAULT_BLEED_MM)
-        panel.addRow("出血 mm", self.bleed_box)
+        # 间距只给“有/无”：勾上才留白，不勾就紧密铺满。出血量不再暴露，
+        # 选出血拼版即用 modes.DEFAULT_BLEED_MM。
+        self.gap_cb = QCheckBox(GAP_ON_LABEL)
+        self.gap_cb.setToolTip("不勾：格与格紧贴，自动铺满可打印区\n"
+                               "勾上：格间留 2mm 白边，方便下刀")
+        panel.addRow("间距", self.gap_cb)
 
         self.dpi_box = QComboBox()
         for value, label in DPI_CHOICES:
@@ -350,8 +361,8 @@ class MainWindow(QMainWindow):
         return {
             "sheet_key": self.sheet_box.currentData(),
             "cell_key": self.cell_box.currentData(),
-            "gap_mm": self.gap_box.value(),
-            "bleed_mm": self.bleed_box.value(),
+            "gap_mm": GAP_ON_MM if self.gap_cb.isChecked() else 0.0,
+            "bleed_mm": modes.DEFAULT_BLEED_MM,
             "mode": MODE_LABELS[self.mode_box.currentIndex()][1],
             "dpi": float(self.dpi_box.currentData()),
             "offset_pct": (float(self.h_slider.value()),
@@ -976,9 +987,11 @@ class MainWindow(QMainWindow):
         mode_index = job.get("mode_index")
         if isinstance(mode_index, int) and 0 <= mode_index < self.mode_box.count():
             self._safe(lambda: self.mode_box.setCurrentIndex(mode_index))
-        for key, box in (("gap_mm", self.gap_box), ("bleed_mm", self.bleed_box)):
-            if isinstance(job.get(key), (int, float)):
-                self._safe(lambda b=box, v=job[key]: b.setValue(float(v)))
+        # 旧配置里可能存着任意毫米数（如 2.5）：非 0 一律归为“有间距”那一档。
+        # 出血量不再落盘，旧值忽略（现固定用 modes.DEFAULT_BLEED_MM）。
+        gap = job.get("gap_mm")
+        if isinstance(gap, (int, float)):
+            self.gap_cb.setChecked(bool(gap))
         if isinstance(job.get("dpi"), (int, float)):
             self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
         if isinstance(job.get("driver_page"), bool):

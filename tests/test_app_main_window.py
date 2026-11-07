@@ -13,6 +13,7 @@ from PySide6.QtGui import QPixmap  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from photoprint import jobs  # noqa: E402
+from photoprint.app import main_window  # noqa: E402
 from photoprint.app.main_window import MainWindow  # noqa: E402
 from photoprint.core import modes, store  # noqa: E402
 
@@ -110,10 +111,13 @@ def test_ui_defaults_match_shared_constants(qapp, tmp_path):
 
     导出 dpi 下拉默认（`DPI_CHOICES[1]` → setCurrentIndex(1)）、出血默认都对应到生产
     常量。控件默认值此前无任何断言（parity 脚本只声明“同值不同源”），这条把它们钉住。
+
+    出血量已不暴露到面板（固定用 `modes.DEFAULT_BLEED_MM`），故改为断言
+    `_params()` 交出去的那份值，而不是控件的 value。
     """
     w = MainWindow(st=_store(tmp_path))
     assert float(w.dpi_box.currentData()) == jobs.DEFAULT_OUTPUT_DPI
-    assert w.bleed_box.value() == modes.DEFAULT_BLEED_MM
+    assert w._params()["bleed_mm"] == modes.DEFAULT_BLEED_MM
 
 
 def test_exported_page_has_no_unprintable_mask(qapp, tmp_path):
@@ -195,13 +199,49 @@ def test_unreadable_photo_is_marked_and_does_not_block(qapp, tmp_path):
 
 def test_last_job_roundtrip_through_two_windows(qapp, tmp_path):
     w = MainWindow(st=_store(tmp_path))
-    w.gap_box.setValue(2.5)
+    w.gap_cb.setChecked(True)
     w.cell_box.setCurrentIndex(w.cell_box.findData("ID1"))
     w.save_last_job(out_dir=str(tmp_path))
 
     again = MainWindow(st=_store(tmp_path))
-    assert again.gap_box.value() == 2.5
+    assert again.gap_cb.isChecked() is True
     assert again.cell_box.currentData() == "ID1"
+
+
+def test_gap_is_a_switch_not_a_number(qapp, tmp_path):
+    """间距只给有/无：不勾=0（自动铺满），勾上=2.0mm（够下刀）。
+
+    面板不得再出现毫米数值框（用户 2026-11-07：设置过于复杂）。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    assert not hasattr(w, "gap_box") and not hasattr(w, "bleed_box")
+    w.sheet_box.setCurrentIndex(w.sheet_box.findData("A4"))
+    w.cell_box.setCurrentIndex(w.cell_box.findData("ID1"))
+    w._refresh()
+    assert w.gap_cb.isChecked() is False       # 默认无间距
+    assert w._params()["gap_mm"] == 0.0
+    full = w.job.count                          # 无间距：铺满
+
+    w.gap_cb.setChecked(True)
+    w._refresh()
+    assert w._params()["gap_mm"] == main_window.GAP_ON_MM == 2.0
+    assert 0 < w.job.count < full               # 有间距：必然少几格
+
+
+def test_bleed_is_fixed_at_default(qapp, tmp_path):
+    """出血量不再暴露：选出血拼版就固定用 modes.DEFAULT_BLEED_MM。"""
+    w = MainWindow(st=_store(tmp_path))
+    assert w._params()["bleed_mm"] == modes.DEFAULT_BLEED_MM
+
+
+def test_legacy_gap_mm_restores_as_checked(qapp, tmp_path):
+    """旧配置里的任意毫米数（如 2.5）按“有间距”一档恢复，不得卡启动。"""
+    s = _store(tmp_path)
+    s.set_last_job({"sheet_key": "A4", "cell_key": "3R",
+                    "gap_mm": 2.5, "bleed_mm": 5.0})
+    s.save()
+    w = MainWindow(st=_store(tmp_path))
+    assert w.gap_cb.isChecked() is True
 
 
 def test_bad_offset_pct_in_config_does_not_block_startup(qapp, tmp_path):
@@ -275,8 +315,6 @@ def test_offset_pct_infinity_does_not_block_startup(qapp, tmp_path):
 
 
 @pytest.mark.parametrize("key,value", [
-    ("gap_mm", int("9" * 400)),        # float(huge int) → OverflowError
-    ("bleed_mm", int("9" * 400)),
     ("dpi", int("9" * 400)),
     ("offset_pct", [1e19, 0]),         # setValue(int(1e19)) → shiboken 抛 OverflowError
 ])
@@ -296,11 +334,8 @@ def test_bad_numeric_configs_do_not_block_startup(qapp, tmp_path, key, value):
     w = MainWindow(st=_store(tmp_path))       # 不应抛
     if key == "offset_pct":
         assert w.h_slider.value() == 0 and w.v_slider.value() == 0
-    elif key == "dpi":
-        assert w.dpi_box.currentIndex() == 1   # 保持默认 300
     else:
-        box = w.gap_box if key == "gap_mm" else w.bleed_box
-        assert box.minimum() <= box.value() <= box.maximum()   # 超大值被护栏挡下，控件仍在量程内
+        assert w.dpi_box.currentIndex() == 1   # 保持默认 300
 
 
 def test_stale_generation_preview_frame_is_dropped(qapp, tmp_path):

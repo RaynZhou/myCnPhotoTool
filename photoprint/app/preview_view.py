@@ -9,11 +9,12 @@ from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QLabel
 
-from photoprint.app import view
+from photoprint.app import theme, view
 from photoprint.core import render
 
-_CELL_PEN = QColor(120, 120, 120)
-_CURRENT_PEN = QColor(0, 120, 215)
+# 配色全部问 theme：格线与选中框是设计系统的一部分，不在这里另起一代码
+_CELL_PEN = QColor(theme.LINE_STRONG)
+_CURRENT_PEN = QColor(theme.ACCENT)
 _EMPTY_TEXT = "（无预览）"
 
 
@@ -23,6 +24,7 @@ class PreviewView(QLabel):
 
     def __init__(self, parent=None):
         super().__init__(_EMPTY_TEXT, parent)
+        self.setObjectName("PreviewView")   # 空态字色/背景由全局 QSS 接管
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(360, 240)
         self._full_pm = None
@@ -98,7 +100,7 @@ class PreviewView(QLabel):
             painter.drawRect(QRectF(x, y, w, h))
         if self._current_cell is not None and 0 <= self._current_cell < len(rects):
             cpen = QPen(_CURRENT_PEN)
-            cpen.setWidth(3)
+            cpen.setWidth(2)          # 扁平风：2px 就够醒目，再粗压画面
             painter.setPen(cpen)
             cx, cy, cw, ch = rects[self._current_cell]
             painter.drawRect(QRectF(cx, cy, cw, ch))

@@ -34,8 +34,14 @@ if ($LASTEXITCODE -ne 0) { throw "装构建期依赖失败 rc=$LASTEXITCODE" }
 # 显式钉死输出路径到 $root（不依赖 CWD），否则从别处按绝对路径调用时 PyInstaller 会往 CWD 写 dist、
 # 而下面的产物检查与 -Clean 都锚在 $root，会错报“未产出”或删错位置。
 $buildStart = Get-Date
+$assets = Join-Path $root "photoprint\app\assets"
+$icon = Join-Path $assets "logo.ico"
+# 图标给 double-click 前的资源管理器与任务栏；运行时 branding.py 从 _MEIPASS 下的
+# 同一目录读 logo.png（--add-data 保持原相对路径），所以两张都要进包。
+$addData = "$assets;photoprint/app/assets"
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name PhotoPrint `
     --distpath (Join-Path $root "dist") --workpath (Join-Path $root "build") --specpath $root `
+    --icon $icon --add-data $addData `
     --paths $root (Join-Path $root "photoprint\app\__main__.py")
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 失败 rc=$LASTEXITCODE" }
 

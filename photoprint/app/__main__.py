@@ -9,7 +9,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
-from photoprint.app import crashlog, main_window
+from photoprint.app import branding, crashlog, main_window
 
 # spec §9 要求崩溃落盘后在状态栏提示的逐字前缀（抽成常量供入口测钉）。
 CRASH_HINT_PREFIX = "已记录错误日志："
@@ -28,6 +28,9 @@ def wire_crash_hint(win):
 def run(argv=None):
     crashlog.install()
     app = QApplication(argv if argv is not None else sys.argv[:1])
+    # 应用图标要在第一个窗口创建前挂上去：任务栏/Alt-Tab 取的是 QApplication 的
+    # 图标，窗口晚设只影响标题栏与任务栏缩略图。
+    app.setWindowIcon(branding.app_icon())
     win = main_window.MainWindow()
     win.show()
     wire_crash_hint(win)

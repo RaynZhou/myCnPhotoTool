@@ -11,13 +11,14 @@ from pathlib import Path
 from PySide6.QtCore import QPoint, Qt, QSize, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
-                               QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLineEdit, QListWidget, QListView,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QSlider, QVBoxLayout, QWidget)
+                               QDoubleSpinBox, QFileDialog, QFrame, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                               QListView, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+                               QSlider, QVBoxLayout, QWidget)
 
 from photoprint import jobs
-from photoprint.app import view, worker
+from photoprint.app import branding, theme, view, worker
 from photoprint.app.preview_view import PreviewView
 from photoprint.core import modes, render, specs, store
 from photoprint.core.text_overlay import Corner, TextSpec
@@ -62,6 +63,23 @@ _SINGLE_NO_TIP = (
     "所以这一档不生效。现在按标称尺寸居中：左右相等、上下相等。\n"
     "要四边一样宽：纸与照片选同一规格，或模式选「出血拼版」打后裁。")
 GALLERY_THUMB_PX = 120
+# 网格单元格自己算死，不交给委托的 sizeHint：窗口级 QSS 下它按「一行文字」报高
+# （实测 139px，而图标 120 + 两行文字 30 = 150），第二行/换行后的文件名会被裁掉，
+# 甚至被下一行的图标压住。宽度同理，不能由文字决定：文件名一长就把格子撑宽、
+# 列数掉回一列。
+GALLERY_CELL_W = GALLERY_THUMB_PX + 20      # 图标 + 左右内边距与描边
+GALLERY_NAME_PX = GALLERY_CELL_W - 16       # 文件名可用横向像素
+# 照片网格高度下限：左栏可滚动时列表不会再被“内容高度”顶大，
+# 少了这条它会被压成一条几百像素的窄带（窗口拉高也不跟着长）。
+PHOTO_LIST_MIN_H = 220
+BRAND_LOGO_PX = 34
+# 开窗尺寸：默认值刚好能一次排开「左区两列 + 最小预览区」（内容高约 850），
+# 屏幕不够大时向可用区收——窗口比屏幕还高会连带状态栏和操作条一起被裁掉，
+# 比出现滚动条更难用。
+MIN_WIN_W = 1140
+MIN_WIN_H = 700
+DEFAULT_WIN_W = 1400
+DEFAULT_WIN_H = 960
 IMAGE_FILTER = "图片 (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)"
 ERROR_COLOR = "#b00000"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
@@ -89,6 +107,21 @@ def list_folder_images(dir_path):
     imgs = [str(p) for p in entries
             if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
     return sorted(imgs, key=lambda s: s.lower())
+
+
+def initial_window_size(screen=None):
+    """开窗宽高：默认 1400×960（左区两列 + 预览一次看全），向屏幕可用区收。
+
+    不能无脑 resize 大尺寸：高分屏/小屏下窗口比可用区还高时，底部操作条与
+    状态栏会落到屏幕外，比左区出滚动条难用得多。
+    """
+    screen = screen if screen is not None else QApplication.primaryScreen()
+    if screen is None:
+        return DEFAULT_WIN_W, DEFAULT_WIN_H
+    avail = screen.availableGeometry()
+    width = max(MIN_WIN_W, min(DEFAULT_WIN_W, avail.width() - 40))
+    height = max(MIN_WIN_H, min(DEFAULT_WIN_H, avail.height() - 60))
+    return width, height
 
 
 def _spin(lo, hi, value=0.0):
@@ -172,27 +205,115 @@ class MainWindow(QMainWindow):
     # ---------- 布局 ----------
 
     def _build_ui(self):
+        # 样式先装：QSS 只对装配之后创建的控件生效（且必须早于 setCentralWidget）
+        theme.apply(self)
+        self.setWindowIcon(branding.app_icon())
+        self.setMinimumSize(MIN_WIN_W, MIN_WIN_H)
+        self.resize(*initial_window_size())
         root = QWidget()
+        root.setObjectName("Root")
         self.setCentralWidget(root)
-        outer = QVBoxLayout(root)
-        body = QHBoxLayout()
-        outer.addLayout(body, 1)
+        body = QHBoxLayout(root)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        body.addWidget(self._build_left_region())
+        body.addLayout(self._build_preview_area(), 1)
+        status = self.statusBar()
+        status.setSizeGripEnabled(False)      # 扁平风不要右下角那个斜纹抓手
+        status.showMessage("就绪")
 
-        panel = QFormLayout()
-        body.addLayout(panel)
+    def _build_left_region(self):
+        """左区：品牌头 + 两列卡片（照片列 | 设置列），整区可滚动。
 
+        两列并排是“开窗即看全”的关键：三张卡片竖着堆成单列要 1200px 以上，
+        任何屏幕都得滚动；分成两列后总高约 850px，常见笔记本也能一次看全。
+        滚动条只在小屏时出现兜底。
+        """
+        scroll = QScrollArea()
+        scroll.setObjectName("Sidebar")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(theme.LEFT_W)
+        inner = QWidget()
+        inner.setObjectName("SidebarContent")
+        col = QVBoxLayout(inner)
+        col.setContentsMargins(theme.PAGE_MARGIN, theme.PAGE_MARGIN,
+                               theme.PAGE_MARGIN, theme.PAGE_MARGIN)
+        col.setSpacing(theme.CARD_GAP)
+        col.addLayout(self._build_brand())
+        cols = QHBoxLayout()
+        cols.setSpacing(theme.COL_GAP)
+        cols.addWidget(self._build_photo_card(), 1)
+        cols.addWidget(self._build_panel_column())
+        col.addLayout(cols, 1)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _build_brand(self):
+        """品牌头：logo + 应用名/副标题上下排（比竖排省一行，又与两列卡片同宽）。"""
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        logo = QLabel()
+        logo.setObjectName("BrandLogo")
+        logo.setFixedSize(BRAND_LOGO_PX, BRAND_LOGO_PX)
+        logo.setAlignment(Qt.AlignCenter)
+        pixmap = branding.logo_pixmap(BRAND_LOGO_PX)
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap)
+        row.addWidget(logo)
+        texts = QVBoxLayout()
+        texts.setSpacing(0)
+        title = QLabel("相片打印助手")
+        title.setObjectName("AppTitle")
+        subtitle = QLabel("3R / 自定义尺寸 · 拼版直打")
+        subtitle.setObjectName("Hint")
+        texts.addWidget(title)
+        texts.addWidget(subtitle)
+        row.addLayout(texts, 1)
+        return row
+
+    def _build_panel_column(self):
+        """设置列：纸张与布局 + 文字叠加。宽固定，卡片按内容自然高，末尾留白。"""
+        holder = QWidget()
+        holder.setObjectName("SidebarContent")
+        holder.setFixedWidth(theme.PANEL_COL_W)
+        col = QVBoxLayout(holder)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(theme.CARD_GAP)
+        col.addWidget(self._build_layout_card())
+        col.addWidget(self._build_overlay_card())
+        col.addStretch(1)
+        return holder
+
+    def _build_photo_card(self):
+        card, body = theme.card("照片", "点选后点版面格放入")
         self.photo_list = QListWidget()
         self.photo_list.setViewMode(QListView.IconMode)   # 图标在上、文字在下、自动换行
         self.photo_list.setMovement(QListView.Static)     # 格子固定不可拖拽重排
         self.photo_list.setWrapping(True)                 # 随栏宽换行成多列
         self.photo_list.setResizeMode(QListView.Adjust)   # 宽度变化时重排列数
-        self.photo_list.setWordWrap(True)                 # 长文件名换行
+        # 文字不换行：换行会把格子撑成三行、越过算死的单元格高度，名字就被裁了。
+        # 过长时由 _photo_item_text 做中部省略（保留扩展名），完整名看悬停。
+        self.photo_list.setWordWrap(False)
+        self.photo_list.setTextElideMode(Qt.ElideMiddle)   # 字体度量变了也不横向满出
         self.photo_list.setUniformItemSizes(True)         # 网格整齐 + 大数据性能
         self.photo_list.setIconSize(QSize(GALLERY_THUMB_PX, GALLERY_THUMB_PX))
+        # 单元格尺寸自己算死：见 GALLERY_CELL_W 的注释——委托按「一行文字」报高，
+        # 不把每个项的 sizeHint 顶上去，第二行就只能溢出格子被裁。
+        self._photo_cell = QSize(
+            GALLERY_CELL_W, GALLERY_THUMB_PX + 2 * self.fontMetrics().height() + 16)
+        self.photo_list.setMinimumHeight(PHOTO_LIST_MIN_H)
+        # 选中样式挂在列表自身（全局 QSS 只管容器）：扁平口径＝浅蓝底 + 强调色细描边
         self.photo_list.setStyleSheet(
-            "QListView::item:selected{background:#bcd4ff;border:2px solid #2b6cb0;}")
+            "QListView { background: transparent; border: none; outline: 0; }"
+            "QListView::item { padding: 6px; border: 1px solid transparent;"
+            f" border-radius: 8px; color: {theme.TEXT}; }}"
+            f"QListView::item:hover {{ background: {theme.BG}; }}"
+            f"QListView::item:selected {{ background: {theme.ACCENT_SOFT};"
+            f" border: 1px solid {theme.ACCENT}; }}")
         self.photo_list.itemClicked.connect(self._on_photo_clicked)
-        panel.addRow("照片", self.photo_list)
+        body.addWidget(self.photo_list, 1)
 
         add_btn = QPushButton("添加照片…")
         add_btn.clicked.connect(self._on_add_photos)
@@ -204,19 +325,37 @@ class MainWindow(QMainWindow):
         rotate_btn = QPushButton("旋转 90°")
         rotate_btn.setObjectName("rotate_btn")
         rotate_btn.clicked.connect(self._on_rotate)
+        rotate_btn.setToolTip("把预览里选中的那张转 90°（也可在格上右键旋转）")
         self.rotate_btn = rotate_btn
-        btns = QHBoxLayout()
-        btns.addWidget(add_btn)
-        btns.addWidget(import_btn)
-        btns.addWidget(clear_btn)
-        btns.addWidget(rotate_btn)
-        panel.addRow("", btns)
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        row1.addWidget(add_btn, 1)
+        row1.addWidget(import_btn, 1)
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        row2.addWidget(rotate_btn, 1)
+        row2.addWidget(clear_btn, 1)
+        body.addLayout(row1)
+        body.addLayout(row2)
+        return card
+
+    def _build_layout_card(self):
+        card, body = theme.card("纸张与布局")
+        # 字段网格：0/2 列放标签（固定宽、左对齐），1/3 列放控件。只有「输出 dpi」
+        # 与「打印质量」两个窄下拉并排，其余字段整行——「铺满可打印区（留白边）」
+        # 这类长选项名与整宽勾选框都要整行才不被截断。
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        full = 3                       # 控件横跨 1..3 列＝整行
 
         # 纸张只列 role=paper；格子列 role=cell 加全部 role=paper（人设计 4.3）
         self.sheet_box = QComboBox()
         for s in specs.PAPER_PRESETS:
             self.sheet_box.addItem(s.label, s.key)
-        panel.addRow("纸张", self.sheet_box)
+        theme.grid_cell(grid, 0, 0, "纸张", self.sheet_box, theme.LABEL_W, full)
 
         self.cell_box = QComboBox()
         for s in list(specs.CELL_PRESETS) + list(specs.PAPER_PRESETS):
@@ -224,7 +363,7 @@ class MainWindow(QMainWindow):
         # 默认选 3R 而非下拉首项 ID1：spec/Step 5 手工核对都写“默认 A4/3R”，
         # 3R 在 PAPER_PRESETS 里、findData 必命中；max(0, …) 只是防 findData 返回 -1。
         self.cell_box.setCurrentIndex(max(0, self.cell_box.findData("3R")))
-        panel.addRow("格子", self.cell_box)
+        theme.grid_cell(grid, 1, 0, "格子", self.cell_box, theme.LABEL_W, full)
 
         self.mode_box = QComboBox()
         for label, _value in MODE_LABELS:
@@ -234,7 +373,7 @@ class MainWindow(QMainWindow):
             "完整放入：整张照片放进格子，多出的是白边\n"
             "铺满可打印区：裁到格子大小，四周留不可印白边\n"
             f"出血拼版：固定出血 {modes.DEFAULT_BLEED_MM:g}mm，打后沿灰线裁开")
-        panel.addRow("模式", self.mode_box)
+        theme.grid_cell(grid, 2, 0, "模式", self.mode_box, theme.LABEL_W, full)
 
         # 边距只给“有/无”：勾上照片之间留白，不勾紧贴铺满。出血量不再暴露，
         # 选出血拼版即用 modes.DEFAULT_BLEED_MM。
@@ -243,30 +382,32 @@ class MainWindow(QMainWindow):
         # 场景换，见 _rebuild_job 里的 setText）。
         self.margin_cb = QCheckBox(MARGIN_ON_LABEL)
         self.margin_cb.setToolTip(_GRID_MARGIN_TIP)
-        panel.addRow("边距", self.margin_cb)
+        theme.grid_cell(grid, 3, 0, "边距", self.margin_cb, theme.LABEL_W, full)
 
         self.dpi_box = QComboBox()
         for value, label in DPI_CHOICES:
             self.dpi_box.addItem(label, value)
         self.dpi_box.setCurrentIndex(1)      # 默认 300
-        panel.addRow("输出 dpi", self.dpi_box)
+        theme.grid_cell(grid, 4, 0, "输出 dpi", self.dpi_box, theme.LABEL_W)
 
         # 介质类型 / 打印质量：默认第 0 项“驱动默认”＝不干预 DEVMODE，
         # 与上一轮行为逐字一致（spec 2026-11-07 决策 1）。
         self.media_box = QComboBox()
         self.media_box.addItem(MEDIA_DEFAULT_LABEL, None)
-        panel.addRow("介质类型", self.media_box)
+        theme.grid_cell(grid, 5, 0, "介质类型", self.media_box, theme.LABEL_W, full)
         self.quality_box = QComboBox()
         for label, value in QUALITY_CHOICES:
             self.quality_box.addItem(label, value)
-        panel.addRow("打印质量", self.quality_box)
+        theme.grid_cell(grid, 4, 2, "打印质量", self.quality_box, theme.LABEL_W)
         self._media_options = []       # 驱动给的介质项（枚举失败时为空）
+        body.addLayout(grid)
+        return card
 
-        overlay = QGroupBox("文字叠加")
-        ovl = QVBoxLayout(overlay)
+    def _build_overlay_card(self):
         self._date_rgb = OVERLAY_DEFAULT_RGB
         self._wm_rgb = OVERLAY_DEFAULT_RGB
 
+        card, body = theme.card("文字叠加", "仅作用于蓝框那张")
         self.date_enabled = QCheckBox("日期标签")
         self.date_font = QComboBox()
         for label, key in FONT_CHOICES:
@@ -282,16 +423,19 @@ class MainWindow(QMainWindow):
         for label, deg in ROTATION_LABELS:
             self.date_rot.addItem(label, deg)
         self.date_color_btn = QPushButton()
+        self.date_color_btn.setToolTip("日期文字颜色")
         self.date_color_btn.clicked.connect(self._pick_date_color)
-        drow = QHBoxLayout()
-        for widget in (self.date_font, self.date_size, self.date_weight,
-                       self.date_corner, self.date_rot, self.date_color_btn):
-            drow.addWidget(widget)
-        ovl.addWidget(self.date_enabled)
-        ovl.addLayout(drow)
+        body.addWidget(self.date_enabled)
+        body.addLayout(theme.field_grid((
+            ("字体", self.date_font), ("字号", self.date_size),
+            ("字重", self.date_weight), ("角标", self.date_corner),
+            ("角度", self.date_rot), ("颜色", self.date_color_btn))))
+
+        body.addWidget(theme.divider())
 
         self.wm_enabled = QCheckBox("文字水印")
         self.wm_text = QLineEdit()
+        self.wm_text.setPlaceholderText("输入水印文字，留空则不显示")
         self.wm_font = QComboBox()
         for label, key in FONT_CHOICES:
             self.wm_font.addItem(label, key)
@@ -306,17 +450,18 @@ class MainWindow(QMainWindow):
         for label, deg in ROTATION_LABELS:
             self.wm_rot.addItem(label, deg)
         self.wm_color_btn = QPushButton()
+        self.wm_color_btn.setToolTip("水印文字颜色")
         self.wm_color_btn.clicked.connect(self._pick_wm_color)
         self.wm_alpha = QSlider(Qt.Horizontal)
         self.wm_alpha.setRange(0, 100)
         self.wm_alpha.setValue(50)
-        wrow = QHBoxLayout()
-        for widget in (self.wm_font, self.wm_size, self.wm_weight,
-                       self.wm_corner, self.wm_rot, self.wm_color_btn, self.wm_alpha):
-            wrow.addWidget(widget)
-        ovl.addWidget(self.wm_enabled)
-        ovl.addWidget(self.wm_text)
-        ovl.addLayout(wrow)
+        body.addWidget(self.wm_enabled)
+        body.addWidget(self.wm_text)
+        body.addLayout(theme.field_grid((
+            ("字体", self.wm_font), ("字号", self.wm_size),
+            ("字重", self.wm_weight), ("角标", self.wm_corner),
+            ("角度", self.wm_rot), ("颜色", self.wm_color_btn),
+            ("透明度", self.wm_alpha))))
         # 勾选框＝“把这套叠加同时套到本页所有照片”的批量开关：以前那个按钮
         # 只是把角标补写一遍，而开关本身是全局的，看着像没作用（用户 2026-11-07）。
         self.apply_all_cb = QCheckBox("文字叠加效果应用到所有照片")
@@ -324,45 +469,86 @@ class MainWindow(QMainWindow):
             "不勾：只对预览里蓝框选中的那张照片生效\n"
             "勾上：当前预览页里已放的照片全部套用这套叠加\n"
             "（只作用于这一页，不跨页）")
-        ovl.addWidget(self.apply_all_cb)
-        self.overlay_group = overlay
-        panel.addRow(overlay)
-
+        body.addWidget(self.apply_all_cb)
+        # 控件尺寸策略：下拉/数值框吃满半格宽，颜色块固定成小方片
+        for widget in (self.date_font, self.date_size, self.date_weight,
+                       self.date_corner, self.date_rot, self.wm_font,
+                       self.wm_size, self.wm_weight, self.wm_corner,
+                       self.wm_rot, self.wm_alpha):
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for btn in (self.date_color_btn, self.wm_color_btn):
+            btn.setFixedSize(28, 28)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._refresh_overlay_btn_colors()
+        self.overlay_group = card
+        return card
 
-        self.preview = PreviewView()
-        self.preview.cellClicked.connect(self._on_cell_clicked)
-        self.preview.cellContextMenuRequested.connect(self._on_cell_context_menu)
-        body.addWidget(self.preview, 1)
+    def _build_preview_area(self):
+        """右区：预览头（翻页）→ 预览画布 → 操作条（打印机 / 导出 / 打印）。"""
+        col = QVBoxLayout()
+        col.setContentsMargins(theme.PAGE_MARGIN, theme.PAGE_MARGIN,
+                               theme.PAGE_MARGIN, theme.PAGE_MARGIN)
+        col.setSpacing(theme.CARD_GAP)
 
-        nav = QHBoxLayout()
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        title = QLabel("预览")
+        title.setObjectName("CardTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        self.page_label = QLabel("第 1 / 1 页")
+        self.page_label.setObjectName("PageLabel")
+        head.addWidget(self.page_label)
         self.prev_btn = QPushButton("上一页")
         self.next_btn = QPushButton("下一页")
         self.prev_btn.clicked.connect(lambda: self._go_page(-1))
         self.next_btn.clicked.connect(lambda: self._go_page(1))
-        nav.addWidget(self.prev_btn)
-        nav.addWidget(self.next_btn)
-        nav.addStretch(1)
+        head.addWidget(self.prev_btn)
+        head.addWidget(self.next_btn)
+        col.addLayout(head)
+
+        card = QFrame()
+        card.setObjectName("PreviewCard")
+        area = QVBoxLayout(card)
+        # 一点内边距：白纸与浅灰底之间留出呼吸位，纸边不至于贴住卡片描边
+        area.setContentsMargins(12, 12, 12, 12)
+        self.preview = PreviewView()
+        self.preview.cellClicked.connect(self._on_cell_clicked)
+        self.preview.cellContextMenuRequested.connect(self._on_cell_context_menu)
+        area.addWidget(self.preview)
+        col.addWidget(card, 1)
+        col.addWidget(self._build_action_bar())
+        return col
+
+    def _build_action_bar(self):
+        """底部操作条：驱动页开关 · 打印机 · 导出（次要） · 打印（主按钮）。"""
+        bar = QFrame()
+        bar.setObjectName("ActionBar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(theme.CARD_PAD, 10, theme.CARD_PAD, 10)
+        row.setSpacing(10)
         # 默认直打：面板已把纸张/几何/介质/质量钉进 DEVMODE，点“打印”就该出纸。
         # 只有无边距这类驱动私有开关需要弹窗，才让用户主动勾上。
         self.driver_page_cb = QCheckBox("打印前打开驱动设置页")
         self.driver_page_cb.setToolTip(
             "不勾：直接打印（按面板与驱动当前设置）；\n"
             "勾上：先弹驱动设置页，可改无边距/灰度等驱动私有选项")
-        nav.addWidget(self.driver_page_cb)
+        row.addWidget(self.driver_page_cb)
         self.printer_box = QComboBox()
         self.printer_box.setObjectName("printer_box")
-        nav.addWidget(self.printer_box)
-        self.print_btn = QPushButton("打印…")
-        self.print_btn.setObjectName("print_btn")
-        self.print_btn.clicked.connect(self._on_print)
-        nav.addWidget(self.print_btn)
+        self.printer_box.setMinimumWidth(210)
+        row.addWidget(self.printer_box)
+        row.addStretch(1)
         self.export_btn = QPushButton("导出 PDF…")
         self.export_btn.clicked.connect(self._on_export)
-        nav.addWidget(self.export_btn)
-        outer.addLayout(nav)
-
-        self.statusBar().showMessage("就绪")
+        row.addWidget(self.export_btn)
+        self.print_btn = QPushButton("打印…")
+        self.print_btn.setObjectName("print_btn")
+        self.print_btn.setToolTip("按当前面板与驱动设置直打全部页")
+        self.print_btn.clicked.connect(self._on_print)
+        row.addWidget(self.print_btn)
+        return bar
 
     # ---------- 参数与刷新 ----------
 
@@ -481,6 +667,7 @@ class MainWindow(QMainWindow):
                                         uniform_mm=p["uniform_mm"])
         except ValueError as exc:
             self.job = None
+            self.page_label.setText("—")
             self._set_status(str(exc), error=True)
             self.export_btn.setEnabled(False)
             return
@@ -544,10 +731,12 @@ class MainWindow(QMainWindow):
                                       wm_cells=wm_cells)
         except ValueError as exc:
             self.job = None
+            self.page_label.setText("—")
             self._set_status(str(exc), error=True)
             self.export_btn.setEnabled(False)
             return
         self.page_index = min(self.page_index, self.job.page_count - 1)
+        self.page_label.setText(f"第 {self.page_index + 1} / {self.job.page_count} 页")
         self.export_btn.setEnabled(self._has_any_photo())
         img_wh, rects = render.page_cells_px(self.job.plan, self.job.sheet,
                                               jobs.PREVIEW_DPI)
@@ -685,8 +874,7 @@ class MainWindow(QMainWindow):
     def _refresh_overlay_btn_colors(self):
         for btn, rgb in ((self.date_color_btn, self._date_rgb),
                          (self.wm_color_btn, self._wm_rgb)):
-            btn.setStyleSheet(
-                "background:rgb(%d,%d,%d);border:1px solid #888;" % rgb)
+            btn.setStyleSheet(theme.swatch_style(rgb))
 
     def _read_overlay_widgets(self):
         return {"date_corner": self.date_corner.currentData(),
@@ -824,6 +1012,8 @@ class MainWindow(QMainWindow):
                               "wm_corner": self._ov_base["wm_corner"],
                               "wm_rot": self._ov_base["wm_rot"]})
             item = QListWidgetItem(self._photo_item_text(name, None))
+            item.setSizeHint(self._photo_cell)   # 两行文字要得住，不被裁
+            item.setToolTip(name)          # 名字被省略时，悬停看完整文件名
             item.setForeground(QColor(ERROR_COLOR))
             self.photo_list.addItem(item)
             self._set_status(f"无法读取 {name}：{exc}", error=True)
@@ -836,15 +1026,22 @@ class MainWindow(QMainWindow):
                           "wm_corner": self._ov_base["wm_corner"],
                           "wm_rot": self._ov_base["wm_rot"]})
         item = QListWidgetItem(self._photo_item_text(name, img))
+        item.setSizeHint(self._photo_cell)  # 两行文字要得住，不被裁
+        item.setToolTip(name)              # 名字被省略时，悬停看完整文件名
         item.setIcon(QIcon(view.to_thumbnail(img, GALLERY_THUMB_PX)))
         self.photo_list.addItem(item)
 
-    @staticmethod
-    def _photo_item_text(name, img):
-        """网格项文字两行：文件名 / 尺寸（或读取失败）。旋转在格上，不在此体现。"""
+    def _photo_item_text(self, name, img):
+        """网格项文字两行：文件名 / 尺寸（或读取失败）。旋转在格上，不在此体现。
+
+        文件名按单元格宽做中部省略：网格文字不换行（换行会越过算死的格高、把名字
+        裁掉），所以这里自己截——中部省略能留住扩展名，完整名看项的悬停提示。
+        """
+        short = self.photo_list.fontMetrics().elidedText(
+            name, Qt.ElideMiddle, GALLERY_NAME_PX)
         if img is None:
-            return f"{name}\n读取失败"
-        return f"{name}\n{img.width}×{img.height}px"
+            return f"{short}\n读取失败"
+        return f"{short}\n{img.width}×{img.height}px"
 
     def _on_rotate(self):
         self.rotate_cell(self._current_cell)

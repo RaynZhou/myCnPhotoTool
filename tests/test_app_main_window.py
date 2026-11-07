@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("PIL", reason="需要 Pillow")
 pytest.importorskip("PySide6", reason="需要 Qt 绑定")
 
-from PySide6.QtCore import QElapsedTimer, QEventLoop  # noqa: E402
+from PySide6.QtCore import QElapsedTimer, QEventLoop, Qt  # noqa: E402
 from PySide6.QtGui import QPixmap  # noqa: E402
 
 from PIL import Image  # noqa: E402
@@ -16,6 +16,7 @@ from photoprint import jobs  # noqa: E402
 from photoprint.app import main_window  # noqa: E402
 from photoprint.app.main_window import MainWindow  # noqa: E402
 from photoprint.core import modes, store  # noqa: E402
+
 
 
 def _store(tmp_path):
@@ -62,7 +63,7 @@ def _settle(window, qapp, timeout_ms=5000):
 
 
 @pytest.fixture(autouse=True)
-def _no_leaked_threads(qapp):
+def _no_leaked_threads(qapp, destroy_windows):
     """每个用例收尾时停掉 debounce、泵停渲染线程、再关窗口。
 
     多数用例只 _refresh（经 _render_async 起了渲染线程）却不关窗口；
@@ -70,7 +71,9 @@ def _no_leaked_threads(qapp):
     退出被析构时线程还在跑→解释器硬崩（0xC0000409），即使 pytest 已打印
     “N passed”，退出码仍非零、CI 会判失败。收尾三步：先停 debounce（否则
     下面泵送会触发新的 250ms 延迟渲染又起一条线程），再泵到现有线程全停，
-    最后 close 触发 closeEvent 里的 quit+wait 兜底。
+    最后 close 触发 closeEvent 里的 quit+wait 兜底。close 之后还要就地销毁
+    窗口（destroy_test_windows）：只关不删的窗口会拖到 QApplication 拆了以后
+    才被循环 GC 析构，同样是一条无 Python 栈的访问违例。
     """
     yield
     wins = [w for w in qapp.topLevelWidgets() if isinstance(w, MainWindow)]
@@ -82,9 +85,7 @@ def _no_leaked_threads(qapp):
         qapp.processEvents(QEventLoop.AllEvents, 50)
         if not any(w._thread is not None and w._thread.isRunning() for w in wins):
             break
-    for w in wins:
-        w.close()
-    qapp.processEvents(QEventLoop.AllEvents, 100)
+    destroy_windows(wins)
 
 
 def test_window_starts_with_preview_and_status(qapp, tmp_path):
@@ -94,6 +95,27 @@ def test_window_starts_with_preview_and_status(qapp, tmp_path):
     assert not w.preview.pixmap().isNull()
     assert "每页 4 格" in w.statusBar().currentMessage()
     assert w.export_btn.isEnabled()
+
+
+def test_photo_grid_lays_out_two_columns(qapp, tmp_path):
+    """缩略图网格必须排成两列：单列会让照片卡片右侧空掉一半。
+
+    临界点是像素级的：每格 140px（图标 120 + QSS 内边距/描边/委托边距），两列
+    要视口 ≥283px。照片列 324 时视口只有 284px，差几像素就全退成一列——所以
+    列宽取 344（304 视口）并在此钉住列数。窗口不 show 时几何还是初始值，量不出真列数。
+    """
+    w = MainWindow(st=_store(tmp_path))
+    _fill(w, tmp_path)
+    w.resize(1400, 960)
+    w.show()
+    _settle(w, qapp)
+    qapp.processEvents(QEventLoop.AllEvents, 200)
+    lst = w.photo_list
+    assert lst.count() >= 2
+    first = lst.visualItemRect(lst.item(0))
+    second = lst.visualItemRect(lst.item(1))
+    assert second.y() == first.y(), "第二张应和第一张同一行"
+    assert second.x() > first.x(), "第二张应在第一张右侧而非下方"
 
 
 def test_export_writes_equal_size_pdf(qapp, tmp_path):
@@ -595,7 +617,11 @@ def test_thumbnail_does_not_mutate_shared_photo(qapp, tmp_path):
 
 
 def test_photo_list_is_wrapping_grid(qapp, tmp_path):
-    """照片库须是随栏宽换行的 IconMode 网格（图标在上、文字在下）。"""
+    """照片库须是随栏宽换行的 IconMode 网格（图标在上、文字在下）。
+
+    `wrapping` 管的是网格换行成多列；`wordWrap` 管的是标签文字自己折行——后者必须
+    关掉：折出来的第三行会越过算死的单元格高度，把文件名裁掉（旧版就这样丢了后缀）。
+    """
     from PySide6.QtWidgets import QListView
     from photoprint.app.main_window import GALLERY_THUMB_PX
     w = MainWindow(st=_store(tmp_path))
@@ -603,7 +629,8 @@ def test_photo_list_is_wrapping_grid(qapp, tmp_path):
     assert pl.viewMode() == QListView.IconMode
     assert pl.isWrapping() is True
     assert pl.movement() == QListView.Static
-    assert pl.wordWrap() is True
+    assert pl.wordWrap() is False
+    assert pl.textElideMode() == Qt.ElideMiddle
     assert pl.iconSize().width() == GALLERY_THUMB_PX
     assert pl.iconSize().height() == GALLERY_THUMB_PX
 
@@ -617,6 +644,46 @@ def test_gallery_item_text_is_two_lines_with_size(qapp, tmp_path):
     assert len(lines) == 2
     assert lines[0].endswith(".jpg")
     assert "400" in lines[1] and "200" in lines[1] and "px" in lines[1]
+
+
+def test_gallery_cell_fits_two_text_lines(qapp, tmp_path):
+    """网格项自己占 166px 高（图标 120 + 两行 30 + 内边距），第二行才不会被裁。
+
+    委托在窗口级 QSS 下只按「一行文字」报 sizeHint（139px），依赖它就把「5184×3888px」
+    那行以及折行后的文件名裁掉/压到下一行图标上——用户上眼就是一排被遮住的文件名。
+    """
+    from PySide6.QtGui import QFontMetrics
+    from photoprint.app.main_window import GALLERY_THUMB_PX
+    w = MainWindow(st=_store(tmp_path))
+    w.append_photo(_make_photos(tmp_path, 1)[0])
+    item = w.photo_list.item(0)
+    line_h = QFontMetrics(w.photo_list.font()).height()
+    assert item.sizeHint().height() >= GALLERY_THUMB_PX + 2 * line_h
+    assert item.text().count("\n") == 1
+
+
+@pytest.mark.parametrize("name", [
+    "P2120041.jpg",
+    "2019-08-16_112233_海边合影照片_原始尺寸_导出用.jpg",
+])
+def test_long_photo_name_is_elided_one_line(qapp, tmp_path, name):
+    """再长的文件名也只占一行：中部省略保留后缀，完整名进悬停提示。
+
+    中部省略而非末尾：`….jpg` 看得见，才知道还是图片、是什么格式。
+    """
+    from photoprint.app.main_window import GALLERY_NAME_PX
+    w = MainWindow(st=_store(tmp_path))
+    path = tmp_path / name
+    Image.new("RGB", (40, 20), (10, 20, 30)).save(path)
+    w.append_photo(str(path))
+    item = w.photo_list.item(0)
+    shown = item.text().split("\n")[0]
+    assert len(item.text().split("\n")) == 2, "文件名不许折行成第三行"
+    assert item.toolTip() == name
+    if len(name) > 20:
+        assert shown != name, "长名字应该被省略"
+        assert shown.endswith(".jpg") and shown.startswith("2019")
+        assert w.photo_list.fontMetrics().horizontalAdvance(shown) <= GALLERY_NAME_PX
 
 
 def test_gallery_failed_item_text_marks_failure(qapp, tmp_path):

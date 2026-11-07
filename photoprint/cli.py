@@ -84,12 +84,15 @@ def main(argv=None):
     # 不取 job.note——那条属性按 margin_source 分档，spec 档写的是
     # “依规格推定，未经真机校准”，与历史输出不同一句
     borderless = job.mode == modes.BLEED_TRIM
+    # 排版用的是与作业同一档白边（成品照片才取齐），报数必须同一套，
+    # 否则 stdout 上的数字与出片实物对不上（2026-11-07 修正）
+    m = jobs.margins_for(sheet, job.even_margins)
     note = ("需人工裁切：沿灰线切开后即为 "
             f"{job.plan.cells[0].inner_mm()[2]:.0f}×"
             f"{job.plan.cells[0].inner_mm()[3]:.0f}mm 成品"
             if borderless else
-            f"将保留白边：依规格约 上{sheet.margins.top}/下{sheet.margins.bottom}/"
-            f"左{sheet.margins.left}/右{sheet.margins.right}mm（未经真机校准）")
+            f"将保留白边：依规格约 上{m.top}/下{m.bottom}/"
+            f"左{m.left}/右{m.right}mm（未经真机校准）")
     print(f"纸张 {sheet.label}，每页 {job.count} 格，共 {len(pages)} 页。{note}")
 
     if args.out:

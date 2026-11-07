@@ -102,6 +102,32 @@ def test_note_spec_source_says_unproven(st):
     assert "上3.0/下5.0/左3.4/右3.4mm" in job.note  # 数字不得丢
 
 
+def test_photo_cell_takes_even_margins(st):
+    """格子就是成品照片（role=paper）时白边取齐：上下/左右各自等宽。"""
+    job = jobs.build_job(st, _photos(1), "3R", "3R")
+    assert job.even_margins is True
+    assert "上5.1/下5.1/左3.5/右3.5mm" in job.note
+
+
+def test_id_grid_keeps_raw_margins_and_density(st):
+    """证件照拼版不取齐：A4 一寸照保住 9 排 72 张，报数也用逐边原值。"""
+    job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)
+    assert job.even_margins is False
+    assert "上3.0/下5.0/左3.4/右3.4mm" in job.note
+    plan, _ = jobs.build_layout(st, "A4", "ID1", 0.0, 0.0,
+                                modes.FILL_PRINTABLE)
+    assert plan.count == 72
+
+
+def test_photo_grid_on_a4_uses_even_box(st):
+    """A4 排 3R 照片（4 格）也走取齐：内容框上下各 5.1mm，不丢格数。"""
+    plan, _ = jobs.build_layout(st, "A4", "3R", 0.0, 0.0,
+                                modes.FILL_PRINTABLE)
+    assert plan.count == 4
+    assert plan.printable.y_mm == pytest.approx(5.1)
+    assert plan.printable.h_mm == pytest.approx(286.8)
+
+
 def test_note_probed_source_says_driver_measured(st):
     st.override_margins("A4", specs.Margins(3.0, 5.0, 3.4, 3.4), "probed")
     job = jobs.build_job(st, _photos(4), "A4", "ID1", gap_mm=2.0)

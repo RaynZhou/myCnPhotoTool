@@ -60,6 +60,38 @@ def test_ltr_uses_exception_margins():
     assert (s.margins.left, s.margins.right) == (6.4, 6.3)
 
 
+def test_even_margins_equalize_each_axis():
+    """驱动不可印区天然不对称（下比上多 2mm）：取齐后上下相等、左右相等。
+
+    另带 EVEN_PAD_MM=0.1 余量：规格取整值与驱动实测值可能差不到 0.1mm。
+    """
+    m = specs.even_margins(specs.Margins(3.0, 5.0, 3.4, 3.4))
+    assert (m.top, m.bottom) == (5.1, 5.1)
+    assert (m.left, m.right) == (3.5, 3.5)
+    # 取齐只能往里收：不能比原值小，否则会裁掉内容
+    src = specs.Margins(3.0, 5.0, 6.4, 6.3)
+    m2 = specs.even_margins(src)
+    assert m2.top >= src.top and m2.bottom >= src.bottom
+    assert m2.left >= src.left and m2.right >= src.right
+
+
+def test_even_printable_rect_is_axis_centered_on_every_paper():
+    """成品照片档：所有纸张的可打印矩形必须上下居中、左右居中。"""
+    for s in specs.PAPER_PRESETS:
+        r = specs.printable_rect(s, even=True)
+        assert r.x_mm == pytest.approx(s.w_mm - r.x_mm - r.w_mm, abs=1e-9), s.key
+        assert r.y_mm == pytest.approx(s.h_mm - r.y_mm - r.h_mm, abs=1e-9), s.key
+
+
+def test_3r_even_rect_margins_cover_driver_unprintable():
+    """3R 取齐白边 5.1/3.5mm，必须盖住本机实测不可印区 3.39/2.96/3.43/5.04。"""
+    s = specs.find_spec("3R")
+    r = specs.printable_rect(s, even=True)
+    assert r.x_mm >= 3.43 and r.y_mm >= 5.04
+    assert s.w_mm - r.x_mm - r.w_mm >= 3.43
+    assert s.h_mm - r.y_mm - r.h_mm >= 5.04
+
+
 def test_cell_presets_cannot_be_used_as_paper():
     for s in specs.CELL_PRESETS:
         assert s.role == "cell"

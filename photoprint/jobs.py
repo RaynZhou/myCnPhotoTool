@@ -38,6 +38,29 @@ def load_photo(path):
     return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
 
 
+def even_margins(sheet):
+    """成品照片档的白边（上下相等、左右相等）。
+
+    转发 core 的同轴取齐，供状态栏与 cli 共用一个数字来源：cli 不得直接调
+    core.specs（分层约束），而两边报的数绝不能比排版自己那套多一个版本。
+    """
+    return specs.even_margins(sheet.margins)
+
+
+def margins_for(sheet, even):
+    """本作业实际使用的白边：even 档取齐，其余沿用逐边原值。"""
+    return specs.used_margins(sheet.margins, even)
+
+
+def wants_even_margins(cell):
+    """格子就是成品照片（role=paper，如 3R 纸打 3R 照片）时才取齐白边。
+
+    证件照格（role=cell）的白边是要裁掉的废料：那里换成取齐只会把 A4 的
+    一整排容量白丢（一寸照 9 排→8 排），四边差 2mm 也无人看。
+    """
+    return cell.role == "paper"
+
+
 def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
                  borderless_active=False):
     """返回 (排版方案, 生效模式)。mode 为 None 时按默认映射决定。
@@ -48,7 +71,9 @@ def build_layout(st, sheet_key, cell_key, gap_mm, bleed_mm, mode,
     """
     sheet = st.resolve(sheet_key)
     cell = st.resolve(cell_key)
-    printable = specs.printable_rect(sheet, borderless_active=borderless_active)
+    even = wants_even_margins(cell)
+    printable = specs.printable_rect(sheet, borderless_active=borderless_active,
+                                     even=even)
     # 全局约束：证件照这类"格"（role="cell"）拼版不得旋转——横放会把
     # 一寸/二寸照排成横的；纸类（3R/4R）是照片本身，旋转是合法装箱策略
     allow_rotate = cell.role != "cell"
@@ -91,6 +116,7 @@ class Job:
     date_texts: tuple = ()
     date_overrides: tuple = ()
     wm_overrides: tuple = ()
+    even_margins: bool = False   # 成品照片档：白边同轴取齐（见 wants_even_margins）
 
     @property
     def count(self) -> int:
@@ -118,7 +144,9 @@ class Job:
             inner = self.plan.cells[0].inner_mm()
             return (f"需人工裁切：沿灰线切开后即为 {inner[2]:.0f}×{inner[3]:.0f}mm 成品"
                     f"（边距{provenance}）")
-        m = self.sheet.margins
+        # 文案里的数字必须与排版用的一致（同一档白边，含取齐与否）：
+        # 照逐边原值写，界面就是在报另一套数字。
+        m = margins_for(self.sheet, self.even_margins)
         return (f"将保留白边：上{m.top}/下{m.bottom}/左{m.left}/右{m.right}mm"
                 f"（边距{provenance}）")
 
@@ -143,7 +171,8 @@ class Job:
                                   watermark_overlay=self.watermark_overlay,
                                   date_texts=dt_chunk,
                                   date_overrides=do_chunk,
-                                  wm_overrides=wo_chunk)
+                                  wm_overrides=wo_chunk,
+                                  even_margins=self.even_margins)
 
 
 def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
@@ -163,7 +192,8 @@ def build_job(st, photos, sheet_key, cell_key, *, gap_mm=0.0,
                date_overlay=date_overlay, watermark_overlay=watermark_overlay,
                date_texts=tuple(date_texts),
                date_overrides=tuple(date_overrides),
-               wm_overrides=tuple(wm_overrides))
+               wm_overrides=tuple(wm_overrides),
+               even_margins=wants_even_margins(st.resolve(cell_key)))
 
 
 def render_all(job: Job, dpi: float, show_mask: bool = False) -> list[Image.Image]:

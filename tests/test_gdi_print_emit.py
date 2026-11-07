@@ -93,7 +93,8 @@ def pipeline(monkeypatch):
 
     monkeypatch.setattr(ImageWin, "Dib", FakeDib)
 
-    state = {"phys": (89.0, 127.0), "dpi": (25.4, 25.4), "halftone": []}
+    state = {"phys": (89.0, 127.0), "dpi": (25.4, 25.4), "halftone": [],
+             "offset": (0.0, 0.0)}
     monkeypatch.setattr(gdi_print, "_create_dc", lambda printer, dm: hdc.handle)
     monkeypatch.setattr(
         gdi_print, "_set_halftone",
@@ -105,7 +106,8 @@ def pipeline(monkeypatch):
         probe, "probe",
         lambda api, printer, dc=None: types.SimpleNamespace(
             physical_w_mm=state["phys"][0], physical_h_mm=state["phys"][1],
-            dpi_x=state["dpi"][0], dpi_y=state["dpi"][1]))
+            dpi_x=state["dpi"][0], dpi_y=state["dpi"][1],
+            offset_x_mm=state["offset"][0], offset_y_mm=state["offset"][1]))
     return hdc, state
 
 
@@ -140,6 +142,25 @@ def test_emit_scales_dst_by_driver_dpi_not_render_dpi(pipeline):
 
     assert res["ok"] is True
     assert hdc.calls[2][1] == (0, 0, 2102, 3000)   # 89/127mm @ 600dpi
+
+
+def test_emit_shifts_page_by_physical_offset(pipeline):
+    """DC 原点是可打印区左上角，不是纸边：整页图必须往左上掰一个物理偏移。
+
+    不掰的后果（真机 3R：偏移 3.39/2.96mm）：图里那圈白边被算两遍——左侧/
+    顶部多出一倍，右侧/底部各越界 3.4/3.0mm 被驱动当越界裁掉，出片四边肉眼
+    明显不等（用户可见缺陷）。偏移后图里的纸边才能对上真纸边。
+    """
+    from PIL import Image
+
+    hdc, state = pipeline
+    state["offset"] = (3.39, 2.96)
+    res = gdi_print._emit(None, "P", None, [Image.new("RGB", (8, 8))],
+                          specs.find_spec("3R"), 25.4)
+
+    assert res["ok"] is True
+    # 25.4dpi 下 1px=1mm：整体左上平移、尺寸不变（不得顺带缩放）
+    assert hdc.calls[2][1] == (-3, -3, 86, 124)
 
 
 def test_emit_does_not_start_doc_when_physical_size_mismatch(pipeline):

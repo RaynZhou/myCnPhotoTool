@@ -18,12 +18,42 @@ MIN_FEED_L_MM, MAX_FEED_L_MM = 89.0, 676.0
 
 @dataclass
 class Margins:
-    """物理不可印区，单位 mm。"""
+    """四边白边，单位 mm。
+
+    数值是「物理不可印区」的规格推定值（真机校准后会换成实测值），故允许
+    逐边不等（本机 3R 实测：左3.39/右3.43/上2.96/下5.04）。排版用的白边不
+    直接用它——那块必须同轴取齐，见 even_margins。
+    """
 
     top: float = 3.0
     bottom: float = 5.0
     left: float = 3.4
     right: float = 3.4
+
+
+# 取齐时统一多留的白边（mm）：规格值是 0.1mm 取整的估计，驱动实测可能
+# 比它大不到 0.1mm（本机 3R：右 3.43 对规格 3.4、下 5.04 对 5.0）。不加
+# 这点余量，照片最外一像素会被驱动边界吃掉。
+EVEN_PAD_MM = 0.1
+
+
+def even_margins(m: Margins) -> Margins:
+    """同轴取大：上下相等、左右相等，且每边都不小于物理不可印区。
+
+    为什么必须取齐：驱动给的不可印区天然不对称（本机底部比顶部多 2mm），
+    直接拿四边原值排版，出片就是“上面窄、下面宽”，肉眼一眼看出歪。同轴
+    取大＝把内容框往里收一点再居中：照片不会被裁（每边仍 ≥ 不可印区），
+    上下、左右各自等宽。左右与上下之间仍可不同（纸张宽高比决定的自然结果，
+    用户已确认可接受）。另加 EVEN_PAD_MM 余量，盖住规格取整与驱动实测差。
+    """
+    dy = round(max(m.top, m.bottom) + EVEN_PAD_MM, 2)
+    dx = round(max(m.left, m.right) + EVEN_PAD_MM, 2)
+    return Margins(top=dy, bottom=dy, left=dx, right=dx)
+
+
+def used_margins(m: Margins, even: bool = False) -> Margins:
+    """排版实际使用的一档白边：even=True 同轴取齐，否则沿用逐边原值。"""
+    return even_margins(m) if even else m
 
 
 @dataclass
@@ -108,11 +138,16 @@ def find_spec(key: str) -> SizeSpec:
         raise KeyError(f"未知尺寸：{key}") from None
 
 
-def printable_rect(spec: SizeSpec, borderless_active: bool = False) -> RectMM:
+def printable_rect(spec: SizeSpec, borderless_active: bool = False,
+                   even: bool = False) -> RectMM:
     """可打印矩形。
 
     borderless_active 只有在驱动探测或真机校准实测到无边距已生效时才可为 True；
     margin_source == "spec" 时调用方不得凭空传 True（规格 7.4）。
+
+    even=True：白边同轴取齐（上下相等、左右相等），用于“照片本身就是成品”的
+    场景（3R 纸打 3R 照片、4R 纸打 3R 照片）。证件照拼版不传：那类白边只是
+    废料、要裁掉，换成取齐会把 A4 的一整排（一寸照 9 排→8 排）白丢。
 
     守卫：官方无边距清单之外的纸张（含一切自定义尺寸）传 True 直接报错。
     宁可当场报错也不能静默按整纸排版——后者就是规格 7.3 禁止的谎报。
@@ -121,7 +156,7 @@ def printable_rect(spec: SizeSpec, borderless_active: bool = False) -> RectMM:
         raise ValueError(f"{spec.key} 不支持无边距，borderless_active 不得为 True")
     if borderless_active:
         return RectMM(0.0, 0.0, spec.w_mm, spec.h_mm)
-    m = spec.margins
+    m = used_margins(spec.margins, even)
     return RectMM(m.left, m.top, spec.w_mm - m.left - m.right,
                   spec.h_mm - m.top - m.bottom)
 

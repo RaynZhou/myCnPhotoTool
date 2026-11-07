@@ -160,8 +160,19 @@ def _emit(api, printer, dm_obj, images, sheet, dpi, target_mm=None):
                         dib = ImageWin.Dib(img)
                         w = units.mm_to_px(sheet.w_mm, dev_dpi_x)
                         h = units.mm_to_px(sheet.h_mm, dev_dpi_y)
+                        # DC 原点不是纸边，而是「可打印区左上角」（比纸边内缩
+                        # PHYSICALOFFSET）。整页图里已经自带白边，若从 (0,0)
+                        # 开始贴，白边会被算两遍：左侧/顶部多出一截，右侧/底部
+                        # 被驱动当越界裁掉（真机症状：四边白边明显不等）。
+                        # 整页图整体往左上挪一个物理偏移，图里的纸边才对上真
+                        # 纸边，出片白边 = 预览白边。矩形尺寸保持不变（不缩放）。
+                        ox = units.mm_to_px(
+                            getattr(result, "offset_x_mm", 0.0) or 0.0, dev_dpi_x)
+                        oy = units.mm_to_px(
+                            getattr(result, "offset_y_mm", 0.0) or 0.0, dev_dpi_y)
                         _set_halftone(hdc)
-                        _dib_draw(dib, hdc.GetHandleOutput(), (0, 0, w, h))
+                        _dib_draw(dib, hdc.GetHandleOutput(),
+                                  (-ox, -oy, w - ox, h - oy))
                     finally:
                         hdc.EndPage()
             finally:

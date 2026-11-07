@@ -65,9 +65,13 @@ def offset_mm_for_cell(offset_pct, w_mm, h_mm):
     return (offset_pct[0] / 100.0 * w_mm, offset_pct[1] / 100.0 * h_mm)
 
 
-def _mask_bands(sheet, rect):
-    """返回物理不可印区的四个矩形（mm），仅在未启用无边距时给出。"""
-    m = sheet.margins
+def _mask_bands(sheet, margins):
+    """返回物理不可印区的四个矩形（mm），仅在未启用无边距时给出。
+
+    带子按传入的那一档白边画（与内容框同一套数字）：若照逐边原值画而内容框
+    取了齐，就会出现“上面灰带 3mm、照片却从 5mm 开始”的错位。
+    """
+    m = margins
     w, h = sheet.w_mm, sheet.h_mm
     return [
         (0.0, 0.0, w, m.top),
@@ -89,7 +93,7 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
                 show_cut_lines=True, borderless_active=False,
                 offset_pct=(0.0, 0.0), rotations=(),
                 date_overlay=None, watermark_overlay=None, date_texts=(),
-                date_overrides=(), wm_overrides=()):
+                date_overrides=(), wm_overrides=(), even_margins=False):
     """渲染一页。photos 与 plan.cells 一一对应，None 表示空格（留白）。
 
     rotations 是逐图顺时针角度（短于 photos 缺位按 0）：生效照片在取尺寸之前
@@ -99,8 +103,10 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
     page = Image.new("RGB", (px_w, px_h), (255, 255, 255))
     draw = ImageDraw.Draw(page, "RGBA")
     cm = modes.crop_mode(mode)
-    # 可打印矩形与装箱无关，始终由规格边距推出；无边距实测生效时它就是整张纸
-    printable = specs.printable_rect(sheet, borderless_active=borderless_active)
+    # 可打印矩形与装箱无关，始终由规格边距推出；无边距实测生效时它就是整张纸。
+    # even_margins=True 时白边同轴取齐（照片当成品）：内容框与遮罩带用同一档。
+    printable = specs.printable_rect(sheet, borderless_active=borderless_active,
+                                     even=even_margins)
 
     for idx, cell in enumerate(plan.cells):
         photo = photos[idx] if idx < len(photos) else None
@@ -166,7 +172,8 @@ def render_page(plan, photos, sheet, dpi, mode, show_mask=True,
     # 遮罩在照片之后绘制，使“这条边打不出来”的警告始终可见；
     # 正常拼版下照片都在可打印区内，不会被遮罩压到
     if show_mask and not borderless_active:
-        for bx, by, bw, bh in _mask_bands(sheet, plan.printable):
+        used = specs.used_margins(sheet.margins, even_margins)
+        for bx, by, bw, bh in _mask_bands(sheet, used):
             draw.rectangle(
                 [units.mm_to_px(bx, dpi), units.mm_to_px(by, dpi),
                  units.mm_to_px(bx + bw, dpi) - 1, units.mm_to_px(by + bh, dpi) - 1],

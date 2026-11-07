@@ -117,7 +117,7 @@ def test_on_print_sends_all_pages_and_ok_status(qapp, tmp_path, monkeypatch):
     w = _win(tmp_path, photos=5)      # 5 张 3R 上 A4 会多页
     w.dpi_box.setCurrentIndex(2)      # 改选 600：钉 dpi 跟随所选而非默认
     w._on_print()
-    assert seen["prompt"] is True
+    assert seen["prompt"] is False           # 默认直打：不弹驱动设置页
     assert seen["show_mask"] is False          # I-2：遮罩绝不进相纸
     assert seen["render_dpi"] == 600.0 and seen["dpi"] == 600.0   # dpi 同源透传
     assert seen["printer"] == "Canon G3800"    # 打向选中的那台，不写死
@@ -317,7 +317,29 @@ def test_default_media_selection_sends_no_extra_kwargs(qapp, tmp_path, monkeypat
     w = _win(tmp_path)
     w._on_print()
     assert "media" not in seen["kwargs"] and "quality" not in seen["kwargs"]
+    assert seen["kwargs"]["prompt"] is False  # 默认直打
+
+
+def test_driver_page_checkbox_sends_prompt_true(qapp, tmp_path, monkeypatch):
+    """只有勾上开关才走弹窗路径（无边距这类驱动私有开关只能在那里改）。"""
+    seen = _capture_print(monkeypatch)
+    w = _win(tmp_path)
+    assert w.driver_page_cb.isChecked() is False   # 默认不弹，点了就打
+    w.driver_page_cb.setChecked(True)
+    w._on_print()
     assert seen["kwargs"]["prompt"] is True
+
+
+def test_driver_page_preference_persists(qapp, tmp_path):
+    """勾选状态跟其他参数一起落盘，下次启动仍是用户选的那一档。"""
+    st = _store(tmp_path)
+    w = MainWindow(st=st, printer_api=FakePrinterApi())
+    w.driver_page_cb.setChecked(True)
+    w.save_last_job()
+    st2 = store.Store(tmp_path / "papers.json")
+    st2.load()
+    w2 = MainWindow(st=st2, printer_api=FakePrinterApi())
+    assert w2.driver_page_cb.isChecked() is True
 
 
 def test_status_mentions_media_note(qapp, tmp_path, monkeypatch):

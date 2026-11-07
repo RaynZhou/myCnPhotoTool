@@ -323,6 +323,13 @@ class MainWindow(QMainWindow):
         nav.addWidget(self.prev_btn)
         nav.addWidget(self.next_btn)
         nav.addStretch(1)
+        # 默认直打：面板已把纸张/几何/介质/质量钉进 DEVMODE，点“打印”就该出纸。
+        # 只有无边距这类驱动私有开关需要弹窗，才让用户主动勾上。
+        self.driver_page_cb = QCheckBox("打印前打开驱动设置页")
+        self.driver_page_cb.setToolTip(
+            "不勾：直接打印（按面板与驱动当前设置）；\n"
+            "勾上：先弹驱动设置页，可改无边距/灰度等驱动私有选项")
+        nav.addWidget(self.driver_page_cb)
         self.printer_box = QComboBox()
         self.printer_box.setObjectName("printer_box")
         nav.addWidget(self.printer_box)
@@ -843,8 +850,9 @@ class MainWindow(QMainWindow):
 
     def _on_print(self):
         """直打全部页：先同步落最新 job（含旋转/偏移），打印前实测驱动表单，
-        渲染交 render_all（关遮罩，I-2），走 gdi_print.print_pages(prompt=True)
-        弹驱动页选介质。异常全兜成状态栏，不外抛。"""
+        渲染交 render_all（关遮罩，I-2），走 gdi_print.print_pages（默认
+        prompt=False 直打；勾了“打印前打开驱动设置页”才交回弹窗路径）。
+        异常全兜成状态栏，不外抛。"""
         from photoprint.win import forms as forms_mod
         from photoprint.win import gdi_print
 
@@ -886,7 +894,8 @@ class MainWindow(QMainWindow):
             if quality is not None:
                 extra["quality"] = quality
             res = gdi_print.print_pages(self.api, printer, images,
-                                        self.job.sheet, dpi, prompt=True,
+                                        self.job.sheet, dpi,
+                                        prompt=self.driver_page_cb.isChecked(),
                                         forms=measured, **extra)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
@@ -919,6 +928,7 @@ class MainWindow(QMainWindow):
             # 索引没有这个歧义
             "mode_index": self.mode_box.currentIndex(),
             "gap_mm": p["gap_mm"], "bleed_mm": p["bleed_mm"], "dpi": p["dpi"],
+            "driver_page": self.driver_page_cb.isChecked(),
             "offset_pct": [self.h_slider.value(), self.v_slider.value()],
             "out_dir": out_dir or self._last_out_dir(),
             "pool_paths": [e["path"] for e in self.pool],
@@ -971,6 +981,8 @@ class MainWindow(QMainWindow):
                 self._safe(lambda b=box, v=job[key]: b.setValue(float(v)))
         if isinstance(job.get("dpi"), (int, float)):
             self._safe(lambda: self._select_by_data(self.dpi_box, float(job["dpi"])))
+        if isinstance(job.get("driver_page"), bool):
+            self.driver_page_cb.setChecked(job["driver_page"])
         pct = job.get("offset_pct")
         if isinstance(pct, (list, tuple)) and len(pct) == 2:
             self._safe(lambda: self._apply_offset(pct))

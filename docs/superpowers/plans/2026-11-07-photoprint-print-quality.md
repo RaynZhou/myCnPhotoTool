@@ -158,6 +158,15 @@
   用户并排确认“高级光面照片纸 II + 质量高”明显更深；两次 stdout 逐字相同
   （介质信息不进命令行输出）。
 
+### 补丁：GUI 直打开关（2026-11-07，用户反馈“点打印还要弹驱动页”）
+
+- [x] `_on_print` 默认 `prompt=False`；面板加「打印前打开驱动设置页」开关（默认
+  不勾，随 `last_job` 落盘与恢复）。
+- [x] 新增 2 条用例（默认直打 / 勾选后弹窗、持久化）；两条旧断言 `prompt is True`
+  改为 `False`。
+- [x] 变异验牙：写死 `prompt=True` → 2 条转红；去掉恢复分支 → 持久化用例转红。已还原。
+- [x] 全量 `468 passed`，`MUTATION-TEMP` 为 0。
+
 ## Self-Review
 
 - 向后兼容：`media=None, quality=None` 时 update 次数、DEVMODE 内容、CLI stdout、

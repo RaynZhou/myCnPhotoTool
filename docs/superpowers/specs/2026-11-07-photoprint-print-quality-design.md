@@ -140,6 +140,18 @@ quality=None)`：透传；`media`/`quality` 都为 `None` 时调用形状与返�
 - 不做回读比对：回读值反查名字依赖“这台驱动当时枚举出的表”，换驱动后名字可能
   对不上；宁可报“设了什么”，也不拿枚举表去猜“驱动最后用了什么”。
 
+### 4.2 GUI 直打（默认不弹驱动设置页）
+
+几何、介质、质量问题全部能由面板钉进 DEVMODE 之后，驱动设置页从“必要条件”
+降为“想改无边距/灰度这类驱动私有开关时才需要”。所以：
+
+- GUI 默认 `prompt=False`：点“打印”直接出纸，与 CLI（一直是 `prompt=False`）
+  行为对齐。
+- 面板底部一个「打印前打开驱动设置页」开关，默认不勾；勾上才走旧弹窗路径。
+  勾选状态随 `last_job` 落盘，下次启动保持。
+- 不勾时 `degraded`/`cancelled` 分支自然不会发生，状态栏只报“已发送”与表单/
+  介质信息。
+
 ## 5. 测试
 
 `tests/test_win32_contract.py`（扩）：位常量与 `win32con` 对拍（含 `DMBIN_USER`）。
@@ -155,7 +167,8 @@ quality=None)`：透传；`media`/`quality` 都为 `None` 时调用形状与返�
 `build_with_prompt`；两者都 None 时调用形状逐字不变。
 
 `tests/test_app_print_media.py`（扩）：下拉选中项进入打印调用；状态栏含介质名与质量档；
-枚举抛异常时仍能打印。
+枚举抛异常时仍能打印；默认 `prompt=False` 直打、勾上开关才是 `True`、开关状态
+落盘后能恢复。
 
 `tests/test_cli.py`（扩）：`--media-type 高级光面照片纸 II`/`--media-type 303`/
 `--quality high` 传到 `print_job`；不传时 stdout 逐字不变（既有断言即回归锁）。

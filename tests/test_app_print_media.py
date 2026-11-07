@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 from photoprint import jobs
 from photoprint.app.main_window import MainWindow
 from photoprint.core import store
-from photoprint.win import forms, gdi_print
+from photoprint.win import forms, gdi_print, media
 
 
 @pytest.fixture(autouse=True)
@@ -31,11 +31,23 @@ def _no_leaked_threads(qapp):
 
 class FakePrinterApi:
     def __init__(self, names=("Canon G3800", "Microsoft Print to PDF"),
-                 raise_enum=False, default=None, raise_default=False):
+                 raise_enum=False, default=None, raise_default=False,
+                 media_names=("普通纸", "高级光面照片纸 II"),
+                 media_values=(1, 303), raise_caps=False):
         self._names = names
         self.raise_enum = raise_enum
         self._default = default
         self.raise_default = raise_default
+        self.media_names = media_names
+        self.media_values = media_values
+        self.raise_caps = raise_caps
+
+    def device_caps(self, printer, field):
+        """模拟 DeviceCapabilities 的介质名/值两张配对表（spec §0.1）。"""
+        if self.raise_caps:
+            raise RuntimeError("no device caps")
+        return {media.DC_MEDIATYPES: self.media_values,
+                media.DC_MEDIATYPENAMES: self.media_names}[field]
 
     def enum_printers(self):
         if self.raise_enum:
@@ -247,3 +259,74 @@ def test_on_print_survives_form_probe_failure(qapp, tmp_path, monkeypatch):
     assert seen["forms"] == []
     assert "已发送" in w.statusBar().currentMessage()
     assert QApplication.overrideCursor() is None
+
+
+# ---------- 介质类型 / 打印质量（spec 2026-11-07）----------
+
+def _capture_print(monkeypatch):
+    """让 print_pages 接受任意关键字并记录它们（含“不传”的情况）。"""
+    seen = {}
+
+    def fake(*args, **kwargs):
+        seen["kwargs"] = kwargs
+        return {"ok": True, "pages": 1, "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_pages", fake)
+    return seen
+
+
+def test_media_combo_lists_driver_names_with_default_first(qapp, tmp_path):
+    w = _win(tmp_path)
+    texts = [w.media_box.itemText(i) for i in range(w.media_box.count())]
+    assert texts == ["驱动默认", "普通纸", "高级光面照片纸 II"]
+    assert w.media_box.itemData(0) is None          # 第 0 项＝不干预
+    assert w.media_box.itemData(2) == 303           # 值是驱动给的数值
+    assert w.media_box.currentIndex() == 0          # 默认不干预（向后兼容）
+
+
+def test_media_enum_failure_degrades_to_default_only(qapp, tmp_path, monkeypatch):
+    """枚举失败只在驱动不支持时发生：下拉只剩“驱动默认”，打印照旧能走。"""
+    seen = _capture_print(monkeypatch)
+    w = _win(tmp_path, api=FakePrinterApi(raise_caps=True))
+    assert w.media_box.count() == 1 and w.media_box.itemText(0) == "驱动默认"
+    w._on_print()
+    assert "已发送" in w.statusBar().currentMessage()
+    assert "media" not in seen["kwargs"]            # 不干预就不传
+
+
+def test_quality_combo_has_default_and_high(qapp, tmp_path):
+    w = _win(tmp_path)
+    texts = [w.quality_box.itemText(i) for i in range(w.quality_box.count())]
+    assert texts == ["驱动默认", "高"]
+    assert w.quality_box.itemData(1) == media.QUALITY_HIGH == -4
+
+
+def test_selected_media_and_quality_reach_print_pages(qapp, tmp_path, monkeypatch):
+    seen = _capture_print(monkeypatch)
+    w = _win(tmp_path)
+    w.media_box.setCurrentIndex(w.media_box.findData(303))
+    w.quality_box.setCurrentIndex(1)
+    w._on_print()
+    assert seen["kwargs"]["media"] == media.MediaOption(303, "高级光面照片纸 II")
+    assert seen["kwargs"]["quality"] == -4
+
+
+def test_default_media_selection_sends_no_extra_kwargs(qapp, tmp_path, monkeypatch):
+    """都不选时调用形状与上一轮逐字一致（不塞 media=None）。"""
+    seen = _capture_print(monkeypatch)
+    w = _win(tmp_path)
+    w._on_print()
+    assert "media" not in seen["kwargs"] and "quality" not in seen["kwargs"]
+    assert seen["kwargs"]["prompt"] is True
+
+
+def test_status_mentions_media_note(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr(gdi_print, "print_pages", lambda *a, **k: {
+        "ok": True, "pages": 1, "message": "",
+        "media_note": "介质 高级光面照片纸 II · 质量 高"})
+    w = _win(tmp_path)
+    w._on_print()
+    msg = w.statusBar().currentMessage()
+    assert "高级光面照片纸 II" in msg and "质量 高" in msg
+    assert "#b00000" not in w.statusBar().styleSheet()
+

@@ -83,16 +83,16 @@
 
 **Files:** Modify `photoprint/win/gdi_print.py`；Test `tests/test_gdi_print_media.py`
 
-- [ ] **Step 1** 追加失败测试：`print_pages(..., media=303, quality=-4)` 时
+- [x] **Step 1** 追加失败测试：`print_pages(..., media=303, quality=-4)` 时
   `build_with_prompt` 收到这两个参数；两者都 None 时调用形状（位置参数+关键字）
   与今天一致（既有 9 条断言即回归锁，不改）。
-- [ ] **Step 2** 跑测试确认红。
-- [ ] **Step 3** 实现：`print_pages(..., media=None, quality=None)` 透传；
+- [x] **Step 2** 跑测试确认红。
+- [x] **Step 3** 实现：`print_pages(..., media=None, quality=None)` 透传；
   `print_job(..., media=None, quality=None)` 透传；成功时把生效档位放进返回值
   （`res["media_note"]`），未设置时不加该键（返回值形状不变）。
-- [ ] **Step 4** 跑 `tests/test_gdi_print_media.py` 全绿。
-- [ ] **Step 5** 变异验牙：不透传 media → 用例红。
-- [ ] **Step 6** 提交（`win/gdi_print: 透传介质类型与打印质量`）
+- [x] **Step 4** 跑 `tests/test_gdi_print_media.py` 全绿。
+- [x] **Step 5** 变异验牙：不透传 media → 用例红。
+- [x] **Step 6** 提交（`win/gdi_print: 透传介质类型与打印质量`）
 
 ---
 
@@ -100,18 +100,18 @@
 
 **Files:** Modify `photoprint/app/main_window.py`；Test `tests/test_app_print_media.py`
 
-- [ ] **Step 1** 追加失败测试（沿用既有 FakeApi 注入）：
+- [x] **Step 1** 追加失败测试（沿用既有 FakeApi 注入）：
   - 面板存在“介质类型”“打印质量”两个 `QComboBox`；介质的第 0 项是“驱动默认”，
     其后是驱动给的名字；`enumerate_media` 抛异常时只剩第 0 项且能正常打印。
   - 选中介质/质量后，打印调用收到对应 `media`/`quality`。
   - 状态栏含介质名与“质量 高”；都不选时文案与今天相同（既有断言即回归锁）。
-- [ ] **Step 2** 跑测试确认红。
-- [ ] **Step 3** 实现：初始化时 `enumerate_media` 填充（异常静默）；`_on_print` 取选中值
+- [x] **Step 2** 跑测试确认红。
+- [x] **Step 3** 实现：初始化时 `enumerate_media` 填充（异常静默）；`_on_print` 取选中值
   → `print_pages(..., media=, quality=)`；成功文案按 `media.note` 追加。
-- [ ] **Step 4** 跑 `tests/test_app_print_media.py` + `tests/test_app_main_window.py` 全绿
+- [x] **Step 4** 跑 `tests/test_app_print_media.py` + `tests/test_app_main_window.py` 全绿
   （offscreen）。
-- [ ] **Step 5** 变异验牙：下拉值不传 → 用例红；枚举失败直接抛 → 降级用例红。
-- [ ] **Step 6** 提交（`app: 介质类型/打印质量下拉 + 状态栏明示`）
+- [x] **Step 5** 变异验牙：下拉值不传 → 用例红；枚举失败直接抛 → 降级用例红。
+- [x] **Step 6** 提交（`app: 介质类型/打印质量下拉 + 状态栏明示`）
 
 ---
 

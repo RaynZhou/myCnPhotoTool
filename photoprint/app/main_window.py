@@ -21,6 +21,7 @@ from photoprint.app import view, worker
 from photoprint.app.preview_view import PreviewView
 from photoprint.core import modes, render, specs, store
 from photoprint.core.text_overlay import Corner, TextSpec
+from photoprint.win import media as media_mod
 
 MODE_LABELS = (
     ("自动", None),
@@ -29,6 +30,10 @@ MODE_LABELS = (
     ("出血拼版（需人工裁切）", modes.BLEED_TRIM),
 )
 DPI_CHOICES = ((150.0, "150"), (300.0, "300"), (600.0, "600"))
+# 质量只给两档：驱动默认（不写字段）与本机唯一可用的更高档 DMRES_HIGH
+# （spec 2026-11-07 §0.2：-1/-2 被夹回 -2，正值被夹回 -3）。
+QUALITY_CHOICES = (("驱动默认", None), ("高", media_mod.QUALITY_HIGH))
+MEDIA_DEFAULT_LABEL = "驱动默认"
 DEBOUNCE_MS = 250
 OFFSET_MAX_PCT = 50
 GALLERY_THUMB_PX = 120
@@ -119,6 +124,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._ov_base = self._read_overlay_widgets()
         self._load_printers()
+        # 介质下拉跟随打印机：先建连再手工填一次，避免初始化时重复枚举
+        self.printer_box.currentIndexChanged.connect(self._load_media_options)
+        self._load_media_options()
         # debounce 必须先于恢复设置建好： setCurrentIndex 一类调用会打到信号
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -216,6 +224,17 @@ class MainWindow(QMainWindow):
             self.dpi_box.addItem(label, value)
         self.dpi_box.setCurrentIndex(1)      # 默认 300
         panel.addRow("输出 dpi", self.dpi_box)
+
+        # 介质类型 / 打印质量：默认第 0 项“驱动默认”＝不干预 DEVMODE，
+        # 与上一轮行为逐字一致（spec 2026-11-07 决策 1）。
+        self.media_box = QComboBox()
+        self.media_box.addItem(MEDIA_DEFAULT_LABEL, None)
+        panel.addRow("介质类型", self.media_box)
+        self.quality_box = QComboBox()
+        for label, value in QUALITY_CHOICES:
+            self.quality_box.addItem(label, value)
+        panel.addRow("打印质量", self.quality_box)
+        self._media_options = []       # 驱动给的介质项（枚举失败时为空）
 
         self.h_slider = QSlider(Qt.Horizontal)
         self.h_slider.setRange(-OFFSET_MAX_PCT, OFFSET_MAX_PCT)
@@ -800,6 +819,28 @@ class MainWindow(QMainWindow):
         idx = names.index(default) if default in names else 0
         self.printer_box.setCurrentIndex(idx)
 
+    def _load_media_options(self, *_):
+        """按当前打印机填充介质下拉。
+
+        第 0 项永远是“驱动默认”（不干预）；其后是驱动给的名字与数值。枚举失败
+        （无驱动/无 pywin32）只剩第 0 项，打印照旧可用——介质只是画质增强。
+        换打印机时尽量保留原选中值（同一驱动的两台机通常是同一组介质）。
+        """
+        keep = self.media_box.currentData()
+        printer = self.printer_box.currentText()
+        self._media_options = (media_mod.enumerate_media(self.api, printer)
+                               if printer else [])
+        self.media_box.blockSignals(True)
+        try:
+            self.media_box.clear()
+            self.media_box.addItem(MEDIA_DEFAULT_LABEL, None)
+            for opt in self._media_options:
+                self.media_box.addItem(opt.name, opt.value)
+            idx = self.media_box.findData(keep) if keep is not None else 0
+            self.media_box.setCurrentIndex(max(0, idx))
+        finally:
+            self.media_box.blockSignals(False)
+
     def _on_print(self):
         """直打全部页：先同步落最新 job（含旋转/偏移），打印前实测驱动表单，
         渲染交 render_all（关遮罩，I-2），走 gdi_print.print_pages(prompt=True)
@@ -833,9 +874,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 measured = []
             images = jobs.render_all(self.job, dpi, show_mask=False)   # I-2
+            # 只有真选了介质/质量才把参数传下去：不选时调用形状与上一轮
+            # 逐字一致（不塞 media=None）。
+            extra = {}
+            opt = self.media_box.currentData()
+            if opt is not None:
+                media = media_mod.find_media(self._media_options, opt)
+                if media is not None:
+                    extra["media"] = media
+            quality = self.quality_box.currentData()
+            if quality is not None:
+                extra["quality"] = quality
             res = gdi_print.print_pages(self.api, printer, images,
                                         self.job.sheet, dpi, prompt=True,
-                                        forms=measured)
+                                        forms=measured, **extra)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             self._set_status(f"打印失败：{exc}", error=True)
@@ -850,6 +902,9 @@ class MainWindow(QMainWindow):
                 msg += f"（{forms_mod.binding_note(forms_mod.PaperForm(**form))}）"
             if res.get("degraded"):                 # W-3：降级仍成功，附提示
                 msg += "（未能打开驱动设置页，已用驱动当前介质）"
+            note = res.get("media_note")
+            if note:                                # 明示送到驱动的介质/质量
+                msg += f"（{note}）"
             self._set_status(msg)
         else:
             self._set_status(f"未打印：{res['message']}", error=True)

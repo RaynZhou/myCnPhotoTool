@@ -1,7 +1,8 @@
-"""只读采证脚本：dump 驱动自带纸张表单，并实测每张表的物理尺寸。
+"""只读采证脚本：dump 驱动自带纸张表单 + 介质类型 + 纸盒 + 默认质量。
 
-用途：真机核对"5 寸(89×127)"等相片尺寸到底落在驱动哪个表单上，以及
-预设尺寸与驱动实测差多少（spec 2026-11-07）。
+用途：真机核对"5 寸(89×127)"等相片尺寸到底落在驱动哪个表单上、预设尺寸与
+驱动实测差多少（spec 2026-11-07），以及驱动提供的介质名/值、默认质量档
+（spec 2026-11-07 打印质量档）。
 
 尺寸来源：逐表单码建 DEVMODE → CreateDC → GetDeviceCaps(PHYSICALWIDTH/HEIGHT)。
 不走 DC_PAPERSIZE：本机 G3800 驱动对它返回 30 对全 0，形状不可信。
@@ -21,8 +22,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from photoprint.core import specs  # noqa: E402
-from photoprint.win import forms, probe  # noqa: E402
+from photoprint.win import forms, media, probe  # noqa: E402
 from photoprint.win.api import RealWinApi  # noqa: E402
+
+# 纸盒两张表（只在本脚本用；win/media.py 只关心介质）
+DC_BINS, DC_BINNAMES = 6, 12
 
 
 def _clean(name) -> str:
@@ -106,6 +110,35 @@ def main(argv):
         got = (f"码 {hit.code}  {hit.name}  实测 {hit.w_mm:.2f}×{hit.h_mm:.2f}"
                if hit is not None else "无匹配表单")
         print(f"{p.key:>6} {p.w_mm:>6.1f}×{p.h_mm:<6.1f} {got}")
+
+    print("\n介质类型（DC_MEDIATYPENAMES/DC_MEDIATYPES 配对；打印路径按名字下单）：")
+    print("-" * 78)
+    options = media.enumerate_media(api, printer)
+    if not options:
+        print("(枚举失败或驱动无介质表——GUI 下拉将只剩“驱动默认”)")
+    for opt in options:
+        print(f"{opt.value:>5}  {opt.name}")
+
+    print("\n纸盒（DC_BINS / DC_BINNAMES）：")
+    print("-" * 78)
+    try:
+        bins = api.device_caps(printer, DC_BINS)
+        bin_names = api.device_caps(printer, DC_BINNAMES)
+        print(f"DC_BINS={bins}  DC_BINNAMES={[_clean(n) for n in bin_names]}")
+    except Exception as exc:            # 没有纸盒信息不影响其余采证
+        print(f"(取纸盒失败：{exc})")
+
+    handle = api.open_printer(printer)
+    try:
+        dm = api.get_devmode(handle)
+    finally:
+        api.close_printer(handle)
+    print("\n驱动默认 DEVMODE："
+          f"MediaType={getattr(dm, 'MediaType', '?')} "
+          f"PrintQuality={getattr(dm, 'PrintQuality', '?')} "
+          f"DefaultSource={getattr(dm, 'DefaultSource', '?')} "
+          f"PaperSize={getattr(dm, 'PaperSize', '?')}")
+    print("（质量 -3=DMRES_MEDIUM，-4=DMRES_HIGH；界面只有“驱动默认/高”两档）")
 
     print("\n只读采证结束：全程未发送打印作业。")
     return 0

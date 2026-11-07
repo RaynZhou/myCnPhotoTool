@@ -134,14 +134,29 @@
 
 ### Task 7: dump 脚本补介质表 + 全量回归 + 真机复验
 
-- [ ] **Step 1** `_lab/dump_driver_papers.py` 追加：介质名字/数值表、纸盒表、
+- [x] **Step 1** `_lab/dump_driver_papers.py` 追加：介质名字/数值表、纸盒表、
   默认 `MediaType`/`PrintQuality`，并标出默认项。
-- [ ] **Step 2** 真机只读跑一遍，核对 spec §0.1/§0.2。
-- [ ] **Step 3** 全量回归 `pytest -q` 全绿；`Select-String MUTATION-TEMP` 为 0。
-- [ ] **Step 4** 真机只读复验：`MediaType=303`+`Quality=-4`+表单 126 → 尺寸/偏移不变。
-- [ ] **Step 5** 打印验证（**需用户批准**）：同一张 3R 测试图，分别用“驱动默认”与
+- [x] **Step 2** 真机只读跑一遍，核对 spec §0.1/§0.2。
+- [x] **Step 3** 全量回归 `pytest -q` 全绿；`Select-String MUTATION-TEMP` 为 0。
+- [x] **Step 4** 真机只读复验：`MediaType=303`+`Quality=-4`+表单 126 → 尺寸/偏移不变。
+- [x] **Step 5** 打印验证（**需用户批准**）：同一张 3R 测试图，分别用“驱动默认”与
   “高级光面照片纸 II + 质量高”各打一张，比较墨量。
-- [ ] **Step 6** 提交（`lab: 介质/纸盒/质量采证`），并把 plan 勾成完成。
+- [x] **Step 6** 提交（`lab: 介质/纸盒/质量采证`），并把 plan 勾成完成。
+
+验收记录（2026-11-07，本机 Canon G3000 series / G3800）：
+
+- 回归：`466 passed`（基线 421 + 新增 45），`MUTATION-TEMP` 计数 0。
+- dump 实测（`_lab/out/dump_forms2.txt`）：介质 15 项；3R 命中表单 126
+  `L 89x127mm`；默认 `MediaType=1 PrintQuality=-3 DefaultSource=7`；
+  `DC_BINS=(7,)`、`DC_BINNAMES=('后端托盘',)`。
+- 只读复验（`_lab/out/verify_media_quality.py`，走生产路径
+  `forms.measure → forms.find → devmode.build_with_prompt`）：写入介质 303 +
+  质量 -4 后 `PaperSize=126 MediaType=303 PrintQuality=-4`，几何
+  88.98×127.00mm、偏移 3.39/2.96mm、600×600dpi 与不干预时逐项相同
+  （8 项判定全 PASS，全程未发打印作业）。
+- 出纸验收：同一张 3R 图各打一张（`_lab/out/run_cli.py default|high`），
+  用户并排确认“高级光面照片纸 II + 质量高”明显更深；两次 stdout 逐字相同
+  （介质信息不进命令行输出）。
 
 ## Self-Review
 

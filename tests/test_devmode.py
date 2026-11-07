@@ -22,12 +22,16 @@ class FakeDM:
         self.Scale = 100
         self.Duplex = 300         # 驱动私有区被建模为一个不得改动的字段
         self.MediaType = 700
+        self.PrintQuality = -3    # 驱动默认档（DMRES_MEDIUM）
 
 
 class FakeApi:
-    def __init__(self, size=520):
+    def __init__(self, size=520, raise_on_update=None):
         self.size = size
         self.mode_log = []
+        self.snapshots = []       # 每次 update 时的字段快照（钉写入顺序）
+        self.update_calls = 0
+        self.raise_on_update = raise_on_update
         self.dm = FakeDM()
 
     def open_printer(self, name):
@@ -47,6 +51,16 @@ class FakeApi:
         if mode == "size":
             return self.size
         assert dm is self.dm, "update 必须交回驱动取到的那份结构，不能新建"
+        self.update_calls += 1
+        self.snapshots.append({
+            "MediaType": dm.MediaType,
+            "PrintQuality": dm.PrintQuality,
+            "PaperSize": dm.PaperSize,
+            "PaperWidth": dm.PaperWidth,
+            "Fields": dm.Fields,
+        })
+        if self.raise_on_update == self.update_calls:
+            raise RuntimeError("驱动拒绝了这次 update")
         return 1
 
 
@@ -139,6 +153,7 @@ class PromptApi(FakeApi):
 
     def prompt_devmode(self, handle, printer, dm):
         self.prompt_calls += 1
+        self.mode_log.append("prompt")   # 钉住“介质/质量先写、弹窗在后”
         if self.cancel_on_prompt:
             raise PromptCancelled("用户在驱动页点了取消")
         if self.raise_on_prompt:
@@ -212,3 +227,69 @@ def test_build_delegates_to_build_with_prompt():
     dm, size = devmode.build(api, "P", 210.0, 297.0)
     assert size == 520
     assert dm.PaperWidth == 2100 and dm.PaperLength == 2970
+
+
+# ---- 介质类型 / 打印质量（spec 2026-11-07 §0.3）--------------------------
+
+def test_media_and_quality_are_submitted_in_two_separate_updates():
+    """介质一变驱动就把质量重算回默认，故必须“先介质、后质量”分两遍交回。"""
+    api = FakeApi()
+    dm, _size, _deg = devmode.build_with_prompt(
+        api, "P", 89.0, 127.0, paper_code=126, media=303, quality=-4)
+    assert api.mode_log == ["size", "devmode", "update", "update", "update"]
+    # 第一遍只交几何；第二遍带介质（质量还是驱动默认）；第三遍才有 -4
+    assert (api.snapshots[0]["MediaType"], api.snapshots[0]["PrintQuality"]) == (700, -3)
+    assert (api.snapshots[1]["MediaType"], api.snapshots[1]["PrintQuality"]) == (303, -3)
+    assert (api.snapshots[2]["MediaType"], api.snapshots[2]["PrintQuality"]) == (303, -4)
+    assert (dm.MediaType, dm.PrintQuality) == (303, -4)
+    assert dm.Fields & devmode.DM_MEDIATYPE and dm.Fields & devmode.DM_PRINTQUALITY
+    assert dm.PaperSize == 126, "介质/质量不得影响纸张几何"
+
+
+def test_media_only_submits_once_more_than_baseline():
+    api = FakeApi()
+    devmode.build_with_prompt(api, "P", 89.0, 127.0, media=303)
+    assert api.update_calls == 2          # 几何 1 次 + 介质 1 次
+    assert api.snapshots[-1]["MediaType"] == 303
+    assert api.snapshots[-1]["PrintQuality"] == -3   # 不干预质量
+    assert api.snapshots[-1]["PaperWidth"] == 890     # 几何仍在同一份结构里
+
+
+def test_quality_only_leaves_media_alone():
+    api = FakeApi()
+    dm, _s, _d = devmode.build_with_prompt(api, "P", 89.0, 127.0, quality=-4)
+    assert api.update_calls == 2
+    assert (dm.MediaType, dm.PrintQuality) == (700, -4)   # 700 = 驱动默认介质
+
+
+def test_defaults_submit_exactly_once_as_before():
+    """不传 media/quality 时提交次数与旧行为逐次一致（向后兼容红线）。"""
+    api = FakeApi()
+    devmode.build_with_prompt(api, "P", 89.0, 127.0)
+    assert api.mode_log == ["size", "devmode", "update"]
+    assert api.snapshots[0]["MediaType"] == 700
+
+
+def test_media_and_quality_are_written_before_prompt():
+    """写入先于弹窗：让驱动设置页一打开就显示我们的选择（决策 5）。"""
+    api = PromptApi()
+    dm, _s, _d = devmode.build_with_prompt(
+        api, "P", 89.0, 127.0, prompt=True, media=303, quality=-4)
+    assert api.mode_log == ["size", "devmode", "update", "update",
+                            "update", "prompt", "update"]
+    assert (api.snapshots[-1]["MediaType"],
+            api.snapshots[-1]["PrintQuality"]) == (303, -4)
+    assert api.snapshots[-1]["PaperWidth"] == 890      # 弹窗改坏的尺寸被盖回（I-1）
+    assert dm.DefaultSource == PromptApi.USER_SOURCE   # 纸盒仍归用户（W-2）
+
+
+def test_media_write_failure_does_not_abort_print():
+    """介质/质量是画质增强：写入炸了也照打，不外抛、几何照旧交回。"""
+    api = FakeApi(raise_on_update=2)   # 第 1 次是几何（必须成功），第 2 次是介质
+    dm, _size, degraded = devmode.build_with_prompt(
+        api, "P", 89.0, 127.0, media=303, quality=-4)
+    assert degraded is False
+    assert api.update_calls == 3       # 介质炸了，质量那次照旧提交
+    assert dm.PaperWidth == 890
+
+

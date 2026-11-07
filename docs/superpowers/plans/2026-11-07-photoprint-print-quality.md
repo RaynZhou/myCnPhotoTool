@@ -15,15 +15,15 @@
 
 **Files:** Modify `photoprint/win/devmode.py`；Test `tests/test_win32_contract.py`
 
-- [ ] **Step 1** 追加失败测试：`devmode` 的 `DM_PAPERSIZE / DM_PAPERLENGTH /
+- [x] **Step 1** 追加失败测试：`devmode` 的 `DM_PAPERSIZE / DM_PAPERLENGTH /
   DM_PAPERWIDTH / DM_DEFAULTSOURCE / DM_SCALE / DM_MEDIATYPE / DM_PRINTQUALITY`
   逐个与 `win32con` 同名常量相等；`devmode.DMBIN_USER == win32con.DMBIN_USER (256)`。
-- [ ] **Step 2** 跑 `tests/test_win32_contract.py` 确认红（现值整体错位一位）。
-- [ ] **Step 3** 改常量并加注释说明「旧值整体错位，真机驱动不看 dmFields 故无症状」。
-- [ ] **Step 4** 跑 `tests/test_devmode.py` + `test_win32_contract.py` 全绿
+- [x] **Step 2** 跑 `tests/test_win32_contract.py` 确认红（现值整体错位一位）。
+- [x] **Step 3** 改常量并加注释说明「旧值整体错位，真机驱动不看 dmFields 故无症状」。
+- [x] **Step 4** 跑 `tests/test_devmode.py` + `test_win32_contract.py` 全绿
   （既有断言按符号引用，不随数值变）。
-- [ ] **Step 5** 变异验牙：把 `DM_SCALE` 改回 `0x1` → 对拍用例红。
-- [ ] **Step 6** 提交（`win/devmode: dmFields 位常量按 win32con 订正（旧值整体错位一位）`）
+- [x] **Step 5** 变异验牙：把 `DM_SCALE` 改回 `0x1` → 对拍用例红。
+- [x] **Step 6** 提交（`win/devmode: dmFields 位常量按 win32con 订正（旧值整体错位一位）`）
 
 ---
 
@@ -35,7 +35,7 @@
 `enumerate_media(api, printer)`、`find_media(options, query)`、
 `apply(dm, media=None, quality=None)`、`note(media, quality)`。
 
-- [ ] **Step 1** 写失败测试（全脱机 FakeApi）：
+- [x] **Step 1** 写失败测试（全脱机 FakeApi）：
   - 枚举：`device_caps(printer, 35)`→`(1, 303)`、`(34)`→`('普通纸','高级光面照片纸 II')`
     → `[MediaOption(1,'普通纸'), MediaOption(303,'高级光面照片纸 II')]`；两表长度不等时
     按短表截断；任一调用抛异常→`[]`。
@@ -44,12 +44,12 @@
   - `apply`：写入 `MediaType`/`PrintQuality` 与对应 `Fields` 位；`media=None` 不动介质、
     `quality=None` 不动质量；返回是否写成功；dm 缺属性→`False` 且不抛。
   - `note`：含介质名与「质量 高」；都 None→`''`。
-- [ ] **Step 2** 跑测试确认红。
-- [ ] **Step 3** 实现（纯编排，经 api 注入，不 import win32）。
-- [ ] **Step 4** 跑 `tests/test_media_options.py` 全绿。
-- [ ] **Step 5** 变异验牙三处：枚举错位配对、`find_media` 去掉包含回退、`apply` 少写位
+- [x] **Step 2** 跑测试确认红。
+- [x] **Step 3** 实现（纯编排，经 api 注入，不 import win32）。
+- [x] **Step 4** 跑 `tests/test_media_options.py` 全绿。
+- [x] **Step 5** 变异验牙三处：枚举错位配对、`find_media` 去掉包含回退、`apply` 少写位
   —— 各转红后还原。
-- [ ] **Step 6** 提交（`win/media: 驱动介质枚举/查找 + 质量档（含测试）`）
+- [x] **Step 6** 提交（`win/media: 驱动介质枚举/查找 + 质量档（含测试）`）
 
 ---
 
@@ -57,7 +57,7 @@
 
 **Files:** Modify `photoprint/win/devmode.py`；Test `tests/test_devmode.py`
 
-- [ ] **Step 1** 追加失败测试：
+- [x] **Step 1** 追加失败测试：
   - `build_with_prompt(..., media=303, quality=-4)`：`api.mode_log` 里 `"update"`
     出现两次，且第一次的 dm 已带 `MediaType=303`、第二次带 `PrintQuality=-4`
     （用记录 dm 快照的 FakeApi 断言顺序）。
@@ -67,13 +67,15 @@
     弹窗后不再重写介质/质量（日志里 prompt 之后没有 media 字段变化）。
   - 介质写入抛异常（FakeApi 让第二次 update 炸）→ 仍返回 dm、`degraded` 语义不变、
     不外抛。
-- [ ] **Step 2** 跑测试确认红。
-- [ ] **Step 3** 实现：几何 → `media.apply`+update（若 media）→ `media.apply`+update
-  （若 quality）→ 弹窗 → 只重钉几何（`default_source=False`）。
-- [ ] **Step 4** 跑 `tests/test_devmode.py` + `test_gdi_print_media.py` 全绿。
-- [ ] **Step 5** 变异验牙：把两遍合成一遍 → 「质量丢失」用例红；把写入挪到弹窗后 →
+- [x] **Step 2** 跑测试确认红。
+- [x] **Step 3** 实现：几何 →（仅当 media/quality 非空时先预交一次几何，
+  镜像真机探针“先 build 再逐次写”的形状）→ `media.apply`+update（若 media）→
+  `media.apply`+update（若 quality）→ 弹窗 → 只重钉几何（`default_source=False`）
+  并重交；两者都空时仍走旧形状（弹窗后才交回，取消时一次 update 都不发生）。
+- [x] **Step 4** 跑 `tests/test_devmode.py` + `test_gdi_print_media.py` 全绿。
+- [x] **Step 5** 变异验牙：把两遍合成一遍 → 「质量丢失」用例红；把写入挪到弹窗后 →
   「弹窗优先」用例红。
-- [ ] **Step 6** 提交（`win/devmode: 介质先于质量的两次写入（驱动会重算质量默认值）`）
+- [x] **Step 6** 提交（`win/devmode: 介质先于质量的两次写入（驱动会重算质量默认值）`）
 
 ---
 

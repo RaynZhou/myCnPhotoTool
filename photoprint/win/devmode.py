@@ -4,15 +4,16 @@
   1. buffer 按驱动回报的 size 分配（含私有扩展区），不得按 sizeof(DEVMODE) 截断
   2. 必须先向驱动取回当前默认设置再改，以继承无边距/介质类型等私有开关
   3. 不得改结构长度字段（PyDEVMODEW 里叫 Size，不是 cbSize）
-  4. 只写纸张相关字段与 Scale
+  4. 只写纸张相关字段、Scale，以及显式请求的介质/质量
 
 字段名是 pywin32 的真实契约（本机 PyDEVMODEW 实测）：Fields / PaperSize /
-PaperWidth / PaperLength / DefaultSource / Scale / Size；写 dmFields /
-dmPaperSize 只会 AttributeError（终审 C2）。
+PaperWidth / PaperLength / DefaultSource / Scale / Size / MediaType /
+PrintQuality；写 dmFields / dmPaperSize 只会 AttributeError（终审 C2）。
 常量在此自持，避免测试期强绑 win32；真机调用由 api.RealWinApi 提供。
 """
 from __future__ import annotations
 
+from photoprint.win import media as media_mod
 from photoprint.win.api import PromptCancelled
 
 DMPAPER_USER = 259
@@ -53,7 +54,23 @@ def modify(dm, size, w_mm, h_mm, paper_code=None, default_source=True):
     return size
 
 
-def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
+def _submit_try(api, handle, printer, dm, **fields):
+    """写一组字段并立刻交回驱动；失败只记账、不外抛。
+
+    介质/质量是画质增强，不是打印前置条件（spec §4）：写不进、驱动拒收
+    都要继续往下走，否则一张照片会因为驱动不认某个介质而彻底打不出来。
+    """
+    if not media_mod.apply(dm, **fields):
+        return False
+    try:
+        api.document_properties(handle, printer, "update", dm)
+    except Exception:
+        return False
+    return True
+
+
+def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False,
+                      media=None, quality=None):
     """取驱动默认 DEVMODE → 写纸张几何 →（可选）弹驱动页选介质 → 再盖一次
     几何 → 交回驱动校验回填。返回 (dm, size, degraded)。
 
@@ -75,6 +92,12 @@ def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
       1. DocumentProperties(fMode=0, None, None) 问出含私有区的总长；
       2. GetPrinter(2)["pDevMode"] 取回驱动当前设置；
       3. 改完再用 DM_IN_BUFFER|DM_OUT_BUFFER 交回驱动校验/回填。
+
+    介质/质量分两遍交回（不合并成一次）：介质一变，驱动会把质量重算回
+    默认值，同一次 update 里写的质量会丢；实测只有“先介质、后质量”
+    两遍写入能同时钉住两者（spec §0.3 第 1 条）。两者都不传时提交次数
+    与旧行为逐次一致（向后兼容红线）。写入先于弹窗，让驱动设置页一打开
+    就显示我们的选择；弹窗后只重钉几何，不重写介质/质量（用户可在页内改）。
     """
     handle = api.open_printer(printer)
     degraded = False
@@ -86,6 +109,18 @@ def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
         # 先就地改再返回 dm 本体：写成 `return modify(...), size` 会把
         # modify 的返回值（size）当成 dm，下游拿到的第一元素是 int
         modify(dm, size, w_mm, h_mm, paper_code)
+        # 几何先交回（与旧行为同一调用），再写介质、再写质量：这个顺序正是
+        # 真机探针验证过的形状——镜像 probe 里“先 build 再逐次写”的观察，
+        # 不把“几何+介质”合并到第一次 update（那种组合未在硬件上验过）。
+        # 只在真要写介质/质量时才预交：不传两者时提交次数与顺序与旧行为
+        # 逐次一致（包括取消时一次 update 都不发生）。
+        preset = media is not None or quality is not None
+        if preset:
+            api.document_properties(handle, printer, "update", dm)
+        if media is not None:
+            _submit_try(api, handle, printer, dm, media=media)
+        if quality is not None:
+            _submit_try(api, handle, printer, dm, quality=quality)
         if prompt:
             try:
                 dm = api.prompt_devmode(handle, printer, dm)
@@ -95,7 +130,11 @@ def build_with_prompt(api, printer, w_mm, h_mm, paper_code=None, prompt=False):
                 degraded = True            # W-3：驱动无配置页→继承当前介质
             # 几何以请求为准（I-1）；但保留用户选的纸盒（W-2）
             modify(dm, size, w_mm, h_mm, paper_code, default_source=False)
-        api.document_properties(handle, printer, "update", dm)
+            # 弹窗后必须重交一次，把盖回的几何交给驱动校验
+            api.document_properties(handle, printer, "update", dm)
+        elif not preset:
+            # 不干预介质/质量时仍沿用旧形状：几何只在这里交回一次
+            api.document_properties(handle, printer, "update", dm)
     finally:
         api.close_printer(handle)
     return dm, size, degraded

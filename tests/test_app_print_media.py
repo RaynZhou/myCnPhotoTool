@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication
 from photoprint import jobs
 from photoprint.app.main_window import MainWindow
 from photoprint.core import store
-from photoprint.win import gdi_print
+from photoprint.win import forms, gdi_print
 
 
 @pytest.fixture(autouse=True)
@@ -92,11 +92,12 @@ def test_on_print_sends_all_pages_and_ok_status(qapp, tmp_path, monkeypatch):
         seen["render_dpi"] = dpi
         return real_render(job, dpi, show_mask=show_mask)
 
-    def fake_print_pages(api, printer, images, sheet, dpi, *, prompt=True):
+    def fake_print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
         seen["n"] = len(images)
         seen["printer"] = printer
         seen["dpi"] = dpi
         seen["prompt"] = prompt
+        seen["forms"] = forms
         return {"ok": True, "pages": len(images), "message": ""}
 
     monkeypatch.setattr(jobs, "render_all", spy_render)
@@ -110,6 +111,7 @@ def test_on_print_sends_all_pages_and_ok_status(qapp, tmp_path, monkeypatch):
     assert seen["printer"] == "Canon G3800"    # 打向选中的那台，不写死
     assert seen["n"] == w.job.page_count       # I-2：全部页
     assert seen["n"] >= 1
+    assert seen["forms"] == []                # 探测失败（无 device_caps）⇒ 退旧行为
     assert "已发送" in w.statusBar().currentMessage()
 
 
@@ -191,3 +193,57 @@ def test_on_print_degraded_appends_hint(qapp, tmp_path, monkeypatch):
     assert "已发送 2 页" in msg
     assert "未能打开驱动设置页" in msg
     assert "#b00000" not in w.statusBar().styleSheet()   # 降级仍成功，不红
+
+
+# ---------- 驱动表单绑定（spec 2026-11-07） ----------
+
+L_89x127 = forms.PaperForm(126, "L 89x127mm", 88.98, 127.0)
+
+
+def test_on_print_passes_measured_forms(qapp, tmp_path, monkeypatch):
+    """打印前实测一次表单，并把结果交给 print_pages。"""
+    seen = {}
+    monkeypatch.setattr(forms, "measure", lambda api, printer: [L_89x127])
+
+    def fake_print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
+        seen["forms"] = forms
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_pages", fake_print_pages)
+    w = _win(tmp_path)
+    w._on_print()
+    assert seen["forms"] == [L_89x127]
+
+
+def test_on_print_status_mentions_driver_form(qapp, tmp_path, monkeypatch):
+    """用了驱动表单必须在状态栏明示，不得让用户以为还是自定义尺寸。"""
+    monkeypatch.setattr(forms, "measure", lambda api, printer: [L_89x127])
+    monkeypatch.setattr(gdi_print, "print_pages", lambda *a, **k: {
+        "ok": True, "pages": 1, "message": "", "paper_form": L_89x127.as_dict()})
+    w = _win(tmp_path)
+    w._on_print()
+    msg = w.statusBar().currentMessage()
+    assert "已发送 1 页" in msg
+    assert "L 89x127mm" in msg
+    assert "88.98" in msg
+    assert "#b00000" not in w.statusBar().styleSheet()   # 成功不红
+
+
+def test_on_print_survives_form_probe_failure(qapp, tmp_path, monkeypatch):
+    """探测表单抛异常：仍要打（传空表＝旧行为），不得让打印崩。"""
+    def boom(api, printer):
+        raise RuntimeError("device caps failed")
+
+    seen = {}
+    monkeypatch.setattr(forms, "measure", boom)
+
+    def fake_print_pages(api, printer, images, sheet, dpi, *, prompt=True, forms=None):
+        seen["forms"] = forms
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_pages", fake_print_pages)
+    w = _win(tmp_path)
+    w._on_print()                    # 不得抛
+    assert seen["forms"] == []
+    assert "已发送" in w.statusBar().currentMessage()
+    assert QApplication.overrideCursor() is None

@@ -801,9 +801,10 @@ class MainWindow(QMainWindow):
         self.printer_box.setCurrentIndex(idx)
 
     def _on_print(self):
-        """直打全部页：先同步落最新 job（含旋转/偏移），渲染交 render_all（关遮罩，
-        I-2），走 gdi_print.print_pages(prompt=True) 弹驱动页选介质。异常全兜成
-        状态栏，不外抛。"""
+        """直打全部页：先同步落最新 job（含旋转/偏移），打印前实测驱动表单，
+        渲染交 render_all（关遮罩，I-2），走 gdi_print.print_pages(prompt=True)
+        弹驱动页选介质。异常全兜成状态栏，不外抛。"""
+        from photoprint.win import forms as forms_mod
         from photoprint.win import gdi_print
 
         self._debounce.stop()
@@ -824,9 +825,17 @@ class MainWindow(QMainWindow):
         dpi = self._params()["dpi"]
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            # 打印前实测驱动表单（只读），命中则打印路径会用驱动自带表单码；
+            # 探测失败一律当“没有表单信息”退回旧行为——绝不让打印因此失败。
+            # 不做缓存：用户可能在两次打印之间改了驱动里的纸张设置。
+            try:
+                measured = forms_mod.measure(self.api, printer)
+            except Exception:
+                measured = []
             images = jobs.render_all(self.job, dpi, show_mask=False)   # I-2
             res = gdi_print.print_pages(self.api, printer, images,
-                                        self.job.sheet, dpi, prompt=True)
+                                        self.job.sheet, dpi, prompt=True,
+                                        forms=measured)
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             self._set_status(f"打印失败：{exc}", error=True)
@@ -836,6 +845,9 @@ class MainWindow(QMainWindow):
             self._set_status("已取消")
         elif res["ok"]:
             msg = f"已发送 {res['pages']} 页到 {printer}"
+            form = res.get("paper_form")
+            if form:                                # 命中驱动表单：明示用的哪张
+                msg += f"（{forms_mod.binding_note(forms_mod.PaperForm(**form))}）"
             if res.get("degraded"):                 # W-3：降级仍成功，附提示
                 msg += "（未能打开驱动设置页，已用驱动当前介质）"
             self._set_status(msg)

@@ -218,3 +218,54 @@ def test_cli_stdout_note_wording_is_frozen(tmp_path, capsys):
     assert capsys.readouterr().out == (
         "纸张 A4，每页 4 格，共 1 页。"
         "需人工裁切：沿灰线切开后即为 89×127mm 成品\n")
+
+
+# ---------- 驱动表单绑定（spec 2026-11-07） ----------
+
+
+def test_print_passes_measured_forms(tmp_path, monkeypatch):
+    """CLI 直打也走同一探测：把实测表单交给 print_job。"""
+    from PIL import Image
+
+    from photoprint.win import forms, gdi_print
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (10, 20, 30)).save(p)
+    form = forms.PaperForm(126, "L 89x127mm", 88.98, 127.0)
+    seen = {}
+    monkeypatch.setattr(forms, "measure", lambda api, printer: [form])
+
+    def fake_print_job(api, printer, port, images, sheet, dpi, dm=None, forms=None):
+        seen["forms"] = forms
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_job", fake_print_job)
+    assert cli.main(["--photos", str(p), "--sheet", "3R", "--cell", "3R",
+                     "--dpi", "25.4", "--print", "--printer", "P"]) == 0
+    assert seen["forms"] == [form]
+
+
+def test_print_survives_form_probe_failure(tmp_path, monkeypatch, capsys):
+    """探测抛异常：仍直打（传空表），且 stdout 文案形状不变。"""
+    from PIL import Image
+
+    from photoprint.win import forms, gdi_print
+
+    p = tmp_path / "0.jpg"
+    Image.new("RGB", (400, 200), (10, 20, 30)).save(p)
+    seen = {}
+
+    def boom(api, printer):
+        raise RuntimeError("device caps failed")
+
+    monkeypatch.setattr(forms, "measure", boom)
+
+    def fake_print_job(api, printer, port, images, sheet, dpi, dm=None, forms=None):
+        seen["forms"] = forms
+        return {"ok": True, "pages": len(images), "message": ""}
+
+    monkeypatch.setattr(gdi_print, "print_job", fake_print_job)
+    assert cli.main(["--photos", str(p), "--sheet", "3R", "--cell", "3R",
+                     "--dpi", "25.4", "--print", "--printer", "P"]) == 0
+    assert seen["forms"] == []
+    assert "已发送 1 页" in capsys.readouterr().out

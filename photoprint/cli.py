@@ -92,13 +92,22 @@ def main(argv=None):
         print(f"已输出等尺寸 PDF {args.pdf}（打印时请选“实际大小/100%”）")
     if args.do_print:
         from photoprint.win import api as win_api
+        from photoprint.win import forms as forms_mod
         from photoprint.win import gdi_print
 
         if not args.printer:
             print("--print 需要 --printer 指定打印机名", file=sys.stderr)
             return 2
-        res = gdi_print.print_job(win_api.RealWinApi(), args.printer, None,
-                                  pages, sheet, args.dpi)
+        api = win_api.RealWinApi()
+        # 打印前实测驱动表单（spec 2026-11-07）：让实际下单的纸张码与
+        # 物理校验目标都取实测值，而不是预设里按名字猜的尺寸。
+        # 探测只是增强：失败/不支持时退空表，直打行为与历史逐字一致。
+        try:
+            measured = forms_mod.measure(api, args.printer)
+        except Exception:
+            measured = []
+        res = gdi_print.print_job(api, args.printer, None,
+                                  pages, sheet, args.dpi, forms=measured)
         print(res["message"] or f"已发送 {res['pages']} 页")
         return 0 if res["ok"] else 1
     return 0
